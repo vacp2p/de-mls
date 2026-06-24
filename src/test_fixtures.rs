@@ -16,9 +16,8 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 
 use crate::{
-    ConsensusPlugin, ConsensusServiceFor, ElectionDecision, PeerScoringPlugin, ScoreOp,
-    ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin,
-    defaults::DefaultConsensusPlugin, mls_crypto::OpenMlsService,
+    ConsensusPlugin, ConsensusServiceFor, ElectionDecision, StewardList, StewardListConfig,
+    StewardListPlugin, defaults::DefaultConsensusPlugin, mls_crypto::OpenMlsService,
 };
 
 /// Build a `ConsensusServiceFor<DefaultConsensusPlugin>` paired with a
@@ -166,47 +165,6 @@ impl StewardListPlugin for StubStewardList {
         unreachable!()
     }
     fn reset_retry(&mut self) {
-        unreachable!()
-    }
-}
-
-/// Scoring plug-in that panics on every call. Tests that don't read
-/// scores hand this to the conversation so the unread scoring slot is
-/// inert.
-pub(crate) struct StubScoring;
-
-impl PeerScoringPlugin for StubScoring {
-    fn add_member(&mut self, _: &[u8]) -> bool {
-        unreachable!()
-    }
-    fn remove_member(&mut self, _: &[u8]) {
-        unreachable!()
-    }
-    fn apply_op(&mut self, _: &ScoreOp) -> bool {
-        unreachable!()
-    }
-    fn apply_snapshot(&mut self, _: &ScoreSnapshot) -> bool {
-        unreachable!()
-    }
-    fn snapshot(&self) -> ScoreSnapshot {
-        unreachable!()
-    }
-    fn score_for(&self, _: &[u8]) -> Option<i64> {
-        unreachable!()
-    }
-    fn members_below_threshold(&self) -> Vec<Vec<u8>> {
-        unreachable!()
-    }
-    fn all_members_with_scores(&self) -> Vec<(Vec<u8>, i64)> {
-        unreachable!()
-    }
-    fn threshold(&self) -> i64 {
-        unreachable!()
-    }
-    fn set_threshold(&mut self, _: i64) {
-        unreachable!()
-    }
-    fn default_score(&self) -> i64 {
         unreachable!()
     }
 }

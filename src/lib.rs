@@ -66,7 +66,7 @@ pub mod freeze;
 /// Conversation-event types produced for the integrator.
 pub mod events;
 
-/// [`ProcessResult`](process_result::ProcessResult) returned by inbound processing.
+/// [`ProcessResult`] returned by inbound processing.
 pub mod process_result;
 
 /// Proposal classification.

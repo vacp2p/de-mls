@@ -1,8 +1,3 @@
-//! App-side phase timer.
-//!
-//! Holds the wall-clock anchor (`started_at`). Phase-anchor durations live
-//! in [`crate::ConversationConfig`] (single source of truth);
-
 use std::time::{Duration, Instant};
 
 /// Wall-clock anchor for the active phase. Holds only the anchor

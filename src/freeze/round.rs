@@ -1,6 +1,6 @@
 //! Freeze-round public surface, per-round setup, and priority selection.
 //!
-//! Per-candidate apply lives in the sibling [`super::apply`] module.
+//! Per-candidate apply lives in the sibling [`crate::freeze::apply`] module.
 
 use std::error::Error as StdError;
 

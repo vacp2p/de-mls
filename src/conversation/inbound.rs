@@ -25,7 +25,7 @@ use prost::Message;
 use tracing::{error, info, warn};
 
 use crate::{
-    ConsensusPlugin, ConversationEvent, PeerScoringPlugin, ProcessResult, ProposalKind,
+    ConsensusPlugin, ConversationEvent, PeerScoreStorage, ProcessResult, ProposalKind,
     ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin,
     conversation::{ConversationQueues, member_set},
     freeze::{buffer_commit_candidate, compute_commit_hash},
@@ -172,7 +172,7 @@ pub enum DispatchOutcome {
 impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    Sc: PeerScoringPlugin,
+    Sc: PeerScoreStorage,
     St: StewardListPlugin,
 {
     /// Decrypt and dispatch an inbound conversation payload. Drops self-echoes.
@@ -228,7 +228,7 @@ where
     {
         match result {
             ProcessResult::AppMessage(msg) => {
-                self.emit_event(ConversationEvent::AppMessage(*msg));
+                self.emit_event(ConversationEvent::ConversationMessage(*msg));
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::Proposal(proposal) => {
@@ -378,7 +378,7 @@ where
         let members = mls.members().unwrap_or_default();
         let payload = mls.build_message(provider, signer, &msg)?;
         self.broadcast(payload);
-        self.sync_scoring_members(&members);
+        self.sync_scoring_members(&members)?;
         info!(conversation = %conversation_id, "joined conversation");
         Ok(())
     }
@@ -397,7 +397,7 @@ where
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
         let mls_members = self.mls().members().unwrap_or_default();
-        self.sync_scoring_members(&mls_members);
+        self.sync_scoring_members(&mls_members)?;
         self.prune_pending_updates_after_commit()?;
 
         // Transition to Working BEFORE steward checks (election needs Working
@@ -585,12 +585,9 @@ where
                 .map(|ps| (ps.member_id.clone(), ps.score))
                 .collect(),
         };
-        // The ConversationSync sender (an existing steward) holds the same
-        // scores and is the canonical actor for any below-threshold
-        // member in this snapshot — they'll submit
-        // `SCORE_BELOW_THRESHOLD` from their own event chain. Drop our
-        // result to avoid duplicate proposals from joiners.
-        let _ = self.services.scoring.apply_snapshot(&snapshot);
+        // Record the bootstrap scores; the steward that sent the sync owns
+        // any `ViolationType::SCORE_BELOW_THRESHOLD` removal, so the joiner doesn't sweep.
+        self.services.scoring.apply_snapshot(&snapshot)?;
         self.config.liveness_criteria_yes = sync.liveness_criteria_yes;
         self.config.pending_update_max_epochs = sync.pending_update_max_epochs;
         if let Some(timing) = &sync.timing {

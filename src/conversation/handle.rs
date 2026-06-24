@@ -23,8 +23,9 @@ use crate::{
     BufferedCommitCandidate, ConsensusPlugin, ConsensusServiceFor, ConversationConfig,
     ConversationError, ConversationEvent, ConversationQueues, ConversationState,
     ConversationStateMachine, FreezeBufferOutcome, FreezeFinalizeResult, OperatingMode, Outbound,
-    PeerScoringPlugin, PhaseTimer, ProcessResult, ProposalKind, StewardListPlugin,
-    compute_commit_hash, decode_inbound_payload, finalize_freeze_round, member_set,
+    PeerScoreStorage, PeerScoringService, PhaseTimer, ProcessResult, ProposalKind,
+    StewardListPlugin, compute_commit_hash, decode_inbound_payload, finalize_freeze_round,
+    member_set,
     mls_crypto::{
         CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsService,
         OpenMlsService,
@@ -64,13 +65,13 @@ pub struct AutoVoteEntry {
 /// grouped so the handle holds them as one unit. Construction builds the MLS
 /// service, moves the plug-in instances in, and subscribes the consensus
 /// receiver here.
-pub(crate) struct ConversationServices<C: ConsensusPlugin, Sc, St> {
+pub(crate) struct ConversationServices<C: ConsensusPlugin, Sc: PeerScoreStorage, St> {
     /// Per-conversation MLS service. Present for the conversation's whole
     /// lifetime: the creator seeds it at [`Conversation::create`], the joiner
     /// at [`Conversation::join`].
     pub(crate) mls: OpenMlsService,
-    /// Per-conversation peer-score plug-in.
-    pub(crate) scoring: Sc,
+    /// Per-conversation peer-score tracker.
+    pub(crate) scoring: PeerScoringService<Sc>,
     /// Per-conversation steward-list plug-in.
     pub(crate) steward_list: St,
     /// Per-conversation consensus service. Owns this conversation's scope
@@ -127,7 +128,7 @@ impl Timing {
     }
 }
 
-pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoringPlugin, St: StewardListPlugin> {
+pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoreStorage, St: StewardListPlugin> {
     /// Conversation name. Identifies this conversation in the integrator's
     /// registry and is used to construct scope keys for consensus operations.
     /// Read via [`Conversation::conversation_id`].
@@ -164,7 +165,7 @@ pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoringPlugin, St: StewardLi
 impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    Sc: PeerScoringPlugin,
+    Sc: PeerScoreStorage,
     St: StewardListPlugin,
 {
     /// Build a fresh conversation around an already-assembled `services`
@@ -689,12 +690,15 @@ mod tests {
     use super::*;
     use crate::ConversationQueues;
     use crate::defaults::DefaultConsensusPlugin;
+    use crate::defaults::InMemoryPeerScoreStorage;
     use crate::test_fixtures::{
-        StubScoring, StubStewardList, TestMls, TestProvider, make_creator_mls,
-        make_test_consensus_service,
+        StubStewardList, TestMls, TestProvider, make_creator_mls, make_test_consensus_service,
     };
+    use crate::{PeerScoringService, ScoringConfig};
+    use std::collections::HashMap;
 
-    type TestConversation = Conversation<DefaultConsensusPlugin, StubScoring, StubStewardList>;
+    type TestConversation =
+        Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, StubStewardList>;
 
     /// Build a conversation with a real creator-side MLS service and the given
     /// steward stub, returning it alongside the provider that backs the MLS
@@ -719,7 +723,11 @@ mod tests {
             ConversationQueues::new("g"),
             ConversationServices {
                 mls,
-                scoring: StubScoring,
+                scoring: PeerScoringService::new(
+                    InMemoryPeerScoreStorage::default(),
+                    HashMap::new(),
+                    ScoringConfig::default(),
+                ),
                 steward_list,
                 consensus,
                 consensus_rx,

@@ -15,7 +15,9 @@ use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use openmls::credentials::CredentialWithKey;
 use openmls_basic_credential::SignatureKeyPair;
 
-use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList};
+use de_mls::defaults::{
+    DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList, InMemoryPeerScoreStorage,
+};
 use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::{
     ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ScoringConfig, StewardListConfig,
@@ -29,7 +31,7 @@ use common::{
 
 /// Per-conversation stack the standalone tests build.
 type TestConversation =
-    Conversation<DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList>;
+    Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, DefaultStewardList>;
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";

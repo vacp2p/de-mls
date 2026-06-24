@@ -14,7 +14,7 @@ The library's product is a single per-conversation handle — `Conversation` —
 modeled on OpenMLS's `MlsGroup`. It owns every protocol decision (MLS encryption,
 proposal voting, steward commits, freeze timing); transport and identity stay on
 your side of the boundary. It runs synchronously and is generic over its
-consensus, scoring, and steward plug-ins.
+consensus and steward plug-ins and its peer-score storage backend.
 
 > Looking for a runnable app? An example integration — a gateway, a Waku
 > delivery service, and a Dioxus desktop client wired onto this library — lives
@@ -35,10 +35,12 @@ state machine.
 
 ```rust,ignore
 use de_mls::Conversation;
-use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList};
+use de_mls::defaults::{DefaultConsensusPlugin, DefaultStewardList, InMemoryPeerScoreStorage};
 
+// The middle generic is the peer-score *storage* backend; `scoring` is a
+// `PeerScoringService` built over it (see `de_mls::defaults::DefaultPeerScoring`).
 // Create a conversation you steward, or join one from a welcome:
-let mut convo: Conversation<DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList> =
+let mut convo: Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, DefaultStewardList> =
     Conversation::create(id, &provider, credential, suite, &signer,
                          scoring, steward, consensus, app_id, config, member_id)?;
 
@@ -63,6 +65,23 @@ in-memory peer-score storage, the deterministic steward list) live in
 A complete, runnable construction — creator and joiner built straight from
 direct arguments — is in
 [`tests/standalone_construction.rs`](tests/standalone_construction.rs).
+
+## Peer scoring
+
+de-mls owns the peer-scoring protocol: it turns observed events into score
+deltas, evaluates scores against the removal threshold, and drives
+`SCORE_BELOW_THRESHOLD` removals through consensus. You supply only two
+things — a `PeerScoreStorage` backend (the per-conversation member→score
+table) and a `ScoringConfig` (per-event deltas, default score, threshold) —
+which are combined into the library-owned `PeerScoringService`. There is no
+scoring-behavior trait to override; score updates are a protocol decision, so
+the library keeps a single implementation.
+
+`de_mls::defaults::InMemoryPeerScoreStorage` is a ready in-memory backend; a
+durable integrator can back the table with sqlite or a key-value store.
+Storage methods are fallible (the trait carries an associated `Error` type),
+so a durable backend surfaces I/O failures rather than swallowing a score
+write.
 
 ## Build & test
 

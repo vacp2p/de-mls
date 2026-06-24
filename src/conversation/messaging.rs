@@ -13,7 +13,7 @@ use tracing::info;
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
-    PeerScoringPlugin, StewardListPlugin,
+    PeerScoreStorage, StewardListPlugin,
     mls_crypto::{KeyPackageBytes, MlsService, key_package_bytes_from_tls},
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, ConversationUpdateRequest, MemberInvite,
@@ -38,7 +38,7 @@ pub struct Outbound {
 impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    Sc: PeerScoringPlugin,
+    Sc: PeerScoreStorage,
     St: StewardListPlugin,
 {
     /// Buffer a chat message for broadcast. The conversation never sends — the

@@ -14,7 +14,7 @@ use tracing::info;
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
-    PeerScoringPlugin, ProposalKind, StewardListPlugin, SyncConsensusReceiver,
+    PeerScoreStorage, ProposalKind, StewardListPlugin, SyncConsensusReceiver,
     consensus::bridge::{ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal},
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
@@ -39,7 +39,7 @@ pub enum CreatorVote {
 impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    Sc: PeerScoringPlugin,
+    Sc: PeerScoreStorage,
     St: StewardListPlugin,
 {
     // ── Public API ───────────────────────────────────────────────────

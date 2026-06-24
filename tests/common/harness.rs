@@ -30,7 +30,9 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use prost::Message;
 
-use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList};
+use de_mls::defaults::{
+    DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList, InMemoryPeerScoreStorage,
+};
 use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
@@ -51,7 +53,7 @@ use crate::common::{
 
 /// Per-conversation MLS service stack the harness runs.
 pub type TestConversation =
-    Conversation<DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList>;
+    Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, DefaultStewardList>;
 
 const MAX_SESSIONS_PER_SCOPE: usize = 10;
 
@@ -271,7 +273,7 @@ impl Member {
     pub fn member_scores(&self) -> Vec<(Vec<u8>, i64)> {
         self.convo
             .as_ref()
-            .map(|c| c.member_scores())
+            .map(|c| c.member_scores().expect("member_scores"))
             .unwrap_or_default()
     }
 
@@ -349,7 +351,7 @@ impl Member {
         self.events
             .iter()
             .filter_map(|e| match e {
-                ConversationEvent::AppMessage(AppMessage {
+                ConversationEvent::ConversationMessage(AppMessage {
                     payload: Some(app_message::Payload::ConversationMessage(cm)),
                 }) => Some(ReceivedChat {
                     body: cm.message.clone(),

@@ -11,7 +11,7 @@ use tracing::{error, info};
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
-    ElectionDecision, PeerScoringPlugin, StewardListPlugin, member_set,
+    ElectionDecision, PeerScoreStorage, StewardListPlugin, member_set,
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
@@ -35,7 +35,7 @@ pub(crate) enum StewardListReconcile {
 impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    Sc: PeerScoringPlugin,
+    Sc: PeerScoreStorage,
     St: StewardListPlugin,
 {
     // ── Public API ───────────────────────────────────────────────────
@@ -43,25 +43,25 @@ where
     /// Add any MLS members not yet tracked in scoring, and drop scored
     /// entries for identities no longer in MLS. Diffing is delegated to
     /// [`scoring_member_diff`]; this method only applies the diff.
-    pub(crate) fn sync_scoring_members(&mut self, mls_members: &[Vec<u8>]) {
+    pub(crate) fn sync_scoring_members(
+        &mut self,
+        mls_members: &[Vec<u8>],
+    ) -> Result<(), ConversationError> {
         let scored: Vec<Vec<u8>> = self
             .services
             .scoring
-            .all_members_with_scores()
+            .all_members_with_scores()?
             .into_iter()
             .map(|(id, _)| id)
             .collect();
         let diff = scoring_member_diff(&scored, mls_members);
         for member_id in &diff.to_add {
-            // Under the standard config (`default > threshold`) this
-            // returns false; an exotic config could surface a fresh member
-            // as below-threshold, but the score-removal chain doesn't fire
-            // on membership-sync ticks today.
-            let _ = self.services.scoring.add_member(member_id);
+            self.services.scoring.add_member(member_id)?;
         }
         for member_id in &diff.to_remove {
-            self.services.scoring.remove_member(member_id);
+            self.services.scoring.remove_member(member_id)?;
         }
+        Ok(())
     }
 
     /// Reconcile the list after an epoch advance, opening a voted election when
@@ -315,7 +315,7 @@ where
         let scores: Vec<PeerScore> = self
             .services
             .scoring
-            .snapshot()
+            .snapshot()?
             .diverged
             .into_iter()
             .map(|(id, score)| PeerScore {
@@ -394,25 +394,24 @@ where
             //   - `has_approved_removal` — `RemoveMember(target)` is
             //     already queued in `approved_proposals` waiting for
             //     the next commit. Without this gate, a just-resolved
-            //     SCORE_BELOW_THRESHOLD ECP (which clears
+            //     `ViolationType::SCORE_BELOW_THRESHOLD`ECP (which clears
             //     `pending_removal_targets` on resolve, but leaves the
             //     target in `approved_proposals` with their score still
             //     ≤ threshold) would re-fire a duplicate ECP for the
             //     same target before the RemoveMember commits.
             let self_id: &[u8] = &self_id_arc;
-            let to_remove: Vec<(Vec<u8>, i64)> = self
-                .services
-                .scoring
-                .members_below_threshold()
-                .into_iter()
-                .filter(|id| id.as_slice() != self_id)
-                .filter(|id| !self.queues.has_pending_removal(id))
-                .filter(|id| !self.queues.has_approved_removal(id))
-                .filter_map(|id| {
-                    let score = self.services.scoring.score_for(&id)?;
-                    Some((id, score))
-                })
-                .collect();
+            let mut to_remove: Vec<(Vec<u8>, i64)> = Vec::new();
+            for id in self.services.scoring.members_below_threshold()? {
+                if id.as_slice() == self_id
+                    || self.queues.has_pending_removal(&id)
+                    || self.queues.has_approved_removal(&id)
+                {
+                    continue;
+                }
+                if let Some(score) = self.services.scoring.score_for(&id)? {
+                    to_remove.push((id, score));
+                }
+            }
             for (id, _) in &to_remove {
                 self.queues.insert_pending_removal(id.clone());
             }
@@ -431,7 +430,7 @@ where
                 score = current_score,
                 "initiating SCORE_BELOW_THRESHOLD removal"
             );
-            // SCORE_BELOW_THRESHOLD is self-executing: threshold crossed ⇒
+            // `ViolationType::SCORE_BELOW_THRESHOLD`is self-executing: threshold crossed ⇒
             // member must be removed. The steward's vote is YES by
             // protocol, so we bundle it at submit and skip the vote request.
             if let Err(e) = self.initiate_proposal(provider, request, CreatorVote::Yes, signer) {

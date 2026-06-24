@@ -2,14 +2,14 @@
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, MemberRole,
-    PeerScoringPlugin, StewardListPlugin, mls_crypto::MlsService,
+    PeerScoreStorage, StewardListPlugin, mls_crypto::MlsService,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
 impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    Sc: PeerScoringPlugin,
+    Sc: PeerScoreStorage,
     St: StewardListPlugin,
 {
     /// Current state of the conversation's state machine.
@@ -90,11 +90,11 @@ where
         Ok(self.mls().members()?)
     }
 
-    pub fn member_scores(&self) -> Vec<(Vec<u8>, i64)> {
+    pub fn member_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, ConversationError> {
         self.services.scoring.all_members_with_scores()
     }
 
-    pub fn member_score(&self, member_id: &[u8]) -> Option<i64> {
+    pub fn member_score(&self, member_id: &[u8]) -> Result<Option<i64>, ConversationError> {
         self.services.scoring.score_for(member_id)
     }
 

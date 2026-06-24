@@ -8,10 +8,6 @@
 //! - [`crate::defaults::DefaultPeerScoring`],
 //!   [`crate::defaults::DefaultStewardList`] — type aliases for the reference
 //!   peer-scoring and steward-list plug-ins.
-//!
-//! The reference MLS engine (the OpenMLS provider, credentials, key-package
-//! generation, and the plug-in factory that bundles them) lives in the
-//! integrator, not here — the protocol crate names no concrete MLS backend.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -30,34 +26,30 @@ use crate::{
 // In-memory peer-score storage
 // ═══════════════════════════════════════════════════════════════════
 
-/// `HashMap`-backed [`PeerScoreStorage`] for tests and simple deployments.
-/// Production integrators supply a durable backend.
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryPeerScoreStorage {
     scores: HashMap<Vec<u8>, i64>,
 }
 
-impl InMemoryPeerScoreStorage {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
 impl PeerScoreStorage for InMemoryPeerScoreStorage {
-    fn get(&self, member_id: &[u8]) -> Option<i64> {
-        self.scores.get(member_id).copied()
+    type Error = std::convert::Infallible;
+
+    fn get(&self, member_id: &[u8]) -> Result<Option<i64>, Self::Error> {
+        Ok(self.scores.get(member_id).copied())
     }
 
-    fn set(&mut self, member_id: &[u8], score: i64) {
+    fn set(&mut self, member_id: &[u8], score: i64) -> Result<(), Self::Error> {
         self.scores.insert(member_id.to_vec(), score);
+        Ok(())
     }
 
-    fn remove(&mut self, member_id: &[u8]) {
+    fn remove(&mut self, member_id: &[u8]) -> Result<(), Self::Error> {
         self.scores.remove(member_id);
+        Ok(())
     }
 
-    fn all_scores(&self) -> Vec<(Vec<u8>, i64)> {
-        self.scores.iter().map(|(k, v)| (k.clone(), *v)).collect()
+    fn all_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, Self::Error> {
+        Ok(self.scores.iter().map(|(k, v)| (k.clone(), *v)).collect())
     }
 }
 
@@ -65,11 +57,10 @@ impl PeerScoreStorage for InMemoryPeerScoreStorage {
 // Sync consensus event bus
 // ═══════════════════════════════════════════════════════════════════
 
-/// Single-consumer FIFO event bus for [`ConsensusEvent`]s. The default
-/// `EventBus` for [`DefaultConsensusPlugin`].
+/// Single-consumer FIFO event bus for [`ConsensusEvent`]s.
 ///
 /// `publish` appends to the shared queue; `subscribe` hands back a
-/// receiver that pops from it. Clones share the queue.
+/// receiver that pops from it.
 #[derive(Clone)]
 pub struct SyncEventBus<Scope: ConsensusScope> {
     queue: Arc<Mutex<VecDeque<(Scope, ConsensusEvent)>>>,
@@ -115,9 +106,6 @@ impl<Scope: ConsensusScope> SyncConsensusReceiver<Scope> for SyncEventReceiver<S
 // Default consensus plug-in
 // ═══════════════════════════════════════════════════════════════════
 
-/// In-memory consensus backend for tests and simple deployments.
-///
-/// Implements [`crate::ConsensusPlugin`].
 pub struct DefaultConsensusPlugin;
 
 impl ConsensusPlugin for DefaultConsensusPlugin {
@@ -153,15 +141,16 @@ mod tests {
 
     #[test]
     fn in_memory_storage_round_trip() {
-        let mut storage = InMemoryPeerScoreStorage::new();
-        assert_eq!(storage.get(b"alice"), None);
-        storage.set(b"alice", 42);
-        assert_eq!(storage.get(b"alice"), Some(42));
-        storage.set(b"bob", -3);
-        let all = storage.all_scores();
+        // `InMemoryPeerScoreStorage::Error` is `Infallible`, so unwrap.
+        let mut storage = InMemoryPeerScoreStorage::default();
+        assert_eq!(storage.get(b"alice").unwrap(), None);
+        storage.set(b"alice", 42).unwrap();
+        assert_eq!(storage.get(b"alice").unwrap(), Some(42));
+        storage.set(b"bob", -3).unwrap();
+        let all = storage.all_scores().unwrap();
         assert_eq!(all.len(), 2);
-        storage.remove(b"alice");
-        assert_eq!(storage.get(b"alice"), None);
-        assert_eq!(storage.all_scores().len(), 1);
+        storage.remove(b"alice").unwrap();
+        assert_eq!(storage.get(b"alice").unwrap(), None);
+        assert_eq!(storage.all_scores().unwrap().len(), 1);
     }
 }

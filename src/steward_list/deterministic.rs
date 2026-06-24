@@ -1,4 +1,4 @@
-//! [`DeterministicStewardList`] — SHA256-sorted [`super::StewardListPlugin`] impl.
+//! [`DeterministicStewardList`] — SHA256-sorted [`StewardListPlugin`] impl.
 
 use crate::{
     DEFAULT_MAX_RETRIES, ElectionDecision, StewardList, StewardListConfig, StewardListPlugin,

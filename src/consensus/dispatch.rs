@@ -32,7 +32,7 @@ pub enum ConsensusApplyResult {
     /// [`crate::OperatingMode`] to `Recovery` (any-member commit) and
     /// bypasses the inactivity timer. Cleared on the next accepted election.
     RecoveryModeOpened,
-    /// `SCORE_BELOW_THRESHOLD` ECP accepted. The urgent-commit target is
+    /// `ViolationType::SCORE_BELOW_THRESHOLD` ECP accepted. The urgent-commit target is
     /// already set on the conversation; caller bypasses the inactivity
     /// timer so the urgent commit fires now and refreshes the steward
     /// list if `target` was on it.
@@ -235,7 +235,7 @@ fn extract_election_proposal(req: &ConversationUpdateRequest) -> Option<&Steward
     }
 }
 
-/// Check whether evidence is a `SCORE_BELOW_THRESHOLD` violation.
+/// Check whether evidence is a `ViolationType::SCORE_BELOW_THRESHOLD` violation.
 fn is_score_below_threshold(evidence: &ViolationEvidence) -> bool {
     ViolationType::try_from(evidence.violation_type) == Ok(ViolationType::ScoreBelowThreshold)
 }
