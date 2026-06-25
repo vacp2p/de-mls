@@ -10,7 +10,7 @@ use tracing::info;
 
 use crate::{
     ConversationError, ConversationQueues, FreezeBufferOutcome, NoopReason, ProcessResult, ScoreOp,
-    StewardListPlugin,
+    StewardListService,
     conversation::BufferedCommitCandidate,
     freeze::apply::apply_in_priority_order,
     mls_crypto::{MlsMessageKind, MlsService},
@@ -177,11 +177,11 @@ pub fn replay_early_candidates<M: MlsService>(
 
 /// Snapshot round state, rank the buffered candidates by RFC priority, and
 /// apply best-first — falling back to the next when MLS staging rejects one.
-pub fn finalize_freeze_round<Pr, M: MlsService, St: StewardListPlugin>(
+pub fn finalize_freeze_round<Pr, M: MlsService>(
     provider: &Pr,
     conversation: &mut ConversationQueues,
     mls: &mut M,
-    steward: &St,
+    steward: &StewardListService,
     in_recovery: bool,
     allow_subset_candidates: bool,
     self_member_id: &[u8],
@@ -261,10 +261,10 @@ pub(super) struct RoundContext {
 }
 
 impl RoundContext {
-    fn snapshot<M: MlsService, St: StewardListPlugin>(
+    fn snapshot<M: MlsService>(
         conversation: &ConversationQueues,
         mls: &mut M,
-        steward: &St,
+        steward: &StewardListService,
         current_epoch: u64,
         in_recovery: bool,
         self_member_id: &[u8],

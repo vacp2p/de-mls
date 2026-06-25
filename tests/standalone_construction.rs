@@ -15,9 +15,7 @@ use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use openmls::credentials::CredentialWithKey;
 use openmls_basic_credential::SignatureKeyPair;
 
-use de_mls::defaults::{
-    DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList, InMemoryPeerScoreStorage,
-};
+use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
 use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::{
     ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ScoringConfig, StewardListConfig,
@@ -25,13 +23,12 @@ use de_mls::{
 use de_mls::{Conversation, ConversationState};
 
 use common::{
-    TEST_SUITE, TestProvider, make_scoring, make_steward, mint_key_package, test_credential,
+    TEST_SUITE, TestProvider, make_scoring, mint_key_package, test_credential,
     wallet::WalletMemberId,
 };
 
 /// Per-conversation stack the standalone tests build.
-type TestConversation =
-    Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, DefaultStewardList>;
+type TestConversation = Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage>;
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -73,8 +70,8 @@ impl Integrator {
         make_scoring(&ScoringConfig::default())
     }
 
-    fn steward(&self) -> DefaultStewardList {
-        make_steward(StewardListConfig::default())
+    fn steward(&self) -> StewardListConfig {
+        StewardListConfig::default()
     }
 
     /// Mint a single-use key package into this integrator's reused provider,

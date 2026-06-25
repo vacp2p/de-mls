@@ -9,12 +9,9 @@
 pub mod harness;
 pub mod wallet;
 
-use de_mls::defaults::{DefaultPeerScoring, DefaultStewardList, InMemoryPeerScoreStorage};
+use de_mls::defaults::{DefaultPeerScoring, InMemoryPeerScoreStorage};
 use de_mls::mls_crypto::KeyPackageBytes;
-use de_mls::{
-    DeterministicStewardList, PeerScoringService, ScoringConfig, StewardListConfig,
-    default_score_deltas,
-};
+use de_mls::{PeerScoringService, ScoringConfig, default_score_deltas};
 use openmls::credentials::{BasicCredential, CredentialWithKey};
 use openmls::key_packages::KeyPackage;
 use openmls::prelude::Ciphersuite;
@@ -65,11 +62,4 @@ pub fn make_scoring(config: &ScoringConfig) -> DefaultPeerScoring {
         default_score_deltas(),
         config.clone(),
     )
-}
-
-/// Build a fresh (empty) steward-list plug-in. The library stamps the
-/// conversation-id sort salt when it builds the conversation, so the fixture
-/// supplies none.
-pub fn make_steward(config: StewardListConfig) -> DefaultStewardList {
-    DeterministicStewardList::empty(config)
 }

@@ -16,8 +16,8 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 
 use crate::{
-    ConsensusPlugin, ConsensusServiceFor, ElectionDecision, StewardList, StewardListConfig,
-    StewardListPlugin, defaults::DefaultConsensusPlugin, mls_crypto::OpenMlsService,
+    ConsensusPlugin, ConsensusServiceFor, StewardListConfig, StewardListService,
+    defaults::DefaultConsensusPlugin, mls_crypto::OpenMlsService,
 };
 
 /// Build a `ConsensusServiceFor<DefaultConsensusPlugin>` paired with a
@@ -70,101 +70,16 @@ pub(crate) fn make_creator_mls(member_id: &[u8]) -> (TestMls, TestProvider, Sign
     (mls, provider, signer)
 }
 
-/// Steward-list plug-in with controllable `is_steward`. Other methods panic.
-pub(crate) struct StubStewardList {
-    is_steward: bool,
-    config: StewardListConfig,
+/// Steward roster where the local member is NOT a steward (no list installed).
+pub(crate) fn steward_service_member() -> StewardListService {
+    StewardListService::empty(StewardListConfig::new(1, 5).unwrap())
 }
 
-impl StubStewardList {
-    pub(crate) fn member() -> Self {
-        Self {
-            is_steward: false,
-            config: StewardListConfig::new(1, 5).unwrap(),
-        }
-    }
-    pub(crate) fn steward() -> Self {
-        Self {
-            is_steward: true,
-            config: StewardListConfig::new(1, 5).unwrap(),
-        }
-    }
-}
-
-impl StewardListPlugin for StubStewardList {
-    fn config(&self) -> &StewardListConfig {
-        &self.config
-    }
-    fn set_config(&mut self, _: StewardListConfig) {
-        unreachable!()
-    }
-    fn current_list(&self) -> Option<&StewardList> {
-        None
-    }
-    fn election_epoch(&self) -> Option<u64> {
-        None
-    }
-    fn next_retry_round(&self) -> u32 {
-        0
-    }
-    fn max_retries(&self) -> u32 {
-        0
-    }
-    fn set_max_retries(&mut self, _: u32) {}
-    fn is_steward(&self, _: &[u8]) -> bool {
-        self.is_steward
-    }
-    fn is_exhausted(&self, _: u64) -> bool {
-        unreachable!()
-    }
-    fn epoch_steward<F: Fn(&[u8]) -> bool>(&self, _: u64, _: F) -> Option<&[u8]> {
-        unreachable!()
-    }
-    fn epoch_and_backup<F: Fn(&[u8]) -> bool>(
-        &self,
-        _: u64,
-        _: F,
-    ) -> (Option<&[u8]>, Option<&[u8]>) {
-        unreachable!()
-    }
-    fn steward_members<F: Fn(&[u8]) -> bool>(&self, _: F) -> Vec<Vec<u8>> {
-        unreachable!()
-    }
-    fn election_proposer<F: Fn(&[u8]) -> bool>(&self, _: F) -> Option<&[u8]> {
-        unreachable!()
-    }
-    fn install_list(
-        &mut self,
-        _: u64,
-        _: &[Vec<u8>],
-        _: usize,
-        _: u32,
-    ) -> Result<(), crate::ConversationError> {
-        unreachable!()
-    }
-    fn validate_proposed(
-        &self,
-        _: &[Vec<u8>],
-        _: u64,
-        _: &[Vec<u8>],
-        _: u32,
-    ) -> Result<bool, crate::ConversationError> {
-        unreachable!()
-    }
-    fn propose_election<F: Fn(&[u8]) -> bool>(
-        &self,
-        _: u64,
-        _: &[Vec<u8>],
-        _: &[u8],
-        _: F,
-        _: bool,
-    ) -> Result<ElectionDecision, crate::ConversationError> {
-        unreachable!()
-    }
-    fn bump_retry(&mut self) {
-        unreachable!()
-    }
-    fn reset_retry(&mut self) {
-        unreachable!()
-    }
+/// Steward roster where `member_id` IS the sole steward.
+pub(crate) fn steward_service_steward(member_id: &[u8]) -> StewardListService {
+    let mut service = StewardListService::empty(StewardListConfig::new(1, 5).unwrap());
+    service
+        .install_list(0, &[member_id.to_vec()], 1, 0)
+        .expect("install single-member steward list");
+    service
 }

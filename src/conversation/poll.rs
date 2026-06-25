@@ -19,7 +19,7 @@ use tracing::{error, info, warn};
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
     DispatchOutcome, FreezeFinalizeResult, FreezeOutcome, PeerScoreStorage, ScoreEvent, ScoreOp,
-    StewardListPlugin, mls_crypto::MlsService, protos::de_mls::messages::v1::AppMessage,
+    mls_crypto::MlsService, protos::de_mls::messages::v1::AppMessage,
 };
 
 /// Summary returned by [`Conversation::poll`] after one polling pass.
@@ -34,11 +34,10 @@ pub struct PollOutcome {
     pub leave_requested: bool,
 }
 
-impl<C, Sc, St> Conversation<C, Sc, St>
+impl<C, Sc> Conversation<C, Sc>
 where
     C: ConsensusPlugin,
     Sc: PeerScoreStorage,
-    St: StewardListPlugin,
 {
     /// Drive one polling cycle: tick consensus deadlines, advance freeze
     /// state, and check steward inactivity.
@@ -361,7 +360,7 @@ where
         // Recovery uses the shorter retry inactivity window so we don't
         // burn another full epoch waiting for a steward to commit.
         let in_recovery =
-            self.is_in_recovery_mode() || self.services.steward_list.next_retry_round() > 0;
+            self.is_in_recovery_mode() || self.services.steward_list.next_election_round() > 0;
         let inactivity = if in_recovery {
             self.config.recovery_inactivity_duration
         } else if self.is_epoch_steward()? {

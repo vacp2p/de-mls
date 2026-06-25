@@ -11,7 +11,7 @@ use tracing::{error, info};
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
-    ElectionDecision, PeerScoreStorage, StewardListPlugin, member_set,
+    ElectionDecision, ElectionSkip, PeerScoreStorage, member_set,
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
@@ -32,11 +32,10 @@ pub(crate) enum StewardListReconcile {
     NeedsElection,
 }
 
-impl<C, Sc, St> Conversation<C, Sc, St>
+impl<C, Sc> Conversation<C, Sc>
 where
     C: ConsensusPlugin,
     Sc: PeerScoreStorage,
-    St: StewardListPlugin,
 {
     // ── Public API ───────────────────────────────────────────────────
 
@@ -501,11 +500,11 @@ where
                 eligible,
                 recovery,
             )? {
-                ElectionDecision::Skip(reason) => {
-                    if matches!(reason, "no eligible candidates after filter") {
+                ElectionDecision::Skip(skip) => {
+                    if skip == ElectionSkip::NoEligibleCandidates {
                         info!(
                             conversation = %self.conversation_id,
-                            "skipping election: {reason}"
+                            "skipping election: {skip}"
                         );
                     }
                     return Ok(());

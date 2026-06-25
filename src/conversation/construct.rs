@@ -20,15 +20,14 @@ use hashgraph_like_consensus::events::ConsensusEventBus;
 use crate::{
     ConsensusPlugin, ConsensusServiceFor, Conversation, ConversationConfig, ConversationError,
     ConversationEvent, ConversationQueues, ConversationServices, ConversationStateMachine,
-    PeerScoreStorage, PeerScoringService, StewardListPlugin,
+    PeerScoreStorage, PeerScoringService, StewardListConfig, StewardListService,
     mls_crypto::{MlsService, OpenMlsService},
 };
 
-impl<C, Sc, St> Conversation<C, Sc, St>
+impl<C, Sc> Conversation<C, Sc>
 where
     C: ConsensusPlugin,
     Sc: PeerScoreStorage,
-    St: StewardListPlugin,
 {
     /// Create a brand-new conversation we steward. Starts in `Working` with the
     /// local member installed as sole steward at epoch 0. The library seeds a
@@ -43,7 +42,7 @@ where
         ciphersuite: Ciphersuite,
         signer: &impl Signer,
         scoring: PeerScoringService<Sc>,
-        steward: St,
+        steward_config: StewardListConfig,
         consensus: ConsensusServiceFor<C>,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
@@ -64,7 +63,7 @@ where
             conversation_id,
             mls,
             scoring,
-            steward,
+            steward_config,
             consensus,
             app_id,
             config,
@@ -90,7 +89,7 @@ where
         welcome_bytes: &[u8],
         conversation_sync_bytes: &[u8],
         scoring: PeerScoringService<Sc>,
-        steward: St,
+        steward_config: StewardListConfig,
         consensus: ConsensusServiceFor<C>,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
@@ -109,7 +108,7 @@ where
             &conversation_id,
             mls,
             scoring,
-            steward,
+            steward_config,
             consensus,
             app_id,
             config,
@@ -132,7 +131,7 @@ where
         conversation_id: &str,
         mls: OpenMlsService,
         mut scoring: PeerScoringService<Sc>,
-        mut steward_list: St,
+        steward_config: StewardListConfig,
         consensus: ConsensusServiceFor<C>,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
@@ -143,12 +142,13 @@ where
         let queues = ConversationQueues::new(conversation_id);
 
         // The conversation id is the deterministic-sort salt every member must
-        // share; the library owns it (the integrator hands in a seedless
-        // plug-in) so creator and joiner agree on every elected list.
+        // share; the library owns it so creator and joiner agree on every
+        // elected list.
+        let mut steward_list = StewardListService::empty(steward_config);
         steward_list.set_conversation_id(conversation_id.as_bytes());
         steward_list.set_max_retries(config.max_reelection_attempts);
         // Creator path: bootstrap the list with self as sole steward at
-        // epoch 0. Joiner path leaves the plug-in empty until `ConversationSync`.
+        // epoch 0. Joiner path leaves the roster empty until `ConversationSync`.
         if is_creation {
             steward_list.install_list(0, std::slice::from_ref(&self_member_id_bytes), 1, 0)?;
             scoring.add_member(&self_member_id_bytes)?;
