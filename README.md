@@ -42,16 +42,17 @@ use de_mls::defaults::{DefaultConsensusPlugin, InMemoryPeerScoreStorage};
 // *storage* backend. `consensus` is a `ConsensusPlugin` instance you hold and
 // pass by reference; `scoring` is a `PeerScoringService` built over the storage
 // (see `de_mls::defaults::DefaultPeerScoring`). The steward roster is
-// library-owned — you pass only a `StewardListConfig`. Create a conversation
-// you steward, or join one from a welcome:
+// library-owned — you set its size bounds on `config` (a `ConversationConfig`).
+// Create a conversation you steward, or join one from a welcome:
 let mut convo: Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage> =
-    Conversation::create(id, &provider, credential, suite, &signer,
-                         scoring, steward_config, &consensus, app_id, config, member_id)?;
+    Conversation::create(id, member_id, &provider, credential, suite, &signer,
+                         &consensus, scoring, app_id, config)?;
 
-// let joined = Conversation::join(&provider, welcome_bytes, sync_bytes, …, &signer)?;  // Ok(None) = not for us
+// let joined = Conversation::join(member_id, &provider, &signer,
+//                                 welcome_bytes, sync_bytes, …)?;  // Ok(None) = not for us
 
 // Drive it once per wakeup cycle, then drain its products:
-convo.process_inbound(&provider, &sender, &payload, &signer)?; // feed inbound bytes
+convo.process_inbound(&provider, &signer, &sender, &payload)?; // feed inbound bytes
 convo.poll(&provider, &signer);                                // tick timers / freeze / commits
 for event in convo.drain_events()   { /* AppMessage, WelcomeReady, PhaseChange, … */ }
 for out   in convo.drain_outbound() { /* publish out.payload on your transport */ }
@@ -64,8 +65,8 @@ reports its next deadline via `next_wakeup_in()`, advancing when you call
 
 Default implementations (consensus over `hashgraph-like-consensus` and
 in-memory peer-score storage) live in `de_mls::defaults` — adopt them
-wholesale or swap either. The steward list is library-owned; you configure it
-with a `StewardListConfig`.
+wholesale or swap either. The steward list is library-owned; you set its size
+bounds via `ConversationConfig`'s `steward_list` field.
 
 A complete, runnable construction — creator and joiner built straight from
 direct arguments — is in
@@ -110,10 +111,10 @@ write.
 ## Steward list
 
 Who may commit each epoch — the steward roster and its epoch/backup rotation —
-is fully library-owned. You pass only a `StewardListConfig` (the `sn_min` /
-`sn_max` size bounds) at construction; de-mls generates the list, validates
-election proposals, runs the election through consensus, and rotates the epoch
-steward.
+is fully library-owned. You set only its size bounds (`sn_min` / `sn_max`, the
+`steward_list` field on `ConversationConfig`); de-mls generates the list,
+validates election proposals, runs the election through consensus, and rotates
+the epoch steward.
 
 Generation is deterministic and normative: every member derives the identical
 roster by sorting on `SHA256(epoch ‖ retry_round ‖ member_id ‖
