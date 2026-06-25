@@ -24,7 +24,8 @@ consensus plug-in and its peer-score storage backend.
 
 **You provide:** identity (opaque member-id bytes and the map from a member to
 its transport address), the transport itself, the OpenMLS provider (crypto +
-storage), key-package minting, and the registry of conversations.
+storage), the consensus backend (proposal/vote storage + a vote-signing key),
+key-package minting, and the registry of conversations.
 
 **de-mls owns:** the protocol — MLS commits, proposal voting, steward election,
 and freeze timing — along with the per-conversation state behind it: proposal
@@ -37,13 +38,15 @@ state machine.
 use de_mls::Conversation;
 use de_mls::defaults::{DefaultConsensusPlugin, InMemoryPeerScoreStorage};
 
-// The second generic is the peer-score *storage* backend; `scoring` is a
-// `PeerScoringService` built over it (see `de_mls::defaults::DefaultPeerScoring`).
-// The steward roster is library-owned — you pass only a `StewardListConfig`.
-// Create a conversation you steward, or join one from a welcome:
+// The first generic is the consensus backend, the second the peer-score
+// *storage* backend. `consensus` is a `ConsensusPlugin` instance you hold and
+// pass by reference; `scoring` is a `PeerScoringService` built over the storage
+// (see `de_mls::defaults::DefaultPeerScoring`). The steward roster is
+// library-owned — you pass only a `StewardListConfig`. Create a conversation
+// you steward, or join one from a welcome:
 let mut convo: Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage> =
     Conversation::create(id, &provider, credential, suite, &signer,
-                         scoring, steward_config, consensus, app_id, config, member_id)?;
+                         scoring, steward_config, &consensus, app_id, config, member_id)?;
 
 // let joined = Conversation::join(&provider, welcome_bytes, sync_bytes, …, &signer)?;  // Ok(None) = not for us
 
@@ -67,6 +70,25 @@ with a `StewardListConfig`.
 A complete, runnable construction — creator and joiner built straight from
 direct arguments — is in
 [`tests/standalone_construction.rs`](tests/standalone_construction.rs).
+
+## Consensus
+
+Membership changes are agreed by vote before they commit, and de-mls owns that
+orchestration end to end: opening a proposal, collecting votes, the auto-vote
+and timeout deadlines, and turning a resolved decision into the next steward
+commit, freeze, or election.
+
+You supply a `ConsensusPlugin` — the consensus backend, which is two things:
+where proposals and votes are stored, and the key that signs votes. The
+conversation id serves as the consensus scope, and outcome delivery and
+per-conversation session capacity are library-owned, so the backend stays that
+small. One backend instance backs all of a member's conversations; you hand it
+to each by reference.
+
+`de_mls::defaults::DefaultConsensusPlugin` runs the `hashgraph-like-consensus`
+library over an in-memory store and an Ethereum vote signer — build it with
+`DefaultConsensusPlugin::new(signer)`. A durable integrator keeps the same
+shape and swaps the store for one backed by a database.
 
 ## Peer scoring
 
