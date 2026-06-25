@@ -147,15 +147,15 @@ impl Member {
         let scoring = integ.scoring();
         let convo = Conversation::create(
             conversation_id,
+            integ.member_id.member_id_bytes(),
             &integ.provider,
             integ.credential.clone(),
             TEST_SUITE,
             &integ.signer,
-            scoring,
             &integ.consensus,
+            scoring,
             integ.app_id(),
             config.clone(),
-            integ.member_id.member_id_bytes(),
         )
         .expect("create conversation");
         Self {
@@ -566,15 +566,15 @@ impl Member {
         // `join` opens the welcome internally; only the addressed joiner gets
         // `Some`.
         match Conversation::join(
+            self.integ.member_id.member_id_bytes(),
             &self.integ.provider,
+            &self.integ.signer,
             &welcome.welcome_bytes,
             &welcome.conversation_sync_bytes,
-            scoring,
             &self.integ.consensus,
+            scoring,
             self.integ.app_id(),
             self.pending_config.clone(),
-            self.integ.member_id.member_id_bytes(),
-            &self.integ.signer,
         ) {
             Ok(Some(convo)) => {
                 self.convo = Some(convo);

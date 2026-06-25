@@ -82,15 +82,15 @@ fn create_builds_a_working_steward_session_without_user() {
     let integrator = Integrator::new();
     let conversation: TestConversation = Conversation::create(
         "standalone",
+        integrator.member_id.member_id_bytes(),
         &integrator.provider,
         integrator.credential.clone(),
         TEST_SUITE,
         &integrator.signer,
-        integrator.scoring(),
         &integrator.consensus,
+        integrator.scoring(),
         integrator.app_id(),
         de_mls::ConversationConfig::default(),
-        integrator.member_id.member_id_bytes(),
     )
     .expect("create");
 
@@ -134,15 +134,15 @@ fn join_completes_in_one_call() {
 
     let mut creator: TestConversation = Conversation::create(
         "standalone-welcome",
+        alice.member_id.member_id_bytes(),
         &alice.provider,
         alice.credential.clone(),
         TEST_SUITE,
         &alice.signer,
-        alice.scoring(),
         &alice.consensus,
+        alice.scoring(),
         alice.app_id(),
         fast_config(),
-        alice.member_id.member_id_bytes(),
     )
     .expect("create");
 
@@ -182,15 +182,15 @@ fn join_completes_in_one_call() {
     // never minted the key package can't open it.
     let bystander = Integrator::with_key(ALICE);
     let bystander_join: Option<TestConversation> = Conversation::join(
+        bystander.member_id.member_id_bytes(),
         &bystander.provider,
+        &bystander.signer,
         &welcome.welcome_bytes,
         &welcome.conversation_sync_bytes,
-        bystander.scoring(),
         &bystander.consensus,
+        bystander.scoring(),
         bystander.app_id(),
         fast_config(),
-        bystander.member_id.member_id_bytes(),
-        &bystander.signer,
     )
     .expect("join is not an error for the wrong addressee");
     assert!(
@@ -202,15 +202,15 @@ fn join_completes_in_one_call() {
     // run the join side-effects, apply the bundled sync. Only the addressed
     // joiner — holding the KP provider — gets `Some`.
     let joined: TestConversation = Conversation::join(
+        bob.member_id.member_id_bytes(),
         &bob.provider,
+        &bob.signer,
         &welcome.welcome_bytes,
         &welcome.conversation_sync_bytes,
-        bob.scoring(),
         &bob.consensus,
+        bob.scoring(),
         bob.app_id(),
         fast_config(),
-        bob.member_id.member_id_bytes(),
-        &bob.signer,
     )
     .expect("join")
     .expect("welcome addresses bob");

@@ -37,15 +37,15 @@ where
     #[allow(clippy::too_many_arguments)]
     pub fn create<Pr>(
         conversation_id: &str,
+        member_id: &[u8],
         provider: &Pr,
         credential: CredentialWithKey,
         ciphersuite: Ciphersuite,
         signer: &impl Signer,
-        scoring: PeerScoringService<Sc>,
         consensus: &C,
+        scoring: PeerScoringService<Sc>,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
-        member_id: &[u8],
     ) -> Result<Self, ConversationError>
     where
         Pr: OpenMlsProvider,
@@ -83,15 +83,15 @@ where
     /// prior knowledge of the conversation.
     #[allow(clippy::too_many_arguments)]
     pub fn join<Pr>(
+        member_id: &[u8],
         provider: &Pr,
+        signer: &impl Signer,
         welcome_bytes: &[u8],
         conversation_sync_bytes: &[u8],
-        scoring: PeerScoringService<Sc>,
         consensus: &C,
+        scoring: PeerScoringService<Sc>,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
-        member_id: &[u8],
-        signer: &impl Signer,
     ) -> Result<Option<Self>, ConversationError>
     where
         Pr: OpenMlsProvider,
