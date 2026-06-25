@@ -39,10 +39,10 @@ enum CandidateOutcome {
 /// `own_commit_discarded` enforces MLS's one-pending-commit rule: the first
 /// incoming attempt wipes our own pending commit, so a later lower-priority
 /// local candidate has nothing to apply.
-pub(super) fn apply_in_priority_order<Pr, M: MlsService>(
+pub(super) fn apply_in_priority_order<Pr>(
     provider: &Pr,
     conversation: &mut ConversationQueues,
-    mls: &mut M,
+    mls: &mut MlsService,
     steward: &StewardListService,
     sorted: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
@@ -168,10 +168,10 @@ fn record_winner_scores(
 
 /// Merge our own commit and surface the welcome we held back until merge.
 /// Validation happened at commit-creation time, so no re-staging is needed.
-fn apply_local_candidate<Pr, M: MlsService>(
+fn apply_local_candidate<Pr>(
     provider: &Pr,
     conversation: &mut ConversationQueues,
-    mls: &mut M,
+    mls: &mut MlsService,
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
 ) -> Result<CandidateOutcome, ConversationError>
@@ -209,10 +209,10 @@ where
 ///
 /// Caller must have discarded any own pending commit first — MLS allows
 /// only one per conversation.
-fn apply_incoming_candidate<Pr, M: MlsService>(
+fn apply_incoming_candidate<Pr>(
     provider: &Pr,
     conversation: &mut ConversationQueues,
-    mls: &mut M,
+    mls: &mut MlsService,
     sl_service: &StewardListService,
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
@@ -231,13 +231,13 @@ where
                 commit_actions,
             } => (commit_sender, self_removed, commit_actions),
             StagingOutcome::Abort => {
-                // Wire-valid but MLS-invalid — penalize the author; the
-                // loop will try the next candidate.
+                // The commit never staged (stale epoch, wrong group, malformed),
+                // so its sender was never MLS-authenticated. The only id we hold
+                // is the plaintext wire `steward_member_id`, which is forgeable —
+                // scoring it would let anyone grief a victim with junk
+                // candidates. Drop without penalty and try the next candidate.
                 mls.discard_staged_commit(provider)?;
-                return Ok(CandidateOutcome::Drop(Some(ScoreOp {
-                    member_id: chosen.candidate_msg.steward_member_id,
-                    event: ScoreEvent::MisbehavingCommit,
-                })));
+                return Ok(CandidateOutcome::Drop(None));
             }
             StagingOutcome::Violation(v) => {
                 mls.discard_staged_commit(provider)?;
@@ -300,9 +300,9 @@ enum StagingOutcome {
 ///
 /// Leaves MLS in the staged state on `Staged`; the caller must clean up
 /// via `discard_staged_commit` for `Abort` / `Violation`.
-fn stage_candidate<Pr, M>(
+fn stage_candidate<Pr>(
     provider: &Pr,
-    mls: &mut M,
+    mls: &mut MlsService,
     conversation_id: &str,
     candidate: &CommitCandidate,
     ctx: &RoundContext,
@@ -310,7 +310,6 @@ fn stage_candidate<Pr, M>(
 where
     Pr: OpenMlsProvider,
     <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
-    M: MlsService,
 {
     let staged_result = mls
         .stage_remote_commit(provider, &candidate.mls_proposals, &candidate.commit_message)
@@ -463,7 +462,7 @@ fn check_commit_sender_authorized(
 /// Apply post-commit bookkeeping and return the cleared batch (empty when
 /// the commit was urgent-target-only and only the targeted entry was
 /// dropped). Caller surfaces the batch through `FreezeFinalizeResult` so
-/// the app layer can archive it for UI history.
+/// it can be archived for UI history.
 fn finalize_committed_batch(
     conversation: &mut ConversationQueues,
     commit_hash: CommitHash,

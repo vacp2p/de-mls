@@ -3,7 +3,7 @@
 //! [`Conversation::create`] and [`Conversation::join`] take the OpenMLS
 //! provider, the plug-in instances, the consensus backend, and the durable
 //! config as direct arguments. The library builds the per-conversation MLS
-//! service ([`OpenMlsService`]) and consensus service internally — the creator
+//! service ([`MlsService`]) and consensus service internally — the creator
 //! seeds a fresh group, the joiner opens one from the welcome — and returns a
 //! conversation ready to drop into a registry.
 
@@ -20,9 +20,8 @@ use hashgraph_like_consensus::{events::ConsensusEventBus, service::ConsensusServ
 use crate::{
     ConsensusPlugin, Conversation, ConversationConfig, ConversationError, ConversationEvent,
     ConversationQueues, ConversationServices, ConversationStateMachine, PeerScoreStorage,
-    PeerScoringService, StewardListConfig, StewardListService,
-    consensus::outcome_bus::OutcomeBus,
-    mls_crypto::{MlsService, OpenMlsService},
+    PeerScoringService, StewardListConfig, StewardListService, consensus::outcome_bus::OutcomeBus,
+    mls_crypto::MlsService,
 };
 
 impl<C, Sc> Conversation<C, Sc>
@@ -53,7 +52,7 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let mls = OpenMlsService::new_as_creator(
+        let mls = MlsService::new_as_creator(
             conversation_id.to_string(),
             provider,
             credential,
@@ -101,7 +100,7 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let Some(mls) = OpenMlsService::new_from_welcome(provider, welcome_bytes)? else {
+        let Some(mls) = MlsService::new_from_welcome(provider, welcome_bytes)? else {
             return Ok(None);
         };
         let conversation_id = mls.conversation_id().to_string();
@@ -130,7 +129,7 @@ where
     #[allow(clippy::too_many_arguments)]
     fn assemble(
         conversation_id: &str,
-        mls: OpenMlsService,
+        mls: MlsService,
         mut scoring: PeerScoringService<Sc>,
         steward_config: StewardListConfig,
         consensus: &C,

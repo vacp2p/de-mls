@@ -25,7 +25,6 @@ use tracing::info;
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
     PeerScoreStorage, ProposalKind,
-    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
     self_leave_proposal_id,
 };

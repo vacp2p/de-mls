@@ -63,9 +63,9 @@ pub fn compute_commit_hash(commit_message: &[u8]) -> CommitHash {
 /// Buffer a remote commit candidate. Enforces non-empty proposals/commit,
 /// valid MLS wire kinds, non-empty `steward_member_id`, and non-duplicate
 /// hash. No MLS state is mutated.
-pub fn buffer_commit_candidate<M: MlsService>(
+pub fn buffer_commit_candidate(
     conversation: &mut ConversationQueues,
-    mls: &mut M,
+    mls: &mut MlsService,
     candidate_msg: CommitCandidate,
 ) -> Result<ProcessResult, ConversationError> {
     let conversation_id = conversation.name().to_owned();
@@ -164,9 +164,9 @@ pub fn buffer_commit_candidate<M: MlsService>(
 /// approved. Call after a consensus outcome populates the approved queue: a
 /// candidate that lost the race against its own approval is now buffered into
 /// the freeze round and applied normally. No-op when nothing is stashed.
-pub fn replay_early_candidates<M: MlsService>(
+pub fn replay_early_candidates(
     conversation: &mut ConversationQueues,
-    mls: &mut M,
+    mls: &mut MlsService,
 ) -> Result<(), ConversationError> {
     let epoch = mls.current_epoch()?;
     for candidate in conversation.take_early_candidates(epoch) {
@@ -177,10 +177,10 @@ pub fn replay_early_candidates<M: MlsService>(
 
 /// Snapshot round state, rank the buffered candidates by RFC priority, and
 /// apply best-first — falling back to the next when MLS staging rejects one.
-pub fn finalize_freeze_round<Pr, M: MlsService>(
+pub fn finalize_freeze_round<Pr>(
     provider: &Pr,
     conversation: &mut ConversationQueues,
-    mls: &mut M,
+    mls: &mut MlsService,
     steward: &StewardListService,
     in_recovery: bool,
     allow_subset_candidates: bool,
@@ -226,9 +226,9 @@ where
 
 /// No candidate applied: drop any local pending commit (otherwise the next
 /// MLS encrypt trips on "pending proposal exists") and report a no-op.
-fn discard_and_finish<Pr, M: MlsService>(
+fn discard_and_finish<Pr>(
     provider: &Pr,
-    mls: &mut M,
+    mls: &mut MlsService,
 ) -> Result<FreezeFinalizeResult, ConversationError>
 where
     Pr: OpenMlsProvider,
@@ -261,9 +261,9 @@ pub(super) struct RoundContext {
 }
 
 impl RoundContext {
-    fn snapshot<M: MlsService>(
+    fn snapshot(
         conversation: &ConversationQueues,
-        mls: &mut M,
+        mls: &mut MlsService,
         steward: &StewardListService,
         current_epoch: u64,
         in_recovery: bool,

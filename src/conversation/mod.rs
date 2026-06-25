@@ -23,16 +23,16 @@ mod steward;
 mod util;
 
 pub use config::{
-    ConversationConfig, DEFAULT_COMMIT_INACTIVITY_DURATION, DEFAULT_CONSENSUS_TIMEOUT,
-    DEFAULT_ELECTION_VOTING_DELAY, DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_CONSENSUS_SESSIONS,
-    DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
+    ConversationConfig, DEFAULT_COMMIT_BATCH_MAX, DEFAULT_COMMIT_INACTIVITY_DURATION,
+    DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_ELECTION_VOTING_DELAY, DEFAULT_LIVENESS_CRITERIA_YES,
+    DEFAULT_MAX_CONSENSUS_SESSIONS, DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
     DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_VOTING_DELAY,
 };
 pub use display::{MemberRole, MessageType, message_types};
 pub(crate) use handle::ConversationServices;
 pub use handle::{Conversation, LeaveOutcome};
 pub use inbound::{DispatchOutcome, decode_inbound_payload};
-pub use messaging::{Outbound, build_key_package_announcement};
+pub use messaging::Outbound;
 pub use poll::PollOutcome;
 pub use queues::{BufferedCommitCandidate, ConversationQueues, FreezeBufferOutcome, ProposalId};
 pub use state_machine::{ConversationState, ConversationStateMachine, OperatingMode};

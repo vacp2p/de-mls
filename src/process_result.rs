@@ -63,8 +63,6 @@ pub enum NoopReason {
     BanTargetNotMember,
     /// Decrypt returned `Ignored` (wrong epoch or wrong conversation).
     DecryptIgnored,
-    /// Decrypt returned a non-Application MLS payload on the app subtopic.
-    UnexpectedMlsType,
     /// No approved proposals to commit.
     NoApprovedProposals,
     /// Commit hash matches a recent committed batch — duplicate broadcast.

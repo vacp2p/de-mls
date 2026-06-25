@@ -1,132 +1,284 @@
-//! [`MlsService`] trait — DE-MLS's only contract with an MLS engine.
+//! [`MlsService`] — DE-MLS's per-conversation MLS engine, backed by OpenMLS.
 //!
-//! DE-MLS talks to an MLS engine only through [`MlsService`]. Methods take
-//! boundary types from [`crate::mls_crypto`] (wire bytes, [`MlsCommitInput`],
-//! etc.) so protocol and app code do not depend on a concrete engine.
+//! Wraps one `MlsGroup` and exposes just the MLS operations the conversation
+//! needs: seeding or joining the group, the commit pipeline (build → stage →
+//! merge/discard), encrypting and decrypting traffic, and membership queries.
+//! Results cross the boundary as the de-mls byte types in [`crate::mls_crypto`],
+//! so the rest of the library speaks de-mls types, not OpenMLS ones.
 //!
-//! # Construction
-//!
-//! Creating a group, joining from a welcome, and publishing key packages are
-//! not on the trait: they are inherent methods on the reference
-//! [`OpenMlsService`](crate::mls_crypto::OpenMlsService), because a joiner must
-//! publish a key package before any per-conversation service exists.
+//! Provider, signer, and credential arrive by reference per call — one provider
+//! can back every conversation. The service keeps only the group and a
+//! staged-commit slot; the integrator owns identity, keys, and storage.
 
 use std::error::Error as StdError;
 
+use openmls::credentials::CredentialWithKey;
+use openmls::group::{
+    GroupId, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, StagedCommit, StagedWelcome,
+    WelcomeError,
+};
+use openmls::key_packages::KeyPackageIn;
+use openmls::prelude::{
+    Ciphersuite, ContentType, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn,
+    ProcessedMessageContent, ProtocolMessage, ProtocolVersion,
+};
 use openmls_traits::storage::StorageProvider;
 use openmls_traits::{OpenMlsProvider, signatures::Signer};
+use prost::Message;
 
 use crate::{
     mls_crypto::{
-        CommitCandidate, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind,
-        StagedCandidateResult,
+        CommitArtifacts, DecryptedMessage, MlsCommitInput, MlsError, MlsMessageKind,
+        MlsProposalOutput, StagedCandidateResult,
     },
     protos::de_mls::messages::v1::AppMessage,
 };
 
-/// Ceiling on MLS proposals per commit batch used by the reference engine.
-/// Defends against runaway batch growth when freeze recovery preserves work
-/// across multiple failed cycles. Per-node policy; not synced via
-/// `ConversationSync`. Implementations may return it from
-/// [`MlsService::commit_batch_max`] or choose their own.
-pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
-
-/// Per-conversation MLS backend. Each instance corresponds to one MLS group.
+/// DE-MLS's MLS engine for one conversation: a single `MlsGroup` plus the
+/// staged-commit slot for the inbound stage→merge/discard pipeline.
 ///
-/// Read-only methods take `&self`; methods that advance MLS state take
-/// `&mut self`. Callers serialize via the outer per-session lock.
-///
-/// The service does not own an OpenMLS provider. Methods that touch crypto,
-/// rand, or storage take a `provider: &Pr` by reference per call, so one
-/// provider can back every conversation. The pure-query and message-peek
-/// methods (`members`, `current_epoch`, `inspect_message_kind`, …) need no
-/// provider.
-pub trait MlsService {
-    /// The conversation id this service is scoped to.
-    fn conversation_id(&self) -> &str;
+/// Provider, signer, and credential are passed in per call and never stored.
+/// Read-only methods take `&self`; state-advancing ones take `&mut self`, and
+/// callers serialize via the outer per-conversation lock.
+pub struct MlsService {
+    conversation_id: String,
+    group: MlsGroup,
+    pending_staged_commit: Option<StagedCommit>,
+}
 
-    /// Maximum number of MLS proposals the steward will pack into one commit
-    /// batch. Implementation-specific policy — the reference engine caps at
-    /// [`DEFAULT_COMMIT_BATCH_MAX`].
-    fn commit_batch_max(&self) -> usize;
+impl MlsService {
+    // ══════════════════════════════════════════════════════════
+    // Construction & teardown
+    // ══════════════════════════════════════════════════════════
 
-    // ── Conversation lifecycle ──
-
-    /// Tear down all local MLS state for this conversation. Idempotent so
-    /// repeated leave / cleanup is safe.
-    fn delete<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
+    /// Create a fresh group as its sole initial member ("creator"). The leaf is
+    /// seeded straight from `credential` and `ciphersuite` — no key package,
+    /// since key packages are how *joiners* are added. `provider` is written
+    /// into but not retained.
+    pub fn new_as_creator<Pr>(
+        conversation_id: String,
+        provider: &Pr,
+        credential: CredentialWithKey,
+        ciphersuite: Ciphersuite,
+        signer: &impl Signer,
+    ) -> Result<Self, MlsError>
     where
         Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let config = MlsGroupCreateConfig::builder()
+            .ciphersuite(ciphersuite)
+            .use_ratchet_tree_extension(true)
+            .build();
+        let group = MlsGroup::new_with_group_id(
+            provider,
+            signer,
+            &config,
+            GroupId::from_slice(conversation_id.as_bytes()),
+            credential,
+        )?;
 
-    // ── Membership / state queries ──
+        Ok(Self {
+            conversation_id,
+            group,
+            pending_staged_commit: None,
+        })
+    }
 
-    /// Current conversation members as serialized credential bytes (one entry
-    /// per leaf, in MLS leaf order).
-    fn members(&self) -> Result<Vec<Vec<u8>>, MlsError>;
+    /// Join a group from a welcome. `provider` must hold the joiner's
+    /// key-package private keys from the earlier key-package build, and is read
+    /// from but not retained. Returns `Ok(None)` when the welcome doesn't
+    /// address one of our key packages — the "not for us" branch, not an error.
+    pub fn new_from_welcome<Pr>(
+        provider: &Pr,
+        welcome_bytes: &[u8],
+    ) -> Result<Option<Self>, MlsError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(welcome_bytes)?;
+        let welcome = match mls_message.extract() {
+            MlsMessageBodyIn::Welcome(w) => w,
+            _ => return Ok(None),
+        };
 
-    /// Whether user is currently a member.
-    fn is_member(&self, member_id: &[u8]) -> bool;
+        let config = MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
+            .build();
+        let staged = match StagedWelcome::new_from_welcome(provider, &config, welcome, None) {
+            Ok(staged) => staged,
+            Err(WelcomeError::NoMatchingKeyPackage | WelcomeError::JoinerSecretNotFound) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let group = staged.into_group(provider)?;
 
-    /// Current MLS epoch. This is the single source of truth — never
-    /// maintain a parallel counter at the app layer.
-    fn current_epoch(&self) -> Result<u64, MlsError>;
+        let conversation_id = String::from_utf8_lossy(group.group_id().as_slice()).to_string();
+        Ok(Some(Self {
+            conversation_id,
+            group,
+            pending_staged_commit: None,
+        }))
+    }
 
-    // ── Steward-side commit pipeline (we are the committer) ──
+    /// Tear down all local MLS state for this conversation. Idempotent, so
+    /// repeated leave / cleanup is safe.
+    pub fn delete<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        self.group
+            .delete(provider.storage())
+            .map_err(MlsError::storage)
+    }
 
-    /// Build a commit candidate from a list of membership changes and
-    /// stage it locally. Returns the wire bytes (proposals + commit + an
-    /// optional welcome) for the steward to broadcast.
+    // ══════════════════════════════════════════════════════════
+    // Queries
+    // ══════════════════════════════════════════════════════════
+
+    /// The conversation id this group is scoped to.
+    pub fn conversation_id(&self) -> &str {
+        &self.conversation_id
+    }
+
+    /// Current members as serialized credential bytes, one per leaf in MLS leaf
+    /// order.
+    pub fn members(&self) -> Result<Vec<Vec<u8>>, MlsError> {
+        Ok(self
+            .group
+            .members()
+            .map(|m| m.credential.serialized_content().to_vec())
+            .collect())
+    }
+
+    /// Whether `member_id` is a current member.
+    pub fn is_member(&self, member_id: &[u8]) -> bool {
+        self.members()
+            .map(|members| members.iter().any(|m| m.as_slice() == member_id))
+            .unwrap_or(false)
+    }
+
+    /// Current MLS epoch — the single source of truth; keep no parallel counter.
+    pub fn current_epoch(&self) -> Result<u64, MlsError> {
+        Ok(self.group.epoch().as_u64())
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // Outbound commit: build our own, then resolve
+    // ══════════════════════════════════════════════════════════
+
+    /// Build a commit candidate from a batch of membership changes, returning
+    /// the wire bytes (proposals, commit, and a welcome if anyone is added) for
+    /// the steward to broadcast.
     ///
-    /// Side effect: leaves MLS holding our pending proposals and pending
-    /// commit. The caller MUST follow up with
-    /// [`merge_own_commit`](Self::merge_own_commit) once the candidate
-    /// wins selection, or [`discard_own_commit`](Self::discard_own_commit)
-    /// to roll back.
-    fn create_commit_candidate<Pr>(
+    /// The candidate is staged locally, not applied — another steward's commit
+    /// may win the freeze round. Resolve it before the next MLS operation:
+    /// [`merge_own_commit`](Self::merge_own_commit) if it wins,
+    /// [`discard_own_commit`](Self::discard_own_commit) otherwise; a leftover
+    /// pending commit blocks the next commit or message.
+    pub fn create_commit_candidate<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
         updates: &[MlsCommitInput],
-    ) -> Result<CommitCandidate, MlsError>
+    ) -> Result<CommitArtifacts, MlsError>
     where
         Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let group = &mut self.group;
+        let mut mls_proposals = Vec::new();
 
-    /// Apply our pending commit, advancing the MLS epoch. Call after a
-    /// successful [`create_commit_candidate`](Self::create_commit_candidate)
-    /// when our candidate has won the freeze round.
-    fn merge_own_commit<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
+        for update in updates {
+            match update {
+                MlsCommitInput::Add(key_package_bytes) => {
+                    let (kp_in, _rest) = KeyPackageIn::tls_deserialize_bytes(key_package_bytes)
+                        .map_err(MlsError::KeyPackageTls)?;
+                    let kp = kp_in
+                        .validate(provider.crypto(), ProtocolVersion::Mls10)
+                        .map_err(MlsError::storage)?;
+                    let (mls_message_out, _proposal_ref) =
+                        group.propose_add_member(provider, signer, &kp)?;
+                    mls_proposals.push(mls_message_out.to_bytes()?);
+                }
+                MlsCommitInput::Remove(member_id) => {
+                    let member_index = group.members().find_map(|m| {
+                        if m.credential.serialized_content() == member_id {
+                            Some(m.index)
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(index) = member_index {
+                        let (mls_message_out, _proposal_ref) =
+                            group.propose_remove_member(provider, signer, index)?;
+                        mls_proposals.push(mls_message_out.to_bytes()?);
+                    }
+                }
+            }
+        }
+
+        let (commit_msg, welcome, _group_info) =
+            group.commit_to_pending_proposals(provider, signer)?;
+
+        let welcome_bytes = match welcome {
+            Some(w) => Some(w.to_bytes()?),
+            None => None,
+        };
+
+        Ok(CommitArtifacts {
+            proposals: mls_proposals,
+            commit: commit_msg.to_bytes()?,
+            welcome: welcome_bytes,
+        })
+    }
+
+    /// Apply our staged commit, advancing the epoch — call once our candidate
+    /// has won the freeze round.
+    pub fn merge_own_commit<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
     where
         Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        self.group.merge_pending_commit(provider)?;
+        Ok(())
+    }
 
-    /// Roll back the local side effects of
-    /// [`create_commit_candidate`](Self::create_commit_candidate):
-    /// drop the pending commit and the pending proposals it contained.
-    fn discard_own_commit<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
+    /// Drop our staged commit and the pending proposals it carried — call when
+    /// the candidate lost selection or we're rolling back.
+    pub fn discard_own_commit<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
     where
         Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        self.group
+            .clear_pending_commit(provider.storage())
+            .map_err(MlsError::storage)?;
+        self.group
+            .clear_pending_proposals(provider.storage())
+            .map_err(MlsError::storage)?;
+        Ok(())
+    }
 
-    // ── Inbound commit pipeline (someone else committed) ──
+    // ══════════════════════════════════════════════════════════
+    // Inbound commit: stage a peer's, then resolve
+    // ══════════════════════════════════════════════════════════
 
-    /// Validate and stage a remote commit candidate atomically: each
-    /// proposal is processed and stored as MLS-pending, then the commit
-    /// is processed against that pending set, producing a staged commit
-    /// held internally.
+    /// Stage a peer's commit candidate: each proposal is processed as pending,
+    /// then the commit against them, leaving a staged commit held internally —
+    /// not applied.
     ///
-    /// Does **not** merge. The caller validates the result (sender,
-    /// authorization, action set vs. voted-approved) and then calls
-    /// [`merge_staged_commit`](Self::merge_staged_commit) to advance the
-    /// epoch, or [`discard_staged_commit`](Self::discard_staged_commit)
-    /// to roll back proposals + staged commit together.
-    ///
-    /// Returns [`StagedCandidateResult::Aborted`] for benign rejections
-    /// (stale epoch, wrong conversation id, wire-shape mismatch). The caller
-    /// must still call `discard_staged_commit` to clean up any partial
-    /// state before trying the next candidate.
-    fn stage_remote_commit<Pr>(
+    /// The caller validates the result (sender, actions vs. the voted-approved
+    /// set) and follows up with
+    /// [`merge_staged_commit`](Self::merge_staged_commit) to advance the epoch
+    /// or [`discard_staged_commit`](Self::discard_staged_commit) to roll back.
+    /// See [`StagedCandidateResult`] for the outcomes; a benign
+    /// [`Aborted`](StagedCandidateResult::Aborted) still needs a
+    /// `discard_staged_commit` to clear partial state before the next candidate.
+    pub fn stage_remote_commit<Pr>(
         &mut self,
         provider: &Pr,
         proposals: &[Vec<u8>],
@@ -134,41 +286,147 @@ pub trait MlsService {
     ) -> Result<StagedCandidateResult, MlsError>
     where
         Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let group = &mut self.group;
+        let conversation_id = &self.conversation_id;
 
-    /// Apply the previously staged inbound commit, advancing the MLS
-    /// epoch. Errors if no commit is staged.
-    fn merge_staged_commit<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
+        // ── Stage every proposal, collecting senders ──
+        let mut proposal_senders: Vec<Vec<u8>> = Vec::with_capacity(proposals.len());
+        for (i, proposal_bytes) in proposals.iter().enumerate() {
+            let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(proposal_bytes)?;
+            let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
+            let processed = group.process_message(provider, protocol_message)?;
+            let sender = processed.credential().serialized_content().to_vec();
+            match processed.into_content() {
+                ProcessedMessageContent::ProposalMessage(proposal) => {
+                    group
+                        .store_pending_proposal(provider.storage(), proposal.as_ref().clone())
+                        .map_err(MlsError::storage)?;
+                    proposal_senders.push(sender);
+                }
+                _ => {
+                    tracing::debug!(
+                        group = %conversation_id,
+                        index = i,
+                        "stage_remote_commit: non-proposal in proposal slot",
+                    );
+                    return Ok(StagedCandidateResult::Aborted);
+                }
+            }
+        }
+
+        // ── Stage the commit ──
+        let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(commit_bytes)?;
+        let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
+
+        if protocol_message.group_id().as_slice() != group.group_id().as_slice() {
+            tracing::debug!(
+                "stage_remote_commit: ignoring commit for wrong group ID (expected {})",
+                conversation_id,
+            );
+            return Ok(StagedCandidateResult::Aborted);
+        }
+        if protocol_message.epoch() < group.epoch() {
+            tracing::debug!(
+                "stage_remote_commit: ignoring stale commit from epoch {} (current: {})",
+                protocol_message.epoch().as_u64(),
+                group.epoch().as_u64(),
+            );
+            return Ok(StagedCandidateResult::Aborted);
+        }
+
+        let processed = group.process_message(provider, protocol_message)?;
+        let commit_sender = processed.credential().serialized_content().to_vec();
+
+        let outcome = match processed.into_content() {
+            ProcessedMessageContent::StagedCommitMessage(staged) => {
+                let self_removed = staged.self_removed();
+                let mut actions = Vec::new();
+                for add in staged.add_proposals() {
+                    let id = add
+                        .add_proposal()
+                        .key_package()
+                        .leaf_node()
+                        .credential()
+                        .serialized_content()
+                        .to_vec();
+                    actions.push(MlsProposalOutput::Add(id));
+                }
+                for remove in staged.remove_proposals() {
+                    let removed_index = remove.remove_proposal().removed();
+                    let id = group
+                        .member(removed_index)
+                        .map(|c| c.serialized_content().to_vec())
+                        .ok_or(MlsError::UnknownLeafIndex(removed_index.u32()))?;
+                    actions.push(MlsProposalOutput::Remove(id));
+                }
+                Some((commit_sender, self_removed, actions, *staged))
+            }
+            _ => {
+                tracing::debug!(
+                    "stage_remote_commit: ignoring non-commit message for group {}",
+                    conversation_id,
+                );
+                None
+            }
+        };
+
+        match outcome {
+            Some((commit_sender, self_removed, actions, staged)) => {
+                // de-mls invariant: every bundled proposal must come from the
+                // committer. MLS allows reference-by-id of others' proposals;
+                // we don't.
+                if proposal_senders.iter().any(|s| s != &commit_sender) {
+                    return Ok(StagedCandidateResult::BundleSenderMismatch { commit_sender });
+                }
+                self.pending_staged_commit = Some(staged);
+                Ok(StagedCandidateResult::Staged {
+                    commit_sender,
+                    self_removed,
+                    actions,
+                })
+            }
+            None => Ok(StagedCandidateResult::Aborted),
+        }
+    }
+
+    /// Apply the staged peer commit, advancing the epoch. Errors if nothing is
+    /// staged.
+    pub fn merge_staged_commit<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
     where
         Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let staged = self
+            .pending_staged_commit
+            .take()
+            .ok_or_else(|| MlsError::NoPendingStagedCommit(self.conversation_id.clone()))?;
+        self.group.merge_staged_commit(provider, staged)?;
+        Ok(())
+    }
 
-    /// Roll back [`stage_remote_commit`](Self::stage_remote_commit):
-    /// drop the staged commit and clear the pending proposals it
-    /// staged on top of.
-    fn discard_staged_commit<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
+    /// Drop the staged peer commit and the pending proposals it staged on top
+    /// of.
+    pub fn discard_staged_commit<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
     where
         Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        self.pending_staged_commit = None;
+        self.group
+            .clear_pending_proposals(provider.storage())
+            .map_err(MlsError::storage)?;
+        Ok(())
+    }
 
-    // ── Application messages ──
+    // ══════════════════════════════════════════════════════════
+    // Application messages
+    // ══════════════════════════════════════════════════════════
 
-    /// Encrypt an application message for the conversation, returning the raw
-    /// MLS wire bytes.
-    fn encrypt<Pr>(
-        &mut self,
-        provider: &Pr,
-        signer: &impl Signer,
-        plaintext: &[u8],
-    ) -> Result<Vec<u8>, MlsError>
-    where
-        Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
-
-    /// Encode and encrypt `app_msg`, returning the raw payload bytes. The
-    /// session wraps these into an [`Outbound`](crate::Outbound); the
-    /// convenience path most senders use.
-    fn build_message<Pr>(
+    /// Encode and encrypt an [`AppMessage`], returning the raw payload bytes —
+    /// the convenience path most senders use.
+    pub fn build_message<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
@@ -176,33 +434,81 @@ pub trait MlsService {
     ) -> Result<Vec<u8>, MlsError>
     where
         Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let message = self
+            .group
+            .create_message(provider, signer, &app_msg.encode_to_vec())?;
+        Ok(message.to_bytes()?)
+    }
 
-    /// Strict app-subtopic decrypt: accepts only `Application` messages,
-    /// silently ignoring anything else (including proposals and commits).
-    /// This guards the app subtopic against MLS-state pollution from
-    /// peers that misroute control messages.
-    fn decrypt_application_only<Pr>(
+    /// Strict decrypt: accept only application messages, ignoring everything
+    /// else (proposals and commits included). Guards the application subtopic
+    /// against MLS-state pollution from peers that misroute control messages.
+    ///
+    /// Returns the [`DecryptedMessage`] for a current-epoch application message,
+    /// or `None` when the message can't be taken as one (a proposal, commit, or
+    /// wrong group/epoch is dropped, not an error).
+    pub fn decrypt_application_only<Pr>(
         &mut self,
         provider: &Pr,
         ciphertext: &[u8],
-    ) -> Result<DecryptResult, MlsError>
+    ) -> Result<Option<DecryptedMessage>, MlsError>
     where
         Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let group = &mut self.group;
 
-    /// General decrypt: accepts `Application` messages and stores
-    /// incoming proposals as pending. Commits are out of scope here —
-    /// route them through
-    /// [`stage_remote_commit`](Self::stage_remote_commit) so they pass
-    /// the validation pipeline.
-    fn decrypt<Pr>(&mut self, provider: &Pr, ciphertext: &[u8]) -> Result<DecryptResult, MlsError>
-    where
-        Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
+        let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(ciphertext)?;
+        let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
 
-    /// Peek the untrusted outer kind of an MLS wire message without
-    /// processing or signature-checking it. Used for cheap pre-dispatch
-    /// lane checks (e.g. "is this a proposal or a commit").
-    fn inspect_message_kind(&self, message_bytes: &[u8]) -> Result<MlsMessageKind, MlsError>;
+        if protocol_message.group_id().as_slice() != group.group_id().as_slice() {
+            return Ok(None);
+        }
+
+        // OpenMLS rejects both old and future epochs; ignore both to avoid
+        // hard errors (a joiner sends at epoch N+1 before we've merged).
+        if protocol_message.epoch() != group.epoch() {
+            return Ok(None);
+        }
+
+        // Reject commits/proposals before process_message to avoid MLS errors
+        // (e.g. MissingProposal when commit's proposals aren't stored).
+        match protocol_message.content_type() {
+            ContentType::Commit | ContentType::Proposal => {
+                return Ok(None);
+            }
+            ContentType::Application => {}
+        }
+
+        let processed = group.process_message(provider, protocol_message)?;
+        let sender_id = processed.credential().serialized_content().to_vec();
+
+        match processed.into_content() {
+            ProcessedMessageContent::ApplicationMessage(app) => Ok(Some(DecryptedMessage {
+                payload: app.into_bytes(),
+                sender: sender_id,
+            })),
+            _ => Ok(None),
+        }
+    }
+
+    /// Peek a wire message's outer kind without processing or signature-checking
+    /// it — a cheap pre-dispatch lane check (e.g. "proposal or commit?").
+    pub fn inspect_message_kind(&self, message_bytes: &[u8]) -> Result<MlsMessageKind, MlsError> {
+        let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(message_bytes)?;
+        let protocol = match mls_message.extract() {
+            MlsMessageBodyIn::PrivateMessage(m) => ProtocolMessage::PrivateMessage(m),
+            MlsMessageBodyIn::PublicMessage(m) => ProtocolMessage::PublicMessage(Box::new(m)),
+            _ => return Ok(MlsMessageKind::Other),
+        };
+
+        let kind = match protocol.content_type() {
+            ContentType::Proposal => MlsMessageKind::Proposal,
+            ContentType::Commit => MlsMessageKind::Commit,
+            ContentType::Application => MlsMessageKind::Other,
+        };
+        Ok(kind)
+    }
 }

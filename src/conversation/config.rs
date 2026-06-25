@@ -39,6 +39,10 @@ pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 /// the oldest. Bounds memory for a conversation with many proposals in flight.
 pub const DEFAULT_MAX_CONSENSUS_SESSIONS: usize = 10;
 
+/// Cap on MLS proposals the steward packs into one commit batch — bounds
+/// runaway growth when freeze recovery preserves work across failed cycles.
+pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
+
 /// Per-conversation timing config. Plug-in domains (scoring, steward list)
 /// own their own configs on the respective plug-ins — see
 /// [`crate::ScoringConfig`] and [`crate::StewardListConfig`].
@@ -79,6 +83,9 @@ pub struct ConversationConfig {
     /// Max consensus sessions retained per conversation before the oldest is
     /// evicted. See [`DEFAULT_MAX_CONSENSUS_SESSIONS`].
     pub max_consensus_sessions: usize,
+    /// Max MLS proposals the steward packs into one commit batch. See
+    /// [`DEFAULT_COMMIT_BATCH_MAX`].
+    pub commit_batch_max: usize,
 }
 
 impl Default for ConversationConfig {
@@ -95,6 +102,7 @@ impl Default for ConversationConfig {
             election_voting_delay: DEFAULT_ELECTION_VOTING_DELAY,
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
             max_consensus_sessions: DEFAULT_MAX_CONSENSUS_SESSIONS,
+            commit_batch_max: DEFAULT_COMMIT_BATCH_MAX,
         }
     }
 }

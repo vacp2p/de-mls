@@ -12,7 +12,6 @@ use tracing::{error, info};
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
     ElectionDecision, ElectionSkip, PeerScoreStorage, member_set,
-    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
         StewardElectionProposal, TimingConfig, ViolationEvidence, conversation_update_request,

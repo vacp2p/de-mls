@@ -29,7 +29,7 @@ use crate::{
     ScoreSnapshot, StewardList, StewardListConfig,
     conversation::{ConversationQueues, member_set},
     freeze::{buffer_commit_candidate, compute_commit_hash},
-    mls_crypto::{DecryptResult, MlsService},
+    mls_crypto::{DecryptedMessage, MlsService},
     process_result::NoopReason,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, EventMembershipChange,
@@ -64,10 +64,10 @@ fn authorize_fast_path_proposal(proposal: &Proposal, mls_sender: &[u8]) -> bool 
 
 /// Process an inbound packet on the app subtopic and decide what action is
 /// needed. Welcome-subtopic packets are handled at the integrator layer.
-pub fn decode_inbound_payload<Pr, M: MlsService>(
+pub fn decode_inbound_payload<Pr>(
     provider: &Pr,
     conversation: &mut ConversationQueues,
-    mls: &mut M,
+    mls: &mut MlsService,
     payload: &[u8],
 ) -> Result<ProcessResult, ConversationError>
 where
@@ -100,58 +100,54 @@ where
     // 2. MLS-encrypted app messages only — use decrypt_application_only.
     //    This NEVER stores proposals or processes commits, preventing
     //    rogue MLS proposals on the app subtopic from polluting state.
-    let res = mls.decrypt_application_only(provider, payload)?;
+    let Some(DecryptedMessage {
+        payload: app_bytes,
+        sender,
+    }) = mls.decrypt_application_only(provider, payload)?
+    else {
+        tracing::debug!(
+            conversation = conversation.name(),
+            "app message ignored (wrong epoch/conversation)"
+        );
+        return Ok(ProcessResult::Noop(NoopReason::DecryptIgnored));
+    };
 
-    match res {
-        DecryptResult::Application(app_bytes, sender) => {
-            let mut app_msg = AppMessage::decode(app_bytes.as_ref())?;
-            // Stamp the MLS-authenticated sender (the verified leaf credential
-            // content) onto conversation messages.
-            if let Some(app_message::Payload::ConversationMessage(cm)) = &mut app_msg.payload {
-                cm.sender_credential = sender.clone();
-            }
-            if let Some(app_message::Payload::Proposal(proposal)) = &app_msg.payload
-                && !authorize_fast_path_proposal(proposal, &sender)
-            {
-                warn!(
-                    conversation = conversation.name(),
-                    proposal_id = proposal.proposal_id,
-                    sender = ?sender,
-                    owner = ?proposal.proposal_owner,
-                    "fast-path proposal rejected: sender is not the self-removal target"
-                );
-                return Ok(ProcessResult::Noop(NoopReason::FastPathRejected));
-            }
-            // Drop BanRequests whose target isn't in the conversation — saves a
-            // useless consensus round.
-            if let Some(app_message::Payload::BanRequest(ban)) = &app_msg.payload
-                && !mls.is_member(&ban.user_to_ban)
-            {
-                info!(
-                    conversation = conversation.name(),
-                    target = ?ban.user_to_ban,
-                    "ban request skipped: target not a member"
-                );
-                return Ok(ProcessResult::Noop(NoopReason::BanTargetNotMember));
-            }
-            app_msg.try_into()
+    let mut app_msg = AppMessage::decode(app_bytes.as_ref())?;
+
+    // Per-variant pre-checks; whatever survives converges on the `try_into`
+    // conversion below.
+    match &mut app_msg.payload {
+        // Stamp the MLS-authenticated sender (the verified leaf credential
+        // content) onto conversation messages.
+        Some(app_message::Payload::ConversationMessage(cm)) => {
+            cm.sender_credential = sender.clone();
         }
-        DecryptResult::Removed(_) => Ok(ProcessResult::LeaveConversation),
-        DecryptResult::Ignored => {
-            tracing::debug!(
-                conversation = conversation.name(),
-                "app message ignored (wrong epoch/conversation)"
-            );
-            Ok(ProcessResult::Noop(NoopReason::DecryptIgnored))
-        }
-        _ => {
+        // Fast-path proposals must originate from the self-removal target.
+        Some(app_message::Payload::Proposal(proposal))
+            if !authorize_fast_path_proposal(proposal, &sender) =>
+        {
             warn!(
                 conversation = conversation.name(),
-                "unexpected MLS message type on app subtopic"
+                proposal_id = proposal.proposal_id,
+                sender = ?sender,
+                owner = ?proposal.proposal_owner,
+                "fast-path proposal rejected: sender is not the self-removal target"
             );
-            Ok(ProcessResult::Noop(NoopReason::UnexpectedMlsType))
+            return Ok(ProcessResult::Noop(NoopReason::FastPathRejected));
         }
+        // Drop BanRequests whose target isn't in the conversation — saves a
+        // useless consensus round.
+        Some(app_message::Payload::BanRequest(ban)) if !mls.is_member(&ban.user_to_ban) => {
+            info!(
+                conversation = conversation.name(),
+                target = ?ban.user_to_ban,
+                "ban request skipped: target not a member"
+            );
+            return Ok(ProcessResult::Noop(NoopReason::BanTargetNotMember));
+        }
+        _ => {}
     }
+    app_msg.try_into()
 }
 
 /// What [`Conversation::process_inbound`] hands back to the integrator.

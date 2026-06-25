@@ -16,12 +16,11 @@ use openmls::credentials::CredentialWithKey;
 use openmls_basic_credential::SignatureKeyPair;
 
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
-use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::{Conversation, ConversationState};
 use de_mls::{ConversationEvent, ScoringConfig, StewardListConfig};
 
 use common::{
-    TEST_SUITE, TestProvider, make_scoring, mint_key_package, test_credential,
+    MintedKeyPackage, TEST_SUITE, TestProvider, make_scoring, mint_key_package, test_credential,
     wallet::WalletMemberId,
 };
 
@@ -71,7 +70,7 @@ impl Integrator {
 
     /// Mint a single-use key package into this integrator's reused provider,
     /// which thereby holds the private keys for the matching welcome.
-    fn mint_key_package(&self) -> KeyPackageBytes {
+    fn mint_key_package(&self) -> MintedKeyPackage {
         mint_key_package(&self.provider, &self.credential, &self.signer)
     }
 
@@ -157,7 +156,12 @@ fn join_completes_in_one_call() {
     // the add, so her bundled YES resolves consensus on its own.
     let bob_kp = bob.mint_key_package();
     creator
-        .add_member(&alice.provider, bob_kp.as_bytes(), &alice.signer)
+        .add_member(
+            &alice.provider,
+            bob_kp.as_bytes(),
+            bob_kp.member_id(),
+            &alice.signer,
+        )
         .expect("add member");
 
     // Drive the creator until the welcome is minted.
