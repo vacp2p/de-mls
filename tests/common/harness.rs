@@ -141,20 +141,21 @@ impl Member {
         config: ConversationConfig,
         steward_list_config: StewardListConfig,
     ) -> Self {
+        let mut config = config;
+        config.steward_list = steward_list_config.clone();
         let integ = Integrator::new(private_key, steward_list_config);
         let scoring = integ.scoring();
         let convo = Conversation::create(
             conversation_id,
+            integ.member_id.member_id_bytes(),
             &integ.provider,
             integ.credential.clone(),
             TEST_SUITE,
             &integ.signer,
-            scoring,
-            integ.steward_list_config.clone(),
             &integ.consensus,
+            scoring,
             integ.app_id(),
             config.clone(),
-            integ.member_id.member_id_bytes(),
         )
         .expect("create conversation");
         Self {
@@ -175,6 +176,8 @@ impl Member {
         config: ConversationConfig,
         steward_list_config: StewardListConfig,
     ) -> Self {
+        let mut config = config;
+        config.steward_list = steward_list_config.clone();
         let integ = Integrator::new(private_key, steward_list_config);
         Self {
             integ,
@@ -389,7 +392,7 @@ impl Member {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .send_message(&self.integ.provider, message, &self.integ.signer)
+            .send_message(&self.integ.provider, &self.integ.signer, message)
             .expect("send message");
     }
 
@@ -399,9 +402,9 @@ impl Member {
             .expect("member has joined")
             .add_member(
                 &self.integ.provider,
-                key_package.as_bytes(),
-                key_package.member_id(),
                 &self.integ.signer,
+                key_package.member_id(),
+                key_package.as_bytes(),
             )
             .expect("add member");
     }
@@ -410,7 +413,7 @@ impl Member {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .remove_member(&self.integ.provider, member_id, &self.integ.signer)
+            .remove_member(&self.integ.provider, &self.integ.signer, member_id)
             .expect("remove member");
     }
 
@@ -419,7 +422,7 @@ impl Member {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .vote(&self.integ.provider, proposal_id, vote, &self.integ.signer)
+            .vote(&self.integ.provider, &self.integ.signer, proposal_id, vote)
             .expect("vote");
     }
 
@@ -452,7 +455,7 @@ impl Member {
     pub fn deliver_raw(&mut self, sender: &[u8], payload: &[u8]) {
         if let Some(convo) = self.convo.as_mut() {
             let _ =
-                convo.process_inbound(&self.integ.provider, sender, payload, &self.integ.signer);
+                convo.process_inbound(&self.integ.provider, &self.integ.signer, sender, payload);
         }
     }
 
@@ -516,9 +519,9 @@ impl Member {
         if let Some(convo) = self.convo.as_mut() {
             let _ = convo.process_inbound(
                 &self.integ.provider,
+                &self.integ.signer,
                 &packet.sender,
                 &packet.payload,
-                &self.integ.signer,
             );
         }
     }
@@ -542,9 +545,9 @@ impl Member {
         // takeover), not the explicit any-member `add_member`.
         let _ = convo.sponsor_member(
             &self.integ.provider,
-            &invite.key_package_bytes,
-            &invite.member_id,
             &self.integ.signer,
+            &invite.member_id,
+            &invite.key_package_bytes,
         );
     }
 
@@ -563,16 +566,15 @@ impl Member {
         // `join` opens the welcome internally; only the addressed joiner gets
         // `Some`.
         match Conversation::join(
+            self.integ.member_id.member_id_bytes(),
             &self.integ.provider,
+            &self.integ.signer,
             &welcome.welcome_bytes,
             &welcome.conversation_sync_bytes,
-            scoring,
-            self.integ.steward_list_config.clone(),
             &self.integ.consensus,
+            scoring,
             self.integ.app_id(),
             self.pending_config.clone(),
-            self.integ.member_id.member_id_bytes(),
-            &self.integ.signer,
         ) {
             Ok(Some(convo)) => {
                 self.convo = Some(convo);

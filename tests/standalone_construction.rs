@@ -17,7 +17,7 @@ use openmls_basic_credential::SignatureKeyPair;
 
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
 use de_mls::{Conversation, ConversationState};
-use de_mls::{ConversationEvent, ScoringConfig, StewardListConfig};
+use de_mls::{ConversationEvent, ScoringConfig};
 
 use common::{
     MintedKeyPackage, TEST_SUITE, TestProvider, make_scoring, mint_key_package, test_credential,
@@ -64,10 +64,6 @@ impl Integrator {
         make_scoring(&ScoringConfig::default())
     }
 
-    fn steward(&self) -> StewardListConfig {
-        StewardListConfig::default()
-    }
-
     /// Mint a single-use key package into this integrator's reused provider,
     /// which thereby holds the private keys for the matching welcome.
     fn mint_key_package(&self) -> MintedKeyPackage {
@@ -86,16 +82,15 @@ fn create_builds_a_working_steward_session_without_user() {
     let integrator = Integrator::new();
     let conversation: TestConversation = Conversation::create(
         "standalone",
+        integrator.member_id.member_id_bytes(),
         &integrator.provider,
         integrator.credential.clone(),
         TEST_SUITE,
         &integrator.signer,
-        integrator.scoring(),
-        integrator.steward(),
         &integrator.consensus,
+        integrator.scoring(),
         integrator.app_id(),
         de_mls::ConversationConfig::default(),
-        integrator.member_id.member_id_bytes(),
     )
     .expect("create");
 
@@ -139,16 +134,15 @@ fn join_completes_in_one_call() {
 
     let mut creator: TestConversation = Conversation::create(
         "standalone-welcome",
+        alice.member_id.member_id_bytes(),
         &alice.provider,
         alice.credential.clone(),
         TEST_SUITE,
         &alice.signer,
-        alice.scoring(),
-        alice.steward(),
         &alice.consensus,
+        alice.scoring(),
         alice.app_id(),
         fast_config(),
-        alice.member_id.member_id_bytes(),
     )
     .expect("create");
 
@@ -158,9 +152,9 @@ fn join_completes_in_one_call() {
     creator
         .add_member(
             &alice.provider,
-            bob_kp.as_bytes(),
-            bob_kp.member_id(),
             &alice.signer,
+            bob_kp.member_id(),
+            bob_kp.as_bytes(),
         )
         .expect("add member");
 
@@ -188,16 +182,15 @@ fn join_completes_in_one_call() {
     // never minted the key package can't open it.
     let bystander = Integrator::with_key(ALICE);
     let bystander_join: Option<TestConversation> = Conversation::join(
+        bystander.member_id.member_id_bytes(),
         &bystander.provider,
+        &bystander.signer,
         &welcome.welcome_bytes,
         &welcome.conversation_sync_bytes,
-        bystander.scoring(),
-        bystander.steward(),
         &bystander.consensus,
+        bystander.scoring(),
         bystander.app_id(),
         fast_config(),
-        bystander.member_id.member_id_bytes(),
-        &bystander.signer,
     )
     .expect("join is not an error for the wrong addressee");
     assert!(
@@ -209,16 +202,15 @@ fn join_completes_in_one_call() {
     // run the join side-effects, apply the bundled sync. Only the addressed
     // joiner — holding the KP provider — gets `Some`.
     let joined: TestConversation = Conversation::join(
+        bob.member_id.member_id_bytes(),
         &bob.provider,
+        &bob.signer,
         &welcome.welcome_bytes,
         &welcome.conversation_sync_bytes,
-        bob.scoring(),
-        bob.steward(),
         &bob.consensus,
+        bob.scoring(),
         bob.app_id(),
         fast_config(),
-        bob.member_id.member_id_bytes(),
-        &bob.signer,
     )
     .expect("join")
     .expect("welcome addresses bob");

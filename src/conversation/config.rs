@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::DEFAULT_MAX_RETRIES;
 use crate::ProposalKind;
+use crate::StewardListConfig;
 use crate::protos::de_mls::messages::v1::TimingConfig;
 
 /// Wall-clock window the steward waits before batching approved proposals
@@ -43,9 +44,10 @@ pub const DEFAULT_MAX_CONSENSUS_SESSIONS: usize = 10;
 /// runaway growth when freeze recovery preserves work across failed cycles.
 pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
 
-/// Per-conversation timing config. Plug-in domains (scoring, steward list)
-/// own their own configs on the respective plug-ins — see
-/// [`crate::ScoringConfig`] and [`crate::StewardListConfig`].
+/// Per-conversation timing and policy config, fixed at conversation creation.
+/// Peer scoring keeps its own config on the [`PeerScoringService`](crate::PeerScoringService)
+/// the integrator builds; the steward-list bounds live here (the list is
+/// library-owned) as the nested [`steward_list`](Self::steward_list).
 #[derive(Debug, Clone)]
 pub struct ConversationConfig {
     /// RFC §Inactivity Timer #1: how long the epoch steward has to commit
@@ -86,6 +88,9 @@ pub struct ConversationConfig {
     /// Max MLS proposals the steward packs into one commit batch. See
     /// [`DEFAULT_COMMIT_BATCH_MAX`].
     pub commit_batch_max: usize,
+    /// Steward-list size bounds (`sn_min` / `sn_max`). The roster itself is
+    /// library-owned; this is the only steward knob the integrator sets.
+    pub steward_list: StewardListConfig,
 }
 
 impl Default for ConversationConfig {
@@ -103,6 +108,7 @@ impl Default for ConversationConfig {
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
             max_consensus_sessions: DEFAULT_MAX_CONSENSUS_SESSIONS,
             commit_batch_max: DEFAULT_COMMIT_BATCH_MAX,
+            steward_list: StewardListConfig::default(),
         }
     }
 }

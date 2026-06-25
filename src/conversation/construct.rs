@@ -20,7 +20,7 @@ use hashgraph_like_consensus::{events::ConsensusEventBus, service::ConsensusServ
 use crate::{
     ConsensusPlugin, Conversation, ConversationConfig, ConversationError, ConversationEvent,
     ConversationQueues, ConversationServices, ConversationStateMachine, PeerScoreStorage,
-    PeerScoringService, StewardListConfig, StewardListService, consensus::outcome_bus::OutcomeBus,
+    PeerScoringService, StewardListService, consensus::outcome_bus::OutcomeBus,
     mls_crypto::MlsService,
 };
 
@@ -37,16 +37,15 @@ where
     #[allow(clippy::too_many_arguments)]
     pub fn create<Pr>(
         conversation_id: &str,
+        member_id: &[u8],
         provider: &Pr,
         credential: CredentialWithKey,
         ciphersuite: Ciphersuite,
         signer: &impl Signer,
-        scoring: PeerScoringService<Sc>,
-        steward_config: StewardListConfig,
         consensus: &C,
+        scoring: PeerScoringService<Sc>,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
-        member_id: &[u8],
     ) -> Result<Self, ConversationError>
     where
         Pr: OpenMlsProvider,
@@ -63,7 +62,6 @@ where
             conversation_id,
             mls,
             scoring,
-            steward_config,
             consensus,
             app_id,
             config,
@@ -85,16 +83,15 @@ where
     /// prior knowledge of the conversation.
     #[allow(clippy::too_many_arguments)]
     pub fn join<Pr>(
+        member_id: &[u8],
         provider: &Pr,
+        signer: &impl Signer,
         welcome_bytes: &[u8],
         conversation_sync_bytes: &[u8],
-        scoring: PeerScoringService<Sc>,
-        steward_config: StewardListConfig,
         consensus: &C,
+        scoring: PeerScoringService<Sc>,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
-        member_id: &[u8],
-        signer: &impl Signer,
     ) -> Result<Option<Self>, ConversationError>
     where
         Pr: OpenMlsProvider,
@@ -108,7 +105,6 @@ where
             &conversation_id,
             mls,
             scoring,
-            steward_config,
             consensus,
             app_id,
             config,
@@ -131,7 +127,6 @@ where
         conversation_id: &str,
         mls: MlsService,
         mut scoring: PeerScoringService<Sc>,
-        steward_config: StewardListConfig,
         consensus: &C,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
@@ -144,7 +139,7 @@ where
         // The conversation id is the deterministic-sort salt every member must
         // share; the library owns it so creator and joiner agree on every
         // elected list.
-        let mut steward_list = StewardListService::empty(steward_config);
+        let mut steward_list = StewardListService::empty(config.steward_list.clone());
         steward_list.set_conversation_id(conversation_id.as_bytes());
         steward_list.set_max_retries(config.max_reelection_attempts);
         // Creator path: bootstrap the list with self as sole steward at

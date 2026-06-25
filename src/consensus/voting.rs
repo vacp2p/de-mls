@@ -154,9 +154,9 @@ where
     pub fn vote<Pr>(
         &mut self,
         provider: &Pr,
+        signer: &impl Signer,
         proposal_id: u32,
         vote: bool,
-        signer: &impl Signer,
     ) -> Result<(), ConversationError>
     where
         Pr: OpenMlsProvider,
