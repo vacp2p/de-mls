@@ -1,16 +1,30 @@
-//! Deterministic [`StewardList`] and [`StewardListConfig`].
+//! The deterministic steward list — who serves as steward, and in what order.
 //!
-//! Sort key: `SHA256(election_epoch || retry_round || member_id || conversation_id)`;
-//! take the first `sn` candidates.
+//! [`StewardListConfig`] fixes the size bounds (`sn_min`/`sn_max`);
+//! [`StewardList`] is one elected, ordered roster. Stewards are chosen by
+//! ascending `SHA256(election_epoch || retry_round || member_id ||
+//! conversation_id)`, keeping the first `sn` — the same key every member
+//! computes, so the list is reproducible and unbiased (RFC §"Steward list
+//! creation"). Each epoch shifts the active slot by one, rotating the
+//! epoch/backup steward.
+
+use std::ops::RangeInclusive;
 
 use sha2::{Digest, Sha256};
 
 use crate::error::ConversationError;
 
+/// Group-wide steward-list size bounds, fixed at conversation creation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StewardListConfig {
+    /// Smallest list size, applied once membership reaches it. Below `sn_min`
+    /// members, the list is the whole group.
     pub sn_min: usize,
+    /// Largest list size. Past this, the list is a genuine subset and members
+    /// must vote on who serves.
     pub sn_max: usize,
+    /// Whether an election may draw candidates from a subset of members rather
+    /// than the full roster. Read by the coordinator; not used in generation.
     pub allow_subset_candidates: bool,
 }
 
@@ -25,6 +39,7 @@ impl Default for StewardListConfig {
 }
 
 impl StewardListConfig {
+    /// Validated constructor: requires `1 <= sn_min <= sn_max`.
     pub fn new(sn_min: usize, sn_max: usize) -> Result<Self, ConversationError> {
         if sn_min < 1 || sn_min > sn_max {
             return Err(ConversationError::InvalidConfigSize);
@@ -36,7 +51,19 @@ impl StewardListConfig {
         })
     }
 
-    fn size_bounds(&self, total_members: usize) -> std::ops::RangeInclusive<usize> {
+    /// List size to elect for `total_members` — the largest legal size.
+    pub fn compute_list_size(&self, total_members: usize) -> usize {
+        *self.size_bounds(total_members).end()
+    }
+
+    /// Whether `size` is a legal list size for a group of `total_members`.
+    pub fn is_valid_size(&self, size: usize, total_members: usize) -> bool {
+        self.size_bounds(total_members).contains(&size)
+    }
+
+    /// Valid size range for `total_members`: the exact count when the group is
+    /// smaller than `sn_min`, otherwise `[sn_min, min(sn_max, total_members)]`.
+    fn size_bounds(&self, total_members: usize) -> RangeInclusive<usize> {
         if total_members < self.sn_min {
             total_members..=total_members
         } else {
@@ -44,26 +71,41 @@ impl StewardListConfig {
         }
     }
 
-    /// Upper bound of the valid list size for `total_members`.
-    pub fn compute_list_size(&self, total_members: usize) -> usize {
-        *self.size_bounds(total_members).end()
-    }
-
-    pub fn is_valid_size(&self, size: usize, total_members: usize) -> bool {
-        self.size_bounds(total_members).contains(&size)
+    /// Reject inputs `generate`/`validate` can't honor: an empty roster, or an `sn`
+    /// outside the config's valid range for this membership.
+    pub fn check_generation_inputs(
+        &self,
+        member_ids: &[Vec<u8>],
+        sn: usize,
+    ) -> Result<(), ConversationError> {
+        if member_ids.is_empty() {
+            return Err(ConversationError::EmptyMembersList);
+        }
+        if !self.is_valid_size(sn, member_ids.len()) {
+            return Err(ConversationError::InvalidConfigSize);
+        }
+        Ok(())
     }
 }
 
-/// Ordered stewards for epochs `[election_epoch, election_epoch + len)`.
+/// One elected, ordered steward roster, serving epochs
+/// `[election_epoch, election_epoch + len)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StewardList {
     members: Vec<Vec<u8>>,
     config: StewardListConfig,
     election_epoch: u64,
+    /// The retry round this list was generated with — the seed baked into its
+    /// SHA256 sort. Frozen provenance, so any peer can re-derive and validate
+    /// the exact same list. Distinct from the service's live
+    /// `next_election_round` counter.
     retry_round: u32,
 }
 
 impl StewardList {
+    /// Elect `sn` stewards: sort `member_ids` by ascending steward hash and keep
+    /// the first `sn`. Deterministic — every member derives the same list.
+    /// Errors on an empty roster or an `sn` outside the config bounds.
     pub fn generate(
         election_epoch: u64,
         conversation_id: &[u8],
@@ -72,7 +114,7 @@ impl StewardList {
         config: StewardListConfig,
         retry_round: u32,
     ) -> Result<Self, ConversationError> {
-        check_generation_inputs(&config, member_ids, sn)?;
+        config.check_generation_inputs(member_ids, sn)?;
         let ordered =
             sorted_steward_indices(election_epoch, retry_round, conversation_id, member_ids);
         let members = ordered
@@ -88,7 +130,10 @@ impl StewardList {
         })
     }
 
-    /// `true` if `proposed` matches [`Self::generate`] (no allocation).
+    /// Whether `proposed` is exactly what [`Self::generate`] would produce for
+    /// these inputs — the check every member runs on an election proposal before
+    /// accepting it. Compares against the freshly sorted order without cloning
+    /// the member list.
     pub fn validate(
         proposed: &[Vec<u8>],
         election_epoch: u64,
@@ -98,7 +143,7 @@ impl StewardList {
         retry_round: u32,
     ) -> Result<bool, ConversationError> {
         let sn = proposed.len();
-        check_generation_inputs(config, member_ids, sn)?;
+        config.check_generation_inputs(member_ids, sn)?;
         let ordered =
             sorted_steward_indices(election_epoch, retry_round, conversation_id, member_ids);
         Ok(ordered
@@ -108,13 +153,15 @@ impl StewardList {
             .all(|(&i, want)| &member_ids[i] == want))
     }
 
-    /// First eligible steward at rotation offset `0` for `epoch`.
-    /// `|_| true` = nominal slot. `None` if exhausted or none eligible.
+    /// The steward serving `epoch`, walking past any the `eligible` predicate
+    /// rejects.
+    /// `None` if the list is exhausted or no one is eligible.
     pub fn epoch_steward<F: Fn(&[u8]) -> bool>(&self, epoch: u64, eligible: F) -> Option<&[u8]> {
         self.steward_from(epoch, 0, eligible)
     }
 
-    /// Epoch steward (offset `0`) and backup (offset `1`), distinct when possible.
+    /// The epoch steward and its backup (the next eligible slot), distinct when
+    /// two members are eligible. Either is `None` when unavailable.
     pub fn epoch_and_backup<F: Fn(&[u8]) -> bool>(
         &self,
         epoch: u64,
@@ -126,6 +173,8 @@ impl StewardList {
         (epoch_steward, backup)
     }
 
+    /// Walk the rotation from `epoch`'s slot plus `offset`, returning the first
+    /// member `eligible` accepts. `None` if exhausted or none match.
     fn steward_from<F: Fn(&[u8]) -> bool>(
         &self,
         epoch: u64,
@@ -147,7 +196,8 @@ impl StewardList {
         None
     }
 
-    /// `true` when `epoch` is before `election_epoch` or at/after `election_epoch + len`.
+    /// Whether `epoch` falls outside this list's `[election_epoch, +len)` span —
+    /// before it starts or past its last assigned epoch.
     pub fn is_exhausted(&self, epoch: u64) -> bool {
         if epoch < self.election_epoch {
             return true;
@@ -155,51 +205,45 @@ impl StewardList {
         (epoch - self.election_epoch) >= self.members.len() as u64
     }
 
+    /// Whether `member_id` is on this list.
     pub fn contains(&self, member_id: &[u8]) -> bool {
         self.members.iter().any(|m| m.as_slice() == member_id)
     }
 
+    /// The stewards in elected (rotation) order.
     pub fn members(&self) -> &[Vec<u8>] {
         &self.members
     }
 
+    /// Number of stewards on the list.
     pub fn len(&self) -> usize {
         self.members.len()
     }
 
+    /// Whether the list has no stewards.
     pub fn is_empty(&self) -> bool {
         self.members.is_empty()
     }
 
+    /// The size bounds this list was elected under.
     pub fn config(&self) -> &StewardListConfig {
         &self.config
     }
 
+    /// First epoch this list serves.
     pub fn election_epoch(&self) -> u64 {
         self.election_epoch
     }
 
     /// Retry round frozen into this list as its SHA256-sort seed (carried in
-    /// `ConversationSync`). Distinct from the plugin's live `next_retry_round`.
+    /// `ConversationSync`). Distinct from the service's live `next_election_round`.
     pub fn retry_round(&self) -> u32 {
         self.retry_round
     }
 }
 
-fn check_generation_inputs(
-    config: &StewardListConfig,
-    member_ids: &[Vec<u8>],
-    sn: usize,
-) -> Result<(), ConversationError> {
-    if member_ids.is_empty() {
-        return Err(ConversationError::EmptyMembersList);
-    }
-    if !config.is_valid_size(sn, member_ids.len()) {
-        return Err(ConversationError::InvalidConfigSize);
-    }
-    Ok(())
-}
-
+/// Member indices ordered by ascending steward hash, tie-broken on `member_id`
+/// so the order is total and independent of the input slice's ordering.
 fn sorted_steward_indices(
     election_epoch: u64,
     retry_round: u32,
@@ -222,6 +266,8 @@ fn sorted_steward_indices(
     scored.into_iter().map(|(_, i)| i).collect()
 }
 
+/// `SHA256(epoch || retry_round || member_id || conversation_id)` — the
+/// per-member sort key.
 fn compute_steward_hash(
     epoch: u64,
     retry_round: u32,

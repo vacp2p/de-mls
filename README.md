@@ -14,7 +14,7 @@ The library's product is a single per-conversation handle — `Conversation` —
 modeled on OpenMLS's `MlsGroup`. It owns every protocol decision (MLS encryption,
 proposal voting, steward commits, freeze timing); transport and identity stay on
 your side of the boundary. It runs synchronously and is generic over its
-consensus and steward plug-ins and its peer-score storage backend.
+consensus plug-in and its peer-score storage backend.
 
 > Looking for a runnable app? An example integration — a gateway, a Waku
 > delivery service, and a Dioxus desktop client wired onto this library — lives
@@ -35,14 +35,15 @@ state machine.
 
 ```rust,ignore
 use de_mls::Conversation;
-use de_mls::defaults::{DefaultConsensusPlugin, DefaultStewardList, InMemoryPeerScoreStorage};
+use de_mls::defaults::{DefaultConsensusPlugin, InMemoryPeerScoreStorage};
 
-// The middle generic is the peer-score *storage* backend; `scoring` is a
+// The second generic is the peer-score *storage* backend; `scoring` is a
 // `PeerScoringService` built over it (see `de_mls::defaults::DefaultPeerScoring`).
+// The steward roster is library-owned — you pass only a `StewardListConfig`.
 // Create a conversation you steward, or join one from a welcome:
-let mut convo: Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, DefaultStewardList> =
+let mut convo: Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage> =
     Conversation::create(id, &provider, credential, suite, &signer,
-                         scoring, steward, consensus, app_id, config, member_id)?;
+                         scoring, steward_config, consensus, app_id, config, member_id)?;
 
 // let joined = Conversation::join(&provider, welcome_bytes, sync_bytes, …, &signer)?;  // Ok(None) = not for us
 
@@ -58,9 +59,10 @@ reports its next deadline via `next_wakeup_in()`, advancing when you call
 `poll()`. Membership and chat are plain methods: `add_member` / `sponsor_member`,
 `remove_member`, `vote`, `send_message`, `leave`.
 
-Default plug-in implementations (consensus over `hashgraph-like-consensus`,
-in-memory peer-score storage, the deterministic steward list) live in
-`de_mls::defaults` — adopt them wholesale or swap any one.
+Default implementations (consensus over `hashgraph-like-consensus` and
+in-memory peer-score storage) live in `de_mls::defaults` — adopt them
+wholesale or swap either. The steward list is library-owned; you configure it
+with a `StewardListConfig`.
 
 A complete, runnable construction — creator and joiner built straight from
 direct arguments — is in
@@ -82,6 +84,21 @@ durable integrator can back the table with sqlite or a key-value store.
 Storage methods are fallible (the trait carries an associated `Error` type),
 so a durable backend surfaces I/O failures rather than swallowing a score
 write.
+
+## Steward list
+
+Who may commit each epoch — the steward roster and its epoch/backup rotation —
+is fully library-owned. You pass only a `StewardListConfig` (the `sn_min` /
+`sn_max` size bounds) at construction; de-mls generates the list, validates
+election proposals, runs the election through consensus, and rotates the epoch
+steward.
+
+Generation is deterministic and normative: every member derives the identical
+roster by sorting on `SHA256(epoch ‖ retry_round ‖ member_id ‖
+conversation_id)`, and a proposal that doesn't reproduce it is rejected by all
+peers (RFC §"Steward list creation"). There is nothing to override — a
+divergent generator would fork the group — so, unlike consensus and scoring,
+the steward list takes no plug-in.
 
 ## Build & test
 

@@ -1,13 +1,12 @@
-//! Default implementations of the library's non-MLS plug-in traits.
+//! Default implementations of the library's pluggable pieces.
 //!
 //! Contents:
 //! - [`crate::defaults::InMemoryPeerScoreStorage`] — `HashMap`-backed
-//!   peer-score storage.
+//!   peer-score storage backend.
 //! - [`crate::defaults::DefaultConsensusPlugin`] — in-memory consensus
 //!   backend over `hashgraph_like_consensus` types.
-//! - [`crate::defaults::DefaultPeerScoring`],
-//!   [`crate::defaults::DefaultStewardList`] — type aliases for the reference
-//!   peer-scoring and steward-list plug-ins.
+//! - [`crate::defaults::DefaultPeerScoring`] — alias for [`PeerScoringService`]
+//!   over the in-memory store.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -17,10 +16,7 @@ use hashgraph_like_consensus::{
     storage::InMemoryConsensusStorage, types::ConsensusEvent,
 };
 
-use crate::{
-    ConsensusPlugin, DeterministicStewardList, PeerScoreStorage, PeerScoringService,
-    SyncConsensusReceiver,
-};
+use crate::{ConsensusPlugin, PeerScoreStorage, PeerScoringService, SyncConsensusReceiver};
 
 // ═══════════════════════════════════════════════════════════════════
 // In-memory peer-score storage
@@ -131,9 +127,6 @@ impl ConsensusPlugin for DefaultConsensusPlugin {
 /// storage. The per-event score deltas are supplied at construction (see
 /// [`crate::default_score_deltas`]).
 pub type DefaultPeerScoring = PeerScoringService<InMemoryPeerScoreStorage>;
-
-/// Reference steward-list plug-in: [`DeterministicStewardList`].
-pub type DefaultStewardList = DeterministicStewardList;
 
 #[cfg(test)]
 mod tests {

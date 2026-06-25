@@ -30,9 +30,7 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use prost::Message;
 
-use de_mls::defaults::{
-    DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList, InMemoryPeerScoreStorage,
-};
+use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
 use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
@@ -47,13 +45,11 @@ use de_mls::{
 };
 
 use crate::common::{
-    TEST_SUITE, make_scoring, make_steward, mint_key_package, test_credential,
-    wallet::WalletMemberId,
+    TEST_SUITE, make_scoring, mint_key_package, test_credential, wallet::WalletMemberId,
 };
 
 /// Per-conversation MLS service stack the harness runs.
-pub type TestConversation =
-    Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, DefaultStewardList>;
+pub type TestConversation = Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage>;
 
 const MAX_SESSIONS_PER_SCOPE: usize = 10;
 
@@ -108,12 +104,6 @@ impl Integrator {
     /// Build a fresh scoring plug-in from this integrator's seed config.
     fn scoring(&self) -> DefaultPeerScoring {
         make_scoring(&self.scoring_config)
-    }
-
-    /// Build a fresh (empty) steward-list plug-in from this integrator's
-    /// seed config.
-    fn steward(&self) -> DefaultStewardList {
-        make_steward(self.steward_list_config.clone())
     }
 
     /// Mint a single-use key package into this integrator's reused provider,
@@ -174,7 +164,6 @@ impl Member {
     ) -> Self {
         let integ = Integrator::new(private_key, steward_list_config);
         let scoring = integ.scoring();
-        let steward = integ.steward();
         let convo = Conversation::create(
             conversation_id,
             &integ.provider,
@@ -182,7 +171,7 @@ impl Member {
             TEST_SUITE,
             &integ.signer,
             scoring,
-            steward,
+            integ.steward_list_config.clone(),
             integ.consensus(),
             integ.app_id(),
             config.clone(),
@@ -583,7 +572,6 @@ impl Member {
         // a member that never minted a KP holds none, so a welcome not for us
         // cleanly yields `Ok(None)`.
         let scoring = self.integ.scoring();
-        let steward = self.integ.steward();
         // `join` opens the welcome internally; only the addressed joiner gets
         // `Some`.
         match Conversation::join(
@@ -591,7 +579,7 @@ impl Member {
             &welcome.welcome_bytes,
             &welcome.conversation_sync_bytes,
             scoring,
-            steward,
+            self.integ.steward_list_config.clone(),
             self.integ.consensus(),
             self.integ.app_id(),
             self.pending_config.clone(),

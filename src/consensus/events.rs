@@ -10,18 +10,16 @@ use tracing::{error, info};
 
 use crate::{
     ConsensusApplyResult, ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
-    ConversationState, PeerScoreStorage, ScoreOp, StewardListPlugin, apply_consensus_result,
-    emergency_score_ops,
+    ConversationState, PeerScoreStorage, ScoreOp, apply_consensus_result, emergency_score_ops,
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
     },
 };
 
-impl<C, Sc, St> Conversation<C, Sc, St>
+impl<C, Sc> Conversation<C, Sc>
 where
     C: ConsensusPlugin,
     Sc: PeerScoreStorage,
-    St: StewardListPlugin,
 {
     /// Apply one resolved outcome: surface the decision to the integrator,
     /// apply the queue effects, then run whatever follow-up the result
@@ -234,7 +232,7 @@ where
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
         self.services.steward_list.bump_retry();
-        let round = self.services.steward_list.next_retry_round();
+        let round = self.services.steward_list.next_election_round();
         let max = self.services.steward_list.max_retries();
         if round > max {
             info!(

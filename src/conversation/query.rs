@@ -2,15 +2,14 @@
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, MemberRole,
-    PeerScoreStorage, StewardListPlugin, mls_crypto::MlsService,
+    PeerScoreStorage, mls_crypto::MlsService,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
-impl<C, Sc, St> Conversation<C, Sc, St>
+impl<C, Sc> Conversation<C, Sc>
 where
     C: ConsensusPlugin,
     Sc: PeerScoreStorage,
-    St: StewardListPlugin,
 {
     /// Current state of the conversation's state machine.
     pub fn state(&self) -> ConversationState {
@@ -38,7 +37,7 @@ where
     /// display.
     pub fn epoch_and_retry(&self) -> Result<(u64, u32), ConversationError> {
         let epoch = self.mls().current_epoch()?;
-        Ok((epoch, self.services.steward_list.next_retry_round()))
+        Ok((epoch, self.services.steward_list.next_election_round()))
     }
 
     /// Count of buffered pending membership updates. Used by tests and the UI

@@ -8,7 +8,7 @@ use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 
 use crate::{
     CommitHash, ConversationError, ConversationQueues, FreezeFinalizeResult, FreezeOutcome,
-    ProcessResult, ScoreEvent, ScoreOp, StewardListPlugin,
+    ProcessResult, ScoreEvent, ScoreOp, StewardListService,
     conversation::BufferedCommitCandidate,
     freeze::round::RoundContext,
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
@@ -39,11 +39,11 @@ enum CandidateOutcome {
 /// `own_commit_discarded` enforces MLS's one-pending-commit rule: the first
 /// incoming attempt wipes our own pending commit, so a later lower-priority
 /// local candidate has nothing to apply.
-pub(super) fn apply_in_priority_order<Pr, M: MlsService, St: StewardListPlugin>(
+pub(super) fn apply_in_priority_order<Pr, M: MlsService>(
     provider: &Pr,
     conversation: &mut ConversationQueues,
     mls: &mut M,
-    steward: &St,
+    steward: &StewardListService,
     sorted: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
     self_member_id: &[u8],
@@ -122,13 +122,13 @@ where
 /// RFC §Commit Validation: unpicked competitors are honest under
 /// Δ-synchrony (same approved set, different MLS entropy) and MUST NOT
 /// be classified as misbehaviour.
-fn record_winner_scores<St: StewardListPlugin>(
+fn record_winner_scores(
     score_ops: &mut Vec<ScoreOp>,
     committer: &[u8],
     self_member_id: &[u8],
     ctx: &RoundContext,
     losers: impl Iterator<Item = BufferedCommitCandidate>,
-    steward: &St,
+    sl_service: &StewardListService,
     conversation_id: &str,
 ) {
     score_ops.push(ScoreOp {
@@ -150,7 +150,7 @@ fn record_winner_scores<St: StewardListPlugin>(
 
     for loser in losers {
         let claimed = loser.candidate_msg.steward_member_id;
-        if steward.is_steward(&claimed) {
+        if sl_service.is_steward(&claimed) {
             score_ops.push(ScoreOp {
                 member_id: claimed,
                 event: ScoreEvent::HonestCommitAttempt,
@@ -209,11 +209,11 @@ where
 ///
 /// Caller must have discarded any own pending commit first — MLS allows
 /// only one per conversation.
-fn apply_incoming_candidate<Pr, M: MlsService, St: StewardListPlugin>(
+fn apply_incoming_candidate<Pr, M: MlsService>(
     provider: &Pr,
     conversation: &mut ConversationQueues,
     mls: &mut M,
-    steward: &St,
+    sl_service: &StewardListService,
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
 ) -> Result<CandidateOutcome, ConversationError>
@@ -247,7 +247,7 @@ where
 
     // Commit sender must be on the steward list (RFC §"Commit validation service").
     if let Some(violation) =
-        check_commit_sender_authorized(conversation, steward, &commit_sender, ctx)
+        check_commit_sender_authorized(conversation, sl_service, &commit_sender, ctx)
     {
         mls.discard_staged_commit(provider)?;
         return Ok(CandidateOutcome::Drop(violation.target_score_op()));
@@ -431,20 +431,20 @@ fn action_projection_from_mls(action: &MlsProposalOutput) -> (u8, &[u8]) {
 /// (re-election in progress), and "Layer-3 recovery_mode active" (RFC
 /// §Anti-Deadlock: any member MAY commit to restore liveness; mirrors
 /// the relaxed gate in `create_commit_candidate`).
-fn check_commit_sender_authorized<St: StewardListPlugin>(
+fn check_commit_sender_authorized(
     conversation: &ConversationQueues,
-    steward: &St,
+    sl_service: &StewardListService,
     commit_sender: &[u8],
     ctx: &RoundContext,
 ) -> Option<ViolationEvidence> {
     if ctx.in_recovery {
         return None;
     }
-    steward.current_list()?;
-    if steward.is_exhausted(ctx.current_epoch) {
+    sl_service.current_list()?;
+    if sl_service.is_exhausted(ctx.current_epoch) {
         return None;
     }
-    if steward.is_steward(commit_sender) {
+    if sl_service.is_steward(commit_sender) {
         return None;
     }
     tracing::warn!(

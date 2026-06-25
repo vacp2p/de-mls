@@ -1,16 +1,12 @@
-//! Steward list plug-in: deterministic roster and rotation queries.
+//! Steward list: the library-owned deterministic roster and rotation queries.
 //!
-//! Passive per-conversation state — no MLS or consensus I/O. The coordinator
-//! passes an `eligible` predicate on every live position query.
-//!
-//! - `list` — [`StewardList`] and [`StewardListConfig`]
-//! - `plugin` — [`StewardListPlugin`] trait and events
-//! - `deterministic` — [`DeterministicStewardList`] reference impl
+//! - `list` — [`StewardList`] value and [`StewardListConfig`]
+//! - `service` — [`StewardListService`], the stateful per-conversation roster
 
-mod deterministic;
 mod list;
-mod plugin;
+mod service;
 
-pub use deterministic::DeterministicStewardList;
 pub use list::{StewardList, StewardListConfig};
-pub use plugin::{DEFAULT_MAX_RETRIES, ElectionDecision, StewardListPlugin};
+pub use service::{
+    DEFAULT_MAX_RETRIES, ElectionDecision, ElectionSkip, StewardListService, StewardListSnapshot,
+};

@@ -24,7 +24,7 @@ use crate::{
     ConversationError, ConversationEvent, ConversationQueues, ConversationState,
     ConversationStateMachine, FreezeBufferOutcome, FreezeFinalizeResult, OperatingMode, Outbound,
     PeerScoreStorage, PeerScoringService, PhaseTimer, ProcessResult, ProposalKind,
-    StewardListPlugin, compute_commit_hash, decode_inbound_payload, finalize_freeze_round,
+    StewardListService, compute_commit_hash, decode_inbound_payload, finalize_freeze_round,
     member_set,
     mls_crypto::{
         CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsService,
@@ -65,15 +65,15 @@ pub struct AutoVoteEntry {
 /// grouped so the handle holds them as one unit. Construction builds the MLS
 /// service, moves the plug-in instances in, and subscribes the consensus
 /// receiver here.
-pub(crate) struct ConversationServices<C: ConsensusPlugin, Sc: PeerScoreStorage, St> {
+pub(crate) struct ConversationServices<C: ConsensusPlugin, Sc: PeerScoreStorage> {
     /// Per-conversation MLS service. Present for the conversation's whole
     /// lifetime: the creator seeds it at [`Conversation::create`], the joiner
     /// at [`Conversation::join`].
     pub(crate) mls: OpenMlsService,
     /// Per-conversation peer-score tracker.
     pub(crate) scoring: PeerScoringService<Sc>,
-    /// Per-conversation steward-list plug-in.
-    pub(crate) steward_list: St,
+    /// Per-conversation steward roster.
+    pub(crate) steward_list: StewardListService,
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Built from the
     /// consensus service passed at construction.
@@ -128,14 +128,14 @@ impl Timing {
     }
 }
 
-pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoreStorage, St: StewardListPlugin> {
+pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoreStorage> {
     /// Conversation name. Identifies this conversation in the integrator's
     /// registry and is used to construct scope keys for consensus operations.
     /// Read via [`Conversation::conversation_id`].
     pub(crate) conversation_id: String,
     pub(crate) queues: ConversationQueues,
     /// Per-conversation MLS service, plug-in instances, and consensus wiring.
-    pub(crate) services: ConversationServices<C, Sc, St>,
+    pub(crate) services: ConversationServices<C, Sc>,
     pub(crate) state_machine: ConversationStateMachine,
     /// Per-conversation durable config: voting/consensus durations,
     /// `liveness_criteria_yes`, `pending_update_max_epochs`.
@@ -162,11 +162,10 @@ pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoreStorage, St: StewardLis
     pending_outbound: Mutex<Vec<Outbound>>,
 }
 
-impl<C, Sc, St> Conversation<C, Sc, St>
+impl<C, Sc> Conversation<C, Sc>
 where
     C: ConsensusPlugin,
     Sc: PeerScoreStorage,
-    St: StewardListPlugin,
 {
     /// Build a fresh conversation around an already-assembled `services`
     /// bundle (MLS service seeded, plug-ins configured, consensus receiver
@@ -174,7 +173,7 @@ where
     pub(crate) fn new(
         conversation_id: String,
         queues: ConversationQueues,
-        services: ConversationServices<C, Sc, St>,
+        services: ConversationServices<C, Sc>,
         state_machine: ConversationStateMachine,
         config: ConversationConfig,
         self_member_id: Arc<[u8]>,
@@ -692,20 +691,20 @@ mod tests {
     use crate::defaults::DefaultConsensusPlugin;
     use crate::defaults::InMemoryPeerScoreStorage;
     use crate::test_fixtures::{
-        StubStewardList, TestMls, TestProvider, make_creator_mls, make_test_consensus_service,
+        TestMls, TestProvider, make_creator_mls, make_test_consensus_service,
+        steward_service_member, steward_service_steward,
     };
-    use crate::{PeerScoringService, ScoringConfig};
+    use crate::{PeerScoringService, ScoringConfig, StewardListService};
     use std::collections::HashMap;
 
-    type TestConversation =
-        Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, StubStewardList>;
+    type TestConversation = Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage>;
 
     /// Build a conversation with a real creator-side MLS service and the given
-    /// steward stub, returning it alongside the provider that backs the MLS
+    /// steward roster, returning it alongside the provider that backs the MLS
     /// group and the signer that seeded it (for paths that sign — the guard
     /// tests early-return before then).
     fn make_conversation_with_steward(
-        steward_list: StubStewardList,
+        steward_list: StewardListService,
     ) -> (TestConversation, TestProvider, SignatureKeyPair) {
         let (mls, provider, signer) = make_creator_mls(b"test-member-id");
         (build_conversation(mls, steward_list), provider, signer)
@@ -713,10 +712,10 @@ mod tests {
 
     fn make_conversation_working() -> TestConversation {
         let (mls, _provider, _signer) = make_creator_mls(b"test-member-id");
-        build_conversation(mls, StubStewardList::member())
+        build_conversation(mls, steward_service_member())
     }
 
-    fn build_conversation(mls: TestMls, steward_list: StubStewardList) -> TestConversation {
+    fn build_conversation(mls: TestMls, steward_list: StewardListService) -> TestConversation {
         let (consensus, consensus_rx) = make_test_consensus_service();
         Conversation::new(
             "g".to_string(),
@@ -876,7 +875,7 @@ mod tests {
     #[test]
     fn create_commit_candidate_errors_for_non_steward_outside_recovery() {
         let (mut conversation, provider, signer) =
-            make_conversation_with_steward(StubStewardList::member());
+            make_conversation_with_steward(steward_service_member());
         let err = conversation
             .create_commit_candidate(&provider, &signer, b"me")
             .expect_err("non-steward should be rejected");
@@ -886,7 +885,7 @@ mod tests {
     #[test]
     fn create_commit_candidate_errors_when_no_approved_proposals() {
         let (mut conversation, provider, signer) =
-            make_conversation_with_steward(StubStewardList::steward());
+            make_conversation_with_steward(steward_service_steward(b"me"));
         let err = conversation
             .create_commit_candidate(&provider, &signer, b"me")
             .expect_err("empty approved queue should be rejected");
@@ -902,7 +901,7 @@ mod tests {
         use crate::protos::de_mls::messages::v1::ViolationEvidence;
 
         let (mut conversation, provider, signer) =
-            make_conversation_with_steward(StubStewardList::steward());
+            make_conversation_with_steward(steward_service_steward(b"me"));
         let emergency = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new())
             .with_creator(vec![0x01])
             .into_update_request()
