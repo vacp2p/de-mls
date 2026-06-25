@@ -46,8 +46,8 @@ where
     pub fn send_message<Pr>(
         &mut self,
         provider: &Pr,
-        message: Vec<u8>,
         signer: &impl Signer,
+        message: Vec<u8>,
     ) -> Result<(), ConversationError>
     where
         Pr: OpenMlsProvider,
@@ -84,9 +84,9 @@ where
     pub fn add_member<Pr>(
         &mut self,
         provider: &Pr,
-        key_package_bytes: &[u8],
-        joiner_id: &[u8],
         signer: &impl Signer,
+        joiner_id: &[u8],
+        key_package_bytes: &[u8],
     ) -> Result<(), ConversationError>
     where
         Pr: OpenMlsProvider,
@@ -122,9 +122,9 @@ where
     pub fn sponsor_member<Pr>(
         &mut self,
         provider: &Pr,
-        key_package_bytes: &[u8],
-        joiner_id: &[u8],
         signer: &impl Signer,
+        joiner_id: &[u8],
+        key_package_bytes: &[u8],
     ) -> Result<(), ConversationError>
     where
         Pr: OpenMlsProvider,
@@ -202,8 +202,8 @@ where
     pub fn remove_member<Pr>(
         &mut self,
         provider: &Pr,
-        member_id: &[u8],
         signer: &impl Signer,
+        member_id: &[u8],
     ) -> Result<(), ConversationError>
     where
         Pr: OpenMlsProvider,

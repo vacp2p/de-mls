@@ -36,12 +36,12 @@
 //! // Build a conversation from direct arguments: the OpenMLS provider,
 //! // credential + ciphersuite, the plug-in instances, and a consensus service.
 //! let mut conversation = Conversation::create(
-//!     "de-mls-test", provider, credential, ciphersuite, &signer,
-//!     scoring, steward, consensus, app_id, config, member_id,
+//!     "de-mls-test", member_id, provider, credential, ciphersuite, &signer,
+//!     consensus, scoring, app_id, config,
 //! )?;
 //!
 //! // Send a chat message — buffered, never auto-sent.
-//! conversation.send_message(b"Hello, world!".to_vec(), &signer)?;
+//! conversation.send_message(provider, &signer, b"Hello, world!".to_vec())?;
 //!
 //! // Drain outbound and publish it on your own transport.
 //! for out in conversation.drain_outbound() { /* publish */ }

@@ -152,9 +152,9 @@ fn join_completes_in_one_call() {
     creator
         .add_member(
             &alice.provider,
-            bob_kp.as_bytes(),
-            bob_kp.member_id(),
             &alice.signer,
+            bob_kp.member_id(),
+            bob_kp.as_bytes(),
         )
         .expect("add member");
 

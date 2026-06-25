@@ -392,7 +392,7 @@ impl Member {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .send_message(&self.integ.provider, message, &self.integ.signer)
+            .send_message(&self.integ.provider, &self.integ.signer, message)
             .expect("send message");
     }
 
@@ -402,9 +402,9 @@ impl Member {
             .expect("member has joined")
             .add_member(
                 &self.integ.provider,
-                key_package.as_bytes(),
-                key_package.member_id(),
                 &self.integ.signer,
+                key_package.member_id(),
+                key_package.as_bytes(),
             )
             .expect("add member");
     }
@@ -413,7 +413,7 @@ impl Member {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .remove_member(&self.integ.provider, member_id, &self.integ.signer)
+            .remove_member(&self.integ.provider, &self.integ.signer, member_id)
             .expect("remove member");
     }
 
@@ -422,7 +422,7 @@ impl Member {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .vote(&self.integ.provider, proposal_id, vote, &self.integ.signer)
+            .vote(&self.integ.provider, &self.integ.signer, proposal_id, vote)
             .expect("vote");
     }
 
@@ -455,7 +455,7 @@ impl Member {
     pub fn deliver_raw(&mut self, sender: &[u8], payload: &[u8]) {
         if let Some(convo) = self.convo.as_mut() {
             let _ =
-                convo.process_inbound(&self.integ.provider, sender, payload, &self.integ.signer);
+                convo.process_inbound(&self.integ.provider, &self.integ.signer, sender, payload);
         }
     }
 
@@ -519,9 +519,9 @@ impl Member {
         if let Some(convo) = self.convo.as_mut() {
             let _ = convo.process_inbound(
                 &self.integ.provider,
+                &self.integ.signer,
                 &packet.sender,
                 &packet.payload,
-                &self.integ.signer,
             );
         }
     }
@@ -545,9 +545,9 @@ impl Member {
         // takeover), not the explicit any-member `add_member`.
         let _ = convo.sponsor_member(
             &self.integ.provider,
-            &invite.key_package_bytes,
-            &invite.member_id,
             &self.integ.signer,
+            &invite.member_id,
+            &invite.key_package_bytes,
         );
     }
 

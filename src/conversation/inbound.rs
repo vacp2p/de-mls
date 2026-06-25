@@ -176,9 +176,9 @@ where
     pub fn process_inbound<Pr>(
         &mut self,
         provider: &Pr,
+        signer: &impl Signer,
         sender: &[u8],
         payload: &[u8],
-        signer: &impl Signer,
     ) -> Result<DispatchOutcome, ConversationError>
     where
         Pr: OpenMlsProvider,
