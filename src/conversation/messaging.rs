@@ -1,20 +1,16 @@
 //! Send operations on `Conversation`: app messages, ban requests, and
 //! member-add proposals.
 //!
-//! Also defines [`Outbound`] — the conversation's I/O-agnostic product, and
-//! [`build_key_package_announcement`] — the encoding helper for KP broadcasts.
+//! Also defines [`Outbound`] — the conversation's I/O-agnostic product.
 
 use std::error::Error as StdError;
 
-use openmls_traits::signatures::Signer;
-use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
-use prost::Message;
+use openmls_traits::{OpenMlsProvider, signatures::Signer, storage::StorageProvider};
 use tracing::info;
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
     PeerScoreStorage,
-    mls_crypto::{KeyPackageBytes, MlsService, key_package_bytes_from_tls},
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, ConversationUpdateRequest, MemberInvite,
     },
@@ -81,11 +77,15 @@ where
     /// endorsing the add by bundling a YES vote at submit. Any member may call.
     /// Errors unless the conversation is `Working`.
     ///
+    /// `joiner_id` is the joiner's id, which the caller already holds (it is the
+    /// credential the key package carries);
+    ///
     /// See [`Self::sponsor_member`] for the non-endorsing steward relay.
     pub fn add_member<Pr>(
         &mut self,
         provider: &Pr,
         key_package_bytes: &[u8],
+        joiner_id: &[u8],
         signer: &impl Signer,
     ) -> Result<(), ConversationError>
     where
@@ -96,7 +96,13 @@ where
         if state != ConversationState::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
-        self.propose_add(provider, key_package_bytes, CreatorVote::Yes, signer)
+        self.propose_add(
+            provider,
+            key_package_bytes,
+            joiner_id,
+            CreatorVote::Yes,
+            signer,
+        )
     }
 
     /// Relay a joiner that announced its own key package, without endorsing it:
@@ -109,10 +115,15 @@ where
     /// doesn't strand the join. No-op outside `Working`.
     ///
     /// See [`Self::add_member`] for the endorsing out-of-band invite.
+    ///
+    /// `joiner_id` is the announced joiner's id, taken from the `MemberInvite`
+    /// the caller decoded (it travels alongside the key-package bytes on the
+    /// wire);
     pub fn sponsor_member<Pr>(
         &mut self,
         provider: &Pr,
         key_package_bytes: &[u8],
+        joiner_id: &[u8],
         signer: &impl Signer,
     ) -> Result<(), ConversationError>
     where
@@ -123,25 +134,22 @@ where
             return Ok(());
         }
         if self.is_epoch_steward()? {
-            return self.propose_add(provider, key_package_bytes, CreatorVote::Deferred, signer);
+            return self.propose_add(
+                provider,
+                key_package_bytes,
+                joiner_id,
+                CreatorVote::Deferred,
+                signer,
+            );
         }
-        self.buffer_announced_add(key_package_bytes)
-    }
-
-    /// Record an announced joiner in the pending-update buffer (the same buffer
-    /// every member keeps for membership changes seen on the wire). Lets a
-    /// backup steward propose the Add later if the epoch steward never does.
-    /// Skips our own key package and members already in the group.
-    fn buffer_announced_add(&mut self, key_package_bytes: &[u8]) -> Result<(), ConversationError> {
-        let (kp_bytes, member_id) = key_package_bytes_from_tls(key_package_bytes.to_vec())?;
-        if member_id == *self.member_id_bytes() || self.mls().is_member(&member_id) {
+        if joiner_id == self.member_id_bytes() || self.mls().is_member(joiner_id) {
             return Ok(());
         }
         let epoch = self.mls().current_epoch()?;
         self.queues.insert_pending_update(
             ConversationUpdateRequest::member_invite(MemberInvite {
-                key_package_bytes: kp_bytes,
-                member_id,
+                key_package_bytes: key_package_bytes.to_vec(),
+                member_id: joiner_id.to_vec(),
             }),
             epoch,
         );
@@ -155,6 +163,7 @@ where
         &mut self,
         provider: &Pr,
         key_package_bytes: &[u8],
+        member_id: &[u8],
         creator_vote: CreatorVote,
         signer: &impl Signer,
     ) -> Result<(), ConversationError>
@@ -162,13 +171,12 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let (kp_bytes, member_id) = key_package_bytes_from_tls(key_package_bytes.to_vec())?;
         // Don't propose our own key package.
-        if member_id == *self.member_id_bytes() {
+        if member_id == self.member_id_bytes() {
             return Ok(());
         }
         // The target is already in the group — nothing to add.
-        if self.mls().is_member(&member_id) {
+        if self.mls().is_member(member_id) {
             info!(
                 conversation = %self.id(),
                 member = ?member_id,
@@ -179,8 +187,8 @@ where
         self.initiate_proposal(
             provider,
             ConversationUpdateRequest::member_invite(MemberInvite {
-                key_package_bytes: kp_bytes,
-                member_id,
+                key_package_bytes: key_package_bytes.to_vec(),
+                member_id: member_id.to_vec(),
             }),
             creator_vote,
             signer,
@@ -215,15 +223,4 @@ where
 
         Ok(())
     }
-}
-
-/// Encode a key package into the wire format used for KP announcements.
-/// Returns the prost-encoded `MemberInvite` bytes ready for broadcast on the
-/// welcome subtopic.
-pub fn build_key_package_announcement(key_package: &KeyPackageBytes) -> Vec<u8> {
-    MemberInvite {
-        key_package_bytes: key_package.as_bytes().to_vec(),
-        member_id: key_package.member_id().to_vec(),
-    }
-    .encode_to_vec()
 }

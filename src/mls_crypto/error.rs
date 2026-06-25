@@ -1,25 +1,20 @@
 //! Error type for MLS operations.
 //!
 //! Variants that wrap an OpenMLS error type generic over the storage
-//! backend ([`ProcessMessageError`], [`WelcomeError`], …) erase that
-//! parameter via `Box<dyn std::error::Error + Send + Sync>` so a single
+//! backend ([`ProcessMessageError`], [`WelcomeError`], …) so a single
 //! [`MlsError`] can flow regardless of which storage backend the
-//! [`OpenMlsService`](crate::mls_crypto::OpenMlsService) is configured
-//! with. The blanket `From` impls below box automatically, so `?` keeps
-//! working at call sites.
+//! [`MlsService`](crate::mls_crypto::MlsService) runs over.
 
 use std::error::Error as StdError;
 
 use openmls::prelude::tls_codec::Error as TlsCodecError;
 use openmls::{
-    error::LibraryError,
     group::{NewGroupError, ProposeRemoveMemberError, WelcomeError},
     prelude::{
-        CommitToPendingProposalsError, CreateMessageError, KeyPackageNewError, MergeCommitError,
+        CommitToPendingProposalsError, CreateMessageError, MergeCommitError,
         MergePendingCommitError, ProcessMessageError, ProposeAddMemberError,
     },
 };
-use openmls_traits::types::CryptoError;
 
 /// Boxed `std::error::Error` used as the storage-error payload in any
 /// `MlsError` variant whose source type is generic over the storage
@@ -29,15 +24,6 @@ pub type BoxedError = Box<dyn StdError + Send + Sync>;
 #[derive(Debug, thiserror::Error)]
 pub enum MlsError {
     // ── Crypto + key-package serialization ──
-    #[error(transparent)]
-    UnableToCreateKeyPackage(#[from] KeyPackageNewError),
-
-    #[error("Invalid hash reference: {0}")]
-    InvalidHashRef(#[from] LibraryError),
-
-    #[error("Failed to create signer: {0}")]
-    UnableToCreateSigner(#[from] CryptoError),
-
     #[error("Key package TLS codec error: {0}")]
     KeyPackageTls(TlsCodecError),
 
@@ -51,7 +37,7 @@ pub enum MlsError {
     #[error(transparent)]
     MlsMessageSerialize(#[from] openmls::framing::errors::MlsMessageError),
 
-    // ── MLS group operations (storage-error payloads erased) ──
+    // ── MLS group operations ──
     #[error(transparent)]
     ProcessMessage(BoxedError),
 
@@ -79,28 +65,16 @@ pub enum MlsError {
     #[error(transparent)]
     Welcome(BoxedError),
 
-    // ── Storage backend (erased) ──
+    // ── Storage backend  ──
     #[error(transparent)]
     MlsStorage(BoxedError),
 
-    #[error("Lock poisoned: {0}")]
-    Lock(String),
-
     // ── Semantic ──
-    #[error("Unexpected MLS message type")]
-    UnexpectedMessageType,
-
-    #[error("Conversation not found: {0}")]
-    ConversationNotFound(String),
-
     #[error("No pending staged commit for group: {0}")]
     NoPendingStagedCommit(String),
 
     #[error("Remove proposal references leaf index {0} with no active credential")]
     UnknownLeafIndex(u32),
-
-    #[error("Unexpected Proposal Action type")]
-    UnknownProposalAction,
 }
 
 impl MlsError {
@@ -163,12 +137,5 @@ impl<E: StdError + Send + Sync + 'static> From<NewGroupError<E>> for MlsError {
 impl<E: StdError + Send + Sync + 'static> From<WelcomeError<E>> for MlsError {
     fn from(e: WelcomeError<E>) -> Self {
         MlsError::Welcome(Box::new(e))
-    }
-}
-
-/// Recover a poisoned lock as [`MlsError::Lock`].
-impl<T> From<std::sync::PoisonError<T>> for MlsError {
-    fn from(e: std::sync::PoisonError<T>) -> Self {
-        MlsError::Lock(e.to_string())
     }
 }

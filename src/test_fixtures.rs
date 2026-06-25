@@ -18,7 +18,7 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 use crate::{
     ConsensusEngine, StewardListConfig, StewardListService,
     consensus::outcome_bus::OutcomeReceiver, defaults::DefaultConsensusPlugin,
-    mls_crypto::OpenMlsService,
+    mls_crypto::MlsService,
 };
 
 /// Build a `ConsensusEngine<DefaultConsensusPlugin>` paired with a
@@ -47,8 +47,8 @@ pub(crate) const TEST_SUITE: Ciphersuite =
 /// Concrete OpenMLS provider the crate-internal fixtures run.
 pub(crate) type TestProvider = OpenMlsRustCrypto;
 
-/// MLS service type the crate-internal unit tests run: the reference engine.
-pub(crate) type TestMls = OpenMlsService;
+/// MLS service type the crate-internal unit tests run.
+pub(crate) type TestMls = MlsService;
 
 /// Build a real creator-side MLS service for `member_id` against a fresh
 /// test-held provider, returning the service alongside the provider and the
@@ -62,7 +62,7 @@ pub(crate) fn make_creator_mls(member_id: &[u8]) -> (TestMls, TestProvider, Sign
         signature_key: signer.to_public_vec().into(),
     };
     let provider = TestProvider::default();
-    let mls = OpenMlsService::new_as_creator(
+    let mls = MlsService::new_as_creator(
         "test-conversation".to_string(),
         &provider,
         credential,

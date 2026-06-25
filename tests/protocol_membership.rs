@@ -85,7 +85,7 @@ fn welcome_fans_out_to_every_member_with_a_single_minter() {
     let bob_base = h.member(1).welcome_readys().len();
 
     let charlie_kp = h.member_mut(2).mint_key_package();
-    h.member_mut(1).add_member(charlie_kp.as_bytes());
+    h.member_mut(1).add_member(&charlie_kp);
     h.process_until("charlie joins", |h| {
         h.member(2).is_working() && h.member(0).member_count() == 3
     });

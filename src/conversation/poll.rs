@@ -19,7 +19,7 @@ use tracing::{error, info, warn};
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
     DispatchOutcome, FreezeFinalizeResult, FreezeOutcome, PeerScoreStorage, ScoreEvent, ScoreOp,
-    mls_crypto::MlsService, protos::de_mls::messages::v1::AppMessage,
+    protos::de_mls::messages::v1::AppMessage,
 };
 
 /// Summary returned by [`Conversation::poll`] after one polling pass.

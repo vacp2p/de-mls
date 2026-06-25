@@ -10,7 +10,6 @@ pub mod harness;
 pub mod wallet;
 
 use de_mls::defaults::{DefaultPeerScoring, InMemoryPeerScoreStorage};
-use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::{PeerScoringService, ScoringConfig, default_score_deltas};
 use openmls::credentials::{BasicCredential, CredentialWithKey};
 use openmls::key_packages::KeyPackage;
@@ -36,6 +35,23 @@ pub fn test_credential(member_id: &[u8]) -> (CredentialWithKey, SignatureKeyPair
     (credential, signer)
 }
 
+/// A minted key package plus the owner's `member_id` — the (bytes, id) bundle
+/// an integrator keeps for itself now that de-mls takes both as raw bytes.
+pub struct MintedKeyPackage {
+    pub bytes: Vec<u8>,
+    pub member_id: Vec<u8>,
+}
+
+impl MintedKeyPackage {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn member_id(&self) -> &[u8] {
+        &self.member_id
+    }
+}
+
 /// Mint a single-use key package into `provider` — the integrator's one
 /// reused provider, which thereby holds the KP's private keys needed to join
 /// once the matching welcome arrives.
@@ -43,7 +59,7 @@ pub fn mint_key_package(
     provider: &TestProvider,
     credential: &CredentialWithKey,
     signer: &SignatureKeyPair,
-) -> KeyPackageBytes {
+) -> MintedKeyPackage {
     let member_id = credential.credential.serialized_content().to_vec();
     let bundle = KeyPackage::builder()
         .build(TEST_SUITE, provider, signer, credential.clone())
@@ -52,7 +68,7 @@ pub fn mint_key_package(
         .key_package()
         .tls_serialize_detached()
         .expect("kp tls");
-    KeyPackageBytes::new(bytes, member_id)
+    MintedKeyPackage { bytes, member_id }
 }
 
 /// Build a fresh peer-scoring plug-in.

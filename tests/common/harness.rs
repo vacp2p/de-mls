@@ -31,18 +31,15 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 use prost::Message;
 
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
-use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
 };
-use de_mls::{
-    Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome,
-    build_key_package_announcement,
-};
+use de_mls::{Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome};
 use de_mls::{ConversationEvent, ConversationState, ScoringConfig, StewardListConfig};
 
 use crate::common::{
-    TEST_SUITE, make_scoring, mint_key_package, test_credential, wallet::WalletMemberId,
+    MintedKeyPackage, TEST_SUITE, make_scoring, mint_key_package, test_credential,
+    wallet::WalletMemberId,
 };
 
 /// Per-conversation MLS service stack the harness runs.
@@ -101,7 +98,7 @@ impl Integrator {
 
     /// Mint a single-use key package into this integrator's reused provider,
     /// which thereby holds the private keys for the matching welcome.
-    fn mint_key_package(&mut self) -> KeyPackageBytes {
+    fn mint_key_package(&mut self) -> MintedKeyPackage {
         mint_key_package(&self.provider, &self.credential, &self.signer)
     }
 
@@ -396,11 +393,16 @@ impl Member {
             .expect("send message");
     }
 
-    pub fn add_member(&mut self, key_package: &[u8]) {
+    pub fn add_member(&mut self, key_package: &MintedKeyPackage) {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .add_member(&self.integ.provider, key_package, &self.integ.signer)
+            .add_member(
+                &self.integ.provider,
+                key_package.as_bytes(),
+                key_package.member_id(),
+                &self.integ.signer,
+            )
             .expect("add member");
     }
 
@@ -462,14 +464,17 @@ impl Member {
         Outbound {
             conversation_id: conversation_id.to_string(),
             sender: self.app_id().to_vec(),
-            payload: build_key_package_announcement(&key_package),
+            payload: build_key_package_announcement(
+                key_package.as_bytes(),
+                key_package.member_id(),
+            ),
         }
     }
 
     /// Mint a key package and hand back its bytes — for an explicit
     /// `add_member(kp_bytes)` (the proposer-side path, where a member is added
     /// without a prior key-package announcement).
-    pub fn mint_key_package(&mut self) -> KeyPackageBytes {
+    pub fn mint_key_package(&mut self) -> MintedKeyPackage {
         self.integ.mint_key_package()
     }
 
@@ -538,6 +543,7 @@ impl Member {
         let _ = convo.sponsor_member(
             &self.integ.provider,
             &invite.key_package_bytes,
+            &invite.member_id,
             &self.integ.signer,
         );
     }
@@ -598,6 +604,16 @@ impl Member {
     }
 }
 
+/// Encode a key package and its owner's `member_id` into the wire format used
+/// for KP announcements. Returns the prost-encoded `MemberInvite` bytes ready
+/// for broadcast on the welcome subtopic.
+pub fn build_key_package_announcement(key_package_bytes: &[u8], member_id: &[u8]) -> Vec<u8> {
+    MemberInvite {
+        key_package_bytes: key_package_bytes.to_vec(),
+        member_id: member_id.to_vec(),
+    }
+    .encode_to_vec()
+}
 /// `N` members on one in-memory bus. Drive with [`Self::process`] /
 /// [`Self::process_until`].
 pub struct TestHarness<const N: usize> {

@@ -25,10 +25,7 @@ use crate::{
     StewardListService, compute_commit_hash,
     consensus::outcome_bus::OutcomeReceiver,
     decode_inbound_payload, finalize_freeze_round, member_set,
-    mls_crypto::{
-        CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsService,
-        OpenMlsService,
-    },
+    mls_crypto::{CommitArtifacts, MlsCommitInput, MlsService},
     protos::de_mls::messages::v1::{
         AppMessage, CommitCandidate, conversation_update_request::Payload,
     },
@@ -61,7 +58,7 @@ pub(crate) struct ConversationServices<C: ConsensusPlugin, Sc: PeerScoreStorage>
     /// Per-conversation MLS service. Present for the conversation's whole
     /// lifetime: the creator seeds it at [`Conversation::create`], the joiner
     /// at [`Conversation::join`].
-    pub(crate) mls: OpenMlsService,
+    pub(crate) mls: MlsService,
     /// Per-conversation peer-score tracker.
     pub(crate) scoring: PeerScoringService<Sc>,
     /// Per-conversation steward roster.
@@ -209,13 +206,13 @@ where
     // ── MLS service ─────────────────────────────────────────────────
 
     /// Borrow the MLS service.
-    pub(crate) fn mls(&self) -> &OpenMlsService {
+    pub(crate) fn mls(&self) -> &MlsService {
         &self.services.mls
     }
 
     /// Mutably borrow the MLS service — required for the commit pipeline
     /// and encrypt/decrypt methods that advance MLS state.
-    pub(crate) fn mls_mut(&mut self) -> &mut OpenMlsService {
+    pub(crate) fn mls_mut(&mut self) -> &mut MlsService {
         &mut self.services.mls
     }
 
@@ -288,7 +285,7 @@ where
 
         // Iterate in insertion order (FIFO): library proposal IDs are
         // content-derived hashes, so sort-by-id is not temporal.
-        let k_max = mls.commit_batch_max();
+        let k_max = self.config.commit_batch_max;
         let approved = self.queues.approved_proposals();
         let mut updates = Vec::with_capacity(approved.len().min(k_max));
         // Joiners admitted by this batch, in Add order. Travels with the
@@ -303,10 +300,7 @@ where
                     if is_member(&im.member_id) {
                         continue;
                     }
-                    updates.push(MlsCommitInput::Add(KeyPackageBytes::new(
-                        im.key_package_bytes.clone(),
-                        im.member_id.clone(),
-                    )));
+                    updates.push(MlsCommitInput::Add(im.key_package_bytes.clone()));
                     joiner_identities.push(im.member_id.clone());
                 }
                 Some(Payload::RemoveMember(rm)) => {
@@ -328,7 +322,7 @@ where
             return Ok(None);
         }
 
-        let MlsCommitCandidate {
+        let CommitArtifacts {
             proposals: mls_proposals,
             commit,
             welcome,

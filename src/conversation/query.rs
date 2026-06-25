@@ -2,8 +2,7 @@
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, MemberRole,
-    PeerScoreStorage, mls_crypto::MlsService,
-    protos::de_mls::messages::v1::ConversationUpdateRequest,
+    PeerScoreStorage, protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
 impl<C, Sc> Conversation<C, Sc>
