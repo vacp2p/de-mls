@@ -1,10 +1,11 @@
-//! Applying resolved consensus outcomes to the conversation.
+//! Running the follow-up once a proposal resolves: installing an elected
+//! roster, retrying or escalating a failed election, entering freeze for a
+//! commit, and applying emergency score changes.
 
 use std::error::Error as StdError;
 
 use hashgraph_like_consensus::{storage::ConsensusStorage, types::ConsensusEvent};
-use openmls_traits::signatures::Signer;
-use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
+use openmls_traits::{OpenMlsProvider, signatures::Signer, storage::StorageProvider};
 use prost::Message;
 use tracing::{error, info};
 
@@ -21,10 +22,10 @@ where
     C: ConsensusPlugin,
     Sc: PeerScoreStorage,
 {
-    /// Apply one resolved outcome: surface the decision to the integrator,
-    /// apply the queue effects, then run whatever follow-up the result
-    /// calls for (election install/retry, freeze entry, emergency scoring).
-    pub(crate) fn apply_consensus_outcome<Pr>(
+    /// Handle one resolved decision: tell the integrator, update the proposal
+    /// queues via [`apply_consensus_result`], then run the follow-up it asks
+    /// for — installing an election, entering freeze, applying emergency scores.
+    pub(crate) fn handle_consensus_outcome<Pr>(
         &mut self,
         provider: &Pr,
         event: ConsensusEvent,
@@ -66,7 +67,7 @@ where
             approved,
             timestamp,
         });
-        let scope = C::Scope::from(self.conversation_id.clone());
+        let scope = self.conversation_id.clone();
         let proposal = self
             .services
             .consensus

@@ -16,24 +16,27 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 
 use crate::{
-    ConsensusPlugin, ConsensusServiceFor, StewardListConfig, StewardListService,
-    defaults::DefaultConsensusPlugin, mls_crypto::OpenMlsService,
+    ConsensusEngine, StewardListConfig, StewardListService,
+    consensus::outcome_bus::OutcomeReceiver, defaults::DefaultConsensusPlugin,
+    mls_crypto::OpenMlsService,
 };
 
-/// Build a `ConsensusServiceFor<DefaultConsensusPlugin>` paired with a
+/// Build a `ConsensusEngine<DefaultConsensusPlugin>` paired with a
 /// subscribed receiver for [`crate::Conversation::new`].
-pub(crate) fn make_test_consensus_service() -> (
-    ConsensusServiceFor<DefaultConsensusPlugin>,
-    crate::defaults::SyncEventReceiver<String>,
-) {
-    use hashgraph_like_consensus::events::ConsensusEventBus;
-    let service = ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
-        DefaultConsensusPlugin::new_storage(),
-        DefaultConsensusPlugin::new_event_bus(),
+pub(crate) fn make_test_consensus_service()
+-> (ConsensusEngine<DefaultConsensusPlugin>, OutcomeReceiver) {
+    use crate::consensus::outcome_bus::OutcomeBus;
+    use hashgraph_like_consensus::{
+        events::ConsensusEventBus, service::ConsensusService, storage::InMemoryConsensusStorage,
+    };
+    let bus = OutcomeBus::default();
+    let rx = bus.subscribe();
+    let service = ConsensusService::new_with_components(
+        InMemoryConsensusStorage::new(),
+        bus,
         EthereumConsensusSigner::new(PrivateKeySigner::random()),
         10,
     );
-    let rx = service.event_bus().subscribe();
     (service, rx)
 }
 

@@ -91,10 +91,8 @@ pub use steward_list::*;
 
 // `consensus` and `phase_timer` are re-exported explicitly below to avoid glob
 // collisions with the conversation glob.
-pub use consensus::{
-    ConsensusApplyResult, ConsensusPlugin, ConsensusServiceFor, CreatorVote, SyncConsensusReceiver,
-    apply_consensus_result,
-};
+pub(crate) use consensus::{ConsensusApplyResult, ConsensusEngine, apply_consensus_result};
+pub use consensus::{ConsensusPlugin, CreatorVote};
 
 pub(crate) use phase_timer::PhaseTimer;
 
@@ -108,6 +106,6 @@ pub mod mls_crypto;
 pub mod defaults;
 
 #[cfg(test)]
-pub(crate) mod test_fixtures;
+pub mod test_fixtures;
 
 pub mod protos;

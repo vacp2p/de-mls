@@ -1,6 +1,8 @@
-//! Pure consensus result application.
+//! Working out what a resolved proposal does to the proposal queues.
 //!
-//! Updates a [`ConversationQueues`] in response to a consensus outcome.
+//! Given the decision and the request it carried, this updates the queues and
+//! returns a [`ConsensusApplyResult`] describing the follow-up the conversation
+//! still owes.
 
 use tracing::info;
 
@@ -13,60 +15,52 @@ use crate::{
     target_member_id_of,
 };
 
-/// Outcome of applying a consensus result to a conversation. Each variant
-/// encodes exactly the follow-up the app caller must perform
+/// What [`apply_consensus_result`] decided. The queue changes are already done;
+/// each variant names the follow-up still owed — install an election, commit a
+/// removal, enter recovery, and so on.
 #[derive(Debug, Clone)]
 pub enum ConsensusApplyResult {
-    /// Nothing for the caller to do. The contract is "no follow-up", not
-    /// "no change" — some of these still mutated the approved queue.
+    /// Nothing left to do. "No follow-up", not "no change" — some of these
+    /// paths still adjusted the approved queue.
     NoAction,
-    /// Election accepted. Caller validates the proposed list against the
-    /// candidate pool, installs it, and exits Reelection.
+    /// The election passed. Validate the proposed roster, install it, and
+    /// leave Reelection.
     ElectionAccepted(StewardElectionProposal),
-    /// Election rejected. Caller runs the reelection-retry / escalation path.
+    /// The election failed. Retry it, or escalate once retries are spent.
     ElectionRejected,
-    /// A membership proposal (Add/Remove) was rejected. Caller drops the
-    /// buffered pending-update for `target`.
+    /// An Add/Remove was voted down. Drop the buffered pending update for
+    /// `target`.
     RejectedMembership { target: Vec<u8> },
-    /// Layer-3 `Deadlock` ECP accepted. Caller switches the conversation's
-    /// [`crate::OperatingMode`] to `Recovery` (any-member commit) and
-    /// bypasses the inactivity timer. Cleared on the next accepted election.
+    /// A Layer-3 `Deadlock` proposal passed. Switch to `Recovery`
+    /// ([`crate::OperatingMode`], any member may commit) and commit now rather
+    /// than waiting out the inactivity timer. Cleared by the next election.
     RecoveryModeOpened,
-    /// `ViolationType::SCORE_BELOW_THRESHOLD` ECP accepted. The urgent-commit target is
-    /// already set on the conversation; caller bypasses the inactivity
-    /// timer so the urgent commit fires now and refreshes the steward
-    /// list if `target` was on it.
+    /// A below-threshold removal passed. The urgent-commit target is already
+    /// set, so commit it now rather than waiting out the inactivity timer, and
+    /// refresh the steward list if `target` was a steward.
     UrgentRemoval { target: Vec<u8> },
-    /// Regular `RemoveMember` accepted and queued for the next commit.
-    /// Caller refreshes the steward list if `target` was on it.
+    /// A regular `RemoveMember` passed and is queued for the next commit.
+    /// Refresh the steward list if `target` was a steward.
     QueuedRemoval { target: Vec<u8> },
 }
 
-/// Apply a consensus result to the conversation's proposal queues.
+/// Classify a resolved proposal and apply its queue effects.
 ///
-/// Routes by proposal kind:
-/// - **Election (accepted)** — returns [`ConsensusApplyResult::ElectionAccepted`].
-/// - **`ScoreBelowThreshold` ECP (accepted)** — queues `RemoveMember(target)`
-///   in the approved queue, sets the urgent-commit target, and returns
-///   [`ConsensusApplyResult::UrgentRemoval`].
-/// - **`Deadlock` ECP (accepted)** — returns
-///   [`ConsensusApplyResult::RecoveryModeOpened`]. No approved-queue entry
-///   (no MLS op to commit).
-/// - **Other emergency (accepted)** — transient: briefly marked approved
-///   then removed. Returns [`ConsensusApplyResult::NoAction`].
-/// - **Regular `RemoveMember` (accepted)** — moved to the approved queue;
-///   returns [`ConsensusApplyResult::QueuedRemoval`]. Duplicate-target
-///   removals are deduped at insertion and return `NoAction`.
-/// - **Other regular proposal (accepted)** — moved to the approved queue;
-///   returns [`ConsensusApplyResult::NoAction`].
-/// - **Election rejected** — returns [`ConsensusApplyResult::ElectionRejected`].
-/// - **Membership rejected** — returns
-///   [`ConsensusApplyResult::RejectedMembership`].
-/// - **Other rejected** — dropped from the voting queue if we owned it;
-///   returns [`ConsensusApplyResult::NoAction`].
+/// What happens follows from `approved` and the request kind: accepted
+/// membership changes move to the approved queue for the next commit; an
+/// accepted below-threshold emergency becomes a `RemoveMember` with an urgent
+/// commit; an accepted Deadlock opens Recovery; elections are handed back to
+/// install or retry; rejected proposals are dropped. The returned
+/// [`ConsensusApplyResult`] names the follow-up, if any.
 ///
-/// The caller decodes the payload once and passes the request in; this
-/// function never re-parses bytes.
+/// Two rules that aren't obvious from the branches:
+/// - **Removal dedup** — the same member can be removed by several paths
+///   (self-leave, ban, below-threshold) under different proposal ids. Only the
+///   first reaches the approved queue; MLS rejects a duplicate at commit time.
+/// - **Owner-only edits** — queue bookkeeping that assumes we opened the
+///   proposal locally runs only when `is_owner_of_proposal`.
+///
+/// The caller decodes the request once and passes it in.
 pub fn apply_consensus_result(
     conversation: &mut ConversationQueues,
     proposal_id: u32,
@@ -78,7 +72,7 @@ pub fn apply_consensus_result(
     let is_emergency = evidence.is_some();
 
     if let Some(election) = extract_election_proposal(request).cloned() {
-        return Ok(apply_election_outcome(
+        return Ok(apply_election_result(
             conversation,
             proposal_id,
             approved,
@@ -188,10 +182,9 @@ pub fn apply_consensus_result(
     Ok(ConsensusApplyResult::NoAction)
 }
 
-/// Election outcome — no MLS operation. YES hands the proposed list
-/// back to the app for validation and install; NO drops the owner's
-/// voting-queue entry.
-fn apply_election_outcome(
+/// The election branch of [`apply_consensus_result`]. YES hands the proposed
+/// roster back for validation and install; NO drops our voting-queue entry.
+fn apply_election_result(
     conversation: &mut ConversationQueues,
     proposal_id: u32,
     approved: bool,

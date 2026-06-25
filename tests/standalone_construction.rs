@@ -1,8 +1,8 @@
 //! Step 1 proof: a `Conversation` can be built and queried straight from
 //! direct arguments, with no `User` in the picture. The integrator holds its
-//! credential + signer plus shared consensus storage + signer, builds each
-//! conversation's plug-in instances and consensus service inline — exactly what
-//! `User` does internally, here done by hand.
+//! credential + signer plus the consensus backend, and builds each
+//! conversation's plug-in instances inline — exactly what `User` does
+//! internally, here done by hand.
 
 mod common;
 
@@ -17,10 +17,8 @@ use openmls_basic_credential::SignatureKeyPair;
 
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
 use de_mls::mls_crypto::KeyPackageBytes;
-use de_mls::{
-    ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ScoringConfig, StewardListConfig,
-};
 use de_mls::{Conversation, ConversationState};
+use de_mls::{ConversationEvent, ScoringConfig, StewardListConfig};
 
 use common::{
     TEST_SUITE, TestProvider, make_scoring, mint_key_package, test_credential,
@@ -34,15 +32,13 @@ const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
 /// The shared, conversation-agnostic state an integrator keeps once: its
-/// credential + signer, the consensus storage + signer, the identity, and one
-/// OpenMLS provider reused across every call. The creator seeds its group into
-/// it; a joiner mints its key package into it and later opens the welcome from
-/// it.
+/// credential + signer, the consensus backend, the identity, and one OpenMLS
+/// provider reused across every call. The creator seeds its group into it; a
+/// joiner mints its key package into it and later opens the welcome from it.
 struct Integrator {
     credential: CredentialWithKey,
     signer: SignatureKeyPair,
-    consensus_storage: <DefaultConsensusPlugin as ConsensusPlugin>::ConsensusStorage,
-    consensus_signer: <DefaultConsensusPlugin as ConsensusPlugin>::Signer,
+    consensus: DefaultConsensusPlugin,
     member_id: WalletMemberId,
     provider: TestProvider,
 }
@@ -59,8 +55,7 @@ impl Integrator {
         Self {
             credential,
             signer,
-            consensus_storage: DefaultConsensusPlugin::new_storage(),
-            consensus_signer: EthereumConsensusSigner::new(eth_signer),
+            consensus: DefaultConsensusPlugin::new(EthereumConsensusSigner::new(eth_signer)),
             member_id,
             provider: TestProvider::default(),
         }
@@ -78,18 +73,6 @@ impl Integrator {
     /// which thereby holds the private keys for the matching welcome.
     fn mint_key_package(&self) -> KeyPackageBytes {
         mint_key_package(&self.provider, &self.credential, &self.signer)
-    }
-
-    /// Fresh per-conversation consensus service drawn from the shared state.
-    /// Clones the shared storage (scope-keyed) and gets its own private event
-    /// bus.
-    fn consensus(&self) -> ConsensusServiceFor<DefaultConsensusPlugin> {
-        ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
-            self.consensus_storage.clone(),
-            DefaultConsensusPlugin::new_event_bus(),
-            self.consensus_signer.clone(),
-            10,
-        )
     }
 
     /// This integrator's `app_id` — the member id doubles as it so two
@@ -110,7 +93,7 @@ fn create_builds_a_working_steward_session_without_user() {
         &integrator.signer,
         integrator.scoring(),
         integrator.steward(),
-        integrator.consensus(),
+        &integrator.consensus,
         integrator.app_id(),
         de_mls::ConversationConfig::default(),
         integrator.member_id.member_id_bytes(),
@@ -163,7 +146,7 @@ fn join_completes_in_one_call() {
         &alice.signer,
         alice.scoring(),
         alice.steward(),
-        alice.consensus(),
+        &alice.consensus,
         alice.app_id(),
         fast_config(),
         alice.member_id.member_id_bytes(),
@@ -206,7 +189,7 @@ fn join_completes_in_one_call() {
         &welcome.conversation_sync_bytes,
         bystander.scoring(),
         bystander.steward(),
-        bystander.consensus(),
+        &bystander.consensus,
         bystander.app_id(),
         fast_config(),
         bystander.member_id.member_id_bytes(),
@@ -227,7 +210,7 @@ fn join_completes_in_one_call() {
         &welcome.conversation_sync_bytes,
         bob.scoring(),
         bob.steward(),
-        bob.consensus(),
+        &bob.consensus,
         bob.app_id(),
         fast_config(),
         bob.member_id.member_id_bytes(),

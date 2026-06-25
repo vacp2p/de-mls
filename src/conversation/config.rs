@@ -35,6 +35,10 @@ pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 
 pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
+/// Max consensus sessions retained per conversation before the library evicts
+/// the oldest. Bounds memory for a conversation with many proposals in flight.
+pub const DEFAULT_MAX_CONSENSUS_SESSIONS: usize = 10;
+
 /// Per-conversation timing config. Plug-in domains (scoring, steward list)
 /// own their own configs on the respective plug-ins — see
 /// [`crate::ScoringConfig`] and [`crate::StewardListConfig`].
@@ -72,6 +76,9 @@ pub struct ConversationConfig {
     /// §Creating Voting Proposal). See [`DEFAULT_LIVENESS_CRITERIA_YES`].
     /// Also used by the auto-vote timer as the cast value.
     pub liveness_criteria_yes: bool,
+    /// Max consensus sessions retained per conversation before the oldest is
+    /// evicted. See [`DEFAULT_MAX_CONSENSUS_SESSIONS`].
+    pub max_consensus_sessions: usize,
 }
 
 impl Default for ConversationConfig {
@@ -87,6 +94,7 @@ impl Default for ConversationConfig {
             voting_delay: DEFAULT_VOTING_DELAY,
             election_voting_delay: DEFAULT_ELECTION_VOTING_DELAY,
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
+            max_consensus_sessions: DEFAULT_MAX_CONSENSUS_SESSIONS,
         }
     }
 }

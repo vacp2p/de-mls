@@ -37,9 +37,7 @@ use crate::{
     },
 };
 
-use crate::{
-    Conversation, ConversationError, ConversationState, consensus::bridge::forward_incoming_vote,
-};
+use crate::{Conversation, ConversationError, ConversationState};
 
 /// Fast-path proposals (`expected_voters_count == 1`) bypass peer voting, so
 /// we restrict them to self-removal. Enforcing that the MLS-authenticated
@@ -235,13 +233,7 @@ where
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::Vote(vote) => {
-                let outcome_applied = self.queues.is_consensus_outcome_applied(vote.proposal_id);
-                forward_incoming_vote::<C>(
-                    &self.conversation_id,
-                    *vote,
-                    &self.services.consensus,
-                    outcome_applied,
-                )?;
+                self.forward_incoming_vote(*vote)?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::MembershipChangeReceived(request) => {
@@ -328,7 +320,7 @@ where
             .map(ProposalKind::of)
             .unwrap_or(ProposalKind::Commit);
 
-        let scope = C::Scope::from(self.conversation_id.clone());
+        let scope = self.conversation_id.clone();
         self.services
             .consensus
             .process_incoming_proposal(&scope, proposal)?;

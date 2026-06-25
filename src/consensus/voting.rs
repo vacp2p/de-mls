@@ -1,21 +1,30 @@
-//! Opening proposals and casting votes.
+//! Opening proposals, casting votes, and the small adapters that talk to the
+//! consensus service.
 //!
-//! Everything runs inline on the caller's thread: opening a proposal
-//! starts the consensus session immediately; the time-based follow-ups
-//! (auto-votes, consensus timeouts) are deadlines that `tick_deadlines`
-//! fires on a later poll.
+//! Everything runs inline on the caller's thread: opening a proposal starts the
+//! consensus session right away, while the time-based follow-ups (auto-votes,
+//! consensus timeouts) wait as deadlines that `tick_deadlines` fires on a later
+//! poll. The submit/cast/forward methods at the bottom call the consensus
+//! service and return a wire message for the caller to broadcast.
 
 use std::error::Error as StdError;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use hashgraph_like_consensus::{error::ConsensusError, storage::ConsensusStorage};
-use openmls_traits::signatures::Signer;
-use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
+use hashgraph_like_consensus::{
+    error::ConsensusError,
+    protos::consensus::v1::{Proposal, Vote},
+    session::ConsensusConfig,
+    storage::ConsensusStorage,
+    types::CreateProposalRequest,
+    utils::build_vote,
+};
+use openmls_traits::{OpenMlsProvider, signatures::Signer, storage::StorageProvider};
+use prost::Message;
 use tracing::info;
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
-    PeerScoreStorage, ProposalKind, SyncConsensusReceiver,
-    consensus::bridge::{ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal},
+    PeerScoreStorage, ProposalKind,
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
     self_leave_proposal_id,
@@ -34,6 +43,14 @@ pub enum CreatorVote {
     /// auto-propose paths, where the steward forwards peer intent without
     /// endorsing it.
     Deferred,
+}
+
+/// Per-proposal consensus-session parameters.
+struct ProposalParams {
+    expected_voters: u32,
+    proposal_expiration: Duration,
+    consensus_timeout: Duration,
+    liveness_criteria_yes: bool,
 }
 
 impl<C, Sc> Conversation<C, Sc>
@@ -72,11 +89,8 @@ where
         let consensus_timeout = self.config.consensus_timeout;
         let voting_delay = self.config.voting_delay_for(kind);
 
-        let (proposal_id, unbundled) = submit_proposal::<C>(
-            &self.conversation_id,
+        let (proposal_id, unbundled) = self.submit_proposal(
             &request,
-            &self.self_member_id,
-            &self.services.consensus,
             ProposalParams {
                 expected_voters,
                 proposal_expiration: self.config.proposal_expiration,
@@ -90,7 +104,7 @@ where
         if kind.is_emergency() {
             self.queues.insert_emergency(proposal_id);
         }
-        // Removed again by `apply_consensus_outcome` if an outcome lands
+        // Removed again by `handle_consensus_outcome` if an outcome lands
         // before the deadline fires.
         self.register_consensus_timeout(proposal_id, consensus_timeout);
 
@@ -99,7 +113,7 @@ where
                 // Owner-bundling API, not the `cast_vote` helper: peers don't
                 // have the proposal yet, so a Vote-only message would be
                 // undeliverable.
-                let scope = C::Scope::from(self.conversation_id.clone());
+                let scope = self.conversation_id.clone();
                 let proposal = self.services.consensus.cast_vote_and_get_proposal(
                     &scope,
                     proposal_id,
@@ -111,8 +125,9 @@ where
                     actor = "owner",
                     "YES vote cast (bundled at submit)"
                 );
-                let outbound: AppMessage = proposal.into();
-                let payload = self.mls_mut().build_message(provider, signer, &outbound)?;
+                let payload = self
+                    .mls_mut()
+                    .build_message(provider, signer, &proposal.into())?;
                 self.broadcast(payload);
                 self.emit_event(ConversationEvent::OwnProposalSubmitted {
                     proposal_id,
@@ -156,8 +171,10 @@ where
         self.broadcast_vote(provider, proposal_id, vote, signer)
     }
 
+    // ── Crate-internal ───────────────────────────────────────────────
+
     /// Fire elapsed auto-votes and consensus timeouts, then drain the
-    /// event bus into `apply_consensus_outcome`. Per-proposal errors are
+    /// outcome bus into `handle_consensus_outcome`. Per-proposal errors are
     /// logged and skipped so one stuck proposal can't block the rest.
     pub(crate) fn tick_deadlines<Pr>(&mut self, provider: &Pr, signer: &impl Signer)
     where
@@ -199,25 +216,16 @@ where
             self.resolve_on_timeout(proposal_id);
         }
 
-        loop {
-            // The bus is private to this conversation's service, so the
-            // scope on each event is always ours — drained, not matched.
-            let Some((_scope, event)) =
-                <_ as SyncConsensusReceiver<_>>::try_recv(&mut self.services.consensus_rx)
-            else {
-                break;
-            };
-            if let Err(e) = self.apply_consensus_outcome(provider, event, signer) {
+        while let Some((_scope, event)) = self.services.consensus_rx.try_recv() {
+            if let Err(e) = self.handle_consensus_outcome(provider, event, signer) {
                 tracing::warn!(
                     conversation = %self.conversation_id,
                     error = %e,
-                    "apply_consensus_outcome failed"
+                    "handle_consensus_outcome failed"
                 );
             }
         }
     }
-
-    // ── Crate-internal ───────────────────────────────────────────────
 
     /// Open a self-leave round: `RemoveMember(self)` with one expected
     /// voter and the leaver's YES bundled, so it resolves synchronously and
@@ -252,27 +260,60 @@ where
         self.queues
             .insert_voting_proposal(proposal_id, request.clone());
 
-        let submitted = submit_self_leave_proposal::<C>(
-            &self.conversation_id,
-            &self.self_member_id,
-            &self.services.consensus,
-            ProposalParams {
-                expected_voters: 1,
-                proposal_expiration: self.config.proposal_expiration,
-                consensus_timeout: self.config.consensus_timeout,
-                liveness_criteria_yes: true,
-            },
-        )?;
+        let submitted = self.submit_self_leave_proposal(ProposalParams {
+            expected_voters: 1,
+            proposal_expiration: self.config.proposal_expiration,
+            consensus_timeout: self.config.consensus_timeout,
+            liveness_criteria_yes: true,
+        })?;
 
         // `None`: an earlier submit is already driving this proposal_id;
         // our voting entry resolves on that session.
-        let Some((_proposal_id, app_msg)) = submitted else {
+        let Some((_, app_msg)) = submitted else {
             return Ok(());
         };
 
         let payload = self.mls_mut().build_message(provider, signer, &app_msg)?;
         self.broadcast(payload);
         Ok(())
+    }
+
+    /// Feed a peer's vote into the local consensus session.
+    ///
+    /// Late arrivals are swallowed (logged, `Ok`) so inbound dispatch keeps
+    /// draining.
+    pub(crate) fn forward_incoming_vote(&self, vote: Vote) -> Result<(), ConversationError> {
+        let proposal_id = vote.proposal_id;
+        let outcome_applied_locally = self.queues.is_consensus_outcome_applied(proposal_id);
+        let scope = self.conversation_id.clone();
+        match self.services.consensus.process_incoming_vote(&scope, vote) {
+            Ok(()) => Ok(()),
+            Err(ConsensusError::SessionNotActive) => {
+                tracing::debug!(
+                    conversation = %self.conversation_id,
+                    proposal_id,
+                    "late vote dropped: consensus session already resolved"
+                );
+                Ok(())
+            }
+            Err(ConsensusError::SessionNotFound) => {
+                if outcome_applied_locally {
+                    tracing::debug!(
+                        conversation = %self.conversation_id,
+                        proposal_id,
+                        "late vote dropped: session trimmed after local resolution"
+                    );
+                } else {
+                    tracing::warn!(
+                        conversation = %self.conversation_id,
+                        proposal_id,
+                        "vote for unknown proposal id dropped: no local session and not in resolved cache"
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     // ── Private ──────────────────────────────────────────────────────
@@ -313,7 +354,7 @@ where
     /// when the proposal is in the resolved cache, a logic bug worth a
     /// warning when it isn't.
     fn resolve_on_timeout(&self, proposal_id: u32) {
-        let scope = C::Scope::from(self.conversation_id.clone());
+        let scope = self.conversation_id.clone();
         let still_active = self
             .services
             .consensus
@@ -366,16 +407,113 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let app_message = cast_vote::<C>(
-            &self.conversation_id,
-            proposal_id,
-            vote,
-            &self.services.consensus,
-        )?;
+        let scope = self.conversation_id.clone();
+        let choice = if vote { "YES" } else { "NO" };
+        info!(
+            conversation = %self.conversation_id,
+            proposal_id, choice, "vote cast"
+        );
+        let vote_msg = self
+            .services
+            .consensus
+            .cast_vote(&scope, proposal_id, vote)?;
+
         let payload = self
             .mls_mut()
-            .build_message(provider, signer, &app_message)?;
+            .build_message(provider, signer, &vote_msg.into())?;
         self.broadcast(payload);
         Ok(())
+    }
+
+    /// Open a consensus session for `request`; returns the new `proposal_id`
+    /// and the unbundled `Proposal` wire message.
+    fn submit_proposal(
+        &self,
+        request: &ConversationUpdateRequest,
+        params: ProposalParams,
+    ) -> Result<(u32, AppMessage), ConversationError> {
+        let create_request = CreateProposalRequest::new(
+            uuid::Uuid::new_v4().to_string(),
+            request.encode_to_vec(),
+            self.self_member_id.to_vec(),
+            params.expected_voters,
+            params.proposal_expiration.as_secs(),
+            params.liveness_criteria_yes,
+        )?;
+
+        let scope = self.conversation_id.clone();
+        let proposal = self.services.consensus.create_proposal_with_config(
+            &scope,
+            create_request,
+            Some(ConsensusConfig::gossipsub().with_timeout(params.consensus_timeout)?),
+        )?;
+
+        info!(
+            conversation = %self.conversation_id,
+            proposal_id = proposal.proposal_id,
+            voters = params.expected_voters,
+            "proposal opened"
+        );
+
+        let proposal_id = proposal.proposal_id;
+        Ok((proposal_id, proposal.into()))
+    }
+
+    /// Open a self-leave session: a hand-crafted `Proposal` carrying the
+    /// deterministic [`self_leave_proposal_id`] and the leaver's signed YES,
+    /// so the single-voter session resolves on arrival.
+    ///
+    /// The fixed id makes retransmits collide as `ProposalAlreadyExist`,
+    /// returned as `Ok(None)` — nothing to broadcast.
+    fn submit_self_leave_proposal(
+        &self,
+        params: ProposalParams,
+    ) -> Result<Option<(u32, AppMessage)>, ConversationError> {
+        let self_member_id = &self.self_member_id;
+        let request = ConversationUpdateRequest::remove_member(self_member_id.to_vec());
+        let payload = request.encode_to_vec();
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let expiration = now.saturating_add(params.proposal_expiration.as_secs());
+
+        let proposal_id = self_leave_proposal_id(self_member_id);
+        let mut proposal = Proposal {
+            name: format!("self-leave:{proposal_id}"),
+            payload,
+            proposal_id,
+            proposal_owner: self_member_id.to_vec(),
+            votes: Vec::new(),
+            expected_voters_count: params.expected_voters,
+            round: 1,
+            timestamp: now,
+            expiration_timestamp: expiration,
+            liveness_criteria_yes: params.liveness_criteria_yes,
+        };
+
+        let yes_vote = build_vote(&proposal, true, self.services.consensus.signer())?;
+        proposal.votes.push(yes_vote);
+
+        let scope = self.conversation_id.clone();
+        match self
+            .services
+            .consensus
+            .process_incoming_proposal(&scope, proposal.clone())
+        {
+            Ok(()) => {
+                info!(
+                    conversation = %self.conversation_id,
+                    proposal_id, "self-leave proposal opened (expected_voters=1, bundled YES)"
+                );
+                Ok(Some((proposal_id, proposal.into())))
+            }
+            Err(ConsensusError::ProposalAlreadyExist) => {
+                info!(
+                    conversation = %self.conversation_id,
+                    proposal_id, "self-leave already in flight, skipping retransmit"
+                );
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 }
