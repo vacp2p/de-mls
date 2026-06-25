@@ -17,7 +17,7 @@ use openmls_basic_credential::SignatureKeyPair;
 
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
 use de_mls::{Conversation, ConversationState};
-use de_mls::{ConversationEvent, ScoringConfig, StewardListConfig};
+use de_mls::{ConversationEvent, ScoringConfig};
 
 use common::{
     MintedKeyPackage, TEST_SUITE, TestProvider, make_scoring, mint_key_package, test_credential,
@@ -64,10 +64,6 @@ impl Integrator {
         make_scoring(&ScoringConfig::default())
     }
 
-    fn steward(&self) -> StewardListConfig {
-        StewardListConfig::default()
-    }
-
     /// Mint a single-use key package into this integrator's reused provider,
     /// which thereby holds the private keys for the matching welcome.
     fn mint_key_package(&self) -> MintedKeyPackage {
@@ -91,7 +87,6 @@ fn create_builds_a_working_steward_session_without_user() {
         TEST_SUITE,
         &integrator.signer,
         integrator.scoring(),
-        integrator.steward(),
         &integrator.consensus,
         integrator.app_id(),
         de_mls::ConversationConfig::default(),
@@ -144,7 +139,6 @@ fn join_completes_in_one_call() {
         TEST_SUITE,
         &alice.signer,
         alice.scoring(),
-        alice.steward(),
         &alice.consensus,
         alice.app_id(),
         fast_config(),
@@ -192,7 +186,6 @@ fn join_completes_in_one_call() {
         &welcome.welcome_bytes,
         &welcome.conversation_sync_bytes,
         bystander.scoring(),
-        bystander.steward(),
         &bystander.consensus,
         bystander.app_id(),
         fast_config(),
@@ -213,7 +206,6 @@ fn join_completes_in_one_call() {
         &welcome.welcome_bytes,
         &welcome.conversation_sync_bytes,
         bob.scoring(),
-        bob.steward(),
         &bob.consensus,
         bob.app_id(),
         fast_config(),

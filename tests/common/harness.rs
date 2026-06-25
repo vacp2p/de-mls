@@ -141,6 +141,8 @@ impl Member {
         config: ConversationConfig,
         steward_list_config: StewardListConfig,
     ) -> Self {
+        let mut config = config;
+        config.steward_list = steward_list_config.clone();
         let integ = Integrator::new(private_key, steward_list_config);
         let scoring = integ.scoring();
         let convo = Conversation::create(
@@ -150,7 +152,6 @@ impl Member {
             TEST_SUITE,
             &integ.signer,
             scoring,
-            integ.steward_list_config.clone(),
             &integ.consensus,
             integ.app_id(),
             config.clone(),
@@ -175,6 +176,8 @@ impl Member {
         config: ConversationConfig,
         steward_list_config: StewardListConfig,
     ) -> Self {
+        let mut config = config;
+        config.steward_list = steward_list_config.clone();
         let integ = Integrator::new(private_key, steward_list_config);
         Self {
             integ,
@@ -567,7 +570,6 @@ impl Member {
             &welcome.welcome_bytes,
             &welcome.conversation_sync_bytes,
             scoring,
-            self.integ.steward_list_config.clone(),
             &self.integ.consensus,
             self.integ.app_id(),
             self.pending_config.clone(),
