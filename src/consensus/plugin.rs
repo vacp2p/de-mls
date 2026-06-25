@@ -1,69 +1,50 @@
-//! Consensus backend "plugin" contract.
+//! Consensus backend contract.
 //!
-//! [`ConsensusPlugin`] pins the concrete types used by the consensus library:
-//! - **`Scope`**: the per-conversation partition key
-//! - **storage**: proposal/vote persistence
-//! - **event bus**: delivery of consensus outcomes
-//! - **signer**: vote authentication (must match across peers)
-//!
-//! The app layer constructs a per-conversation [`ConsensusServiceFor<C>`] using
-//! these associated types and factories.
+//! The integrator owns only two pieces of consensus infrastructure: durable
+//! persistence and the vote-signing identity. Everything else — the scope key
+//! (always the conversation id), the outcome bus, per-scope session capacity,
+//! and every protocol call — is de-mls-internal.
 //!
 //! Reference implementation: [`crate::defaults::DefaultConsensusPlugin`].
 
 use hashgraph_like_consensus::{
-    events::ConsensusEventBus, scope::ConsensusScope, service::ConsensusService,
-    signing::ConsensusSignatureScheme, storage::ConsensusStorage, types::ConsensusEvent,
+    scope::ScopeID, service::ConsensusService, signing::ConsensusSignatureScheme,
+    storage::ConsensusStorage,
 };
 
-/// Pull-side contract for a [`ConsensusEventBus`] receiver: non-blocking.
-///
-/// Returns `None` when the queue is empty.
-///
-/// Each `Conversation` holds one receiver and drains it from
-/// `tick_deadlines`.
-pub trait SyncConsensusReceiver<Scope: ConsensusScope>: Send {
-    fn try_recv(&mut self) -> Option<(Scope, ConsensusEvent)>;
-}
+use crate::consensus::outcome_bus::OutcomeBus;
 
-/// User-level consensus backend bundle.
+/// The consensus backend the integrator holds and hands to each conversation.
+/// It picks the two concrete types the consensus library runs with — durable
+/// storage and the vote-signing identity — and provides an instance of each.
+/// de-mls fixes the scope to the conversation id and owns the outcome bus, so
+/// neither appears here.
 ///
-/// This trait only selects the concrete types the consensus library runs with:
-/// scope key, storage, event bus, and signer. The app layer decides how to
-/// instantiate and share those pieces across conversations, then builds a
-/// per-conversation service via [`ConsensusServiceFor`].
+/// A single instance backs many conversations: [`storage`](Self::storage) is
+/// called once per conversation, so an integrator sharing one scope-keyed store
+/// returns a clone of it.
 pub trait ConsensusPlugin {
-    /// Conversation identifier type used as a consensus scope key.
-    type Scope: ConsensusScope + From<String>;
+    /// Proposal/vote persistence. Scope is always the conversation id, so the
+    /// backend is keyed by [`ScopeID`].
+    type ConsensusStorage: ConsensusStorage<ScopeID>;
 
-    /// Proposal/vote persistence.
-    type ConsensusStorage: ConsensusStorage<Self::Scope>;
-
-    /// Consensus-outcome delivery (event bus).
-    ///
-    /// The receiver must implement [`SyncConsensusReceiver`] so the app can
-    /// drain it from a tick loop.
-    type EventBus: ConsensusEventBus<Self::Scope, Receiver: SyncConsensusReceiver<Self::Scope>>;
-
-    /// Signature scheme for authenticating votes.
-    ///
-    /// All peers on a network must agree on this.
+    /// Signature scheme authenticating votes. All peers on a network must
+    /// agree on this.
     type Signer: ConsensusSignatureScheme + Clone + 'static;
 
-    /// Build storage.
-    fn new_storage() -> Self::ConsensusStorage;
+    /// The proposal/vote store for a new conversation.
+    fn storage(&self) -> Self::ConsensusStorage;
 
-    /// Build an event bus.
-    ///
-    /// Most app wiring uses one bus per conversation.
-    fn new_event_bus() -> Self::EventBus;
+    /// The vote-signing identity.
+    fn signer(&self) -> Self::Signer;
 }
 
-/// Concrete consensus service derived from a [`ConsensusPlugin`]'s
-/// associated types.
-pub type ConsensusServiceFor<C> = ConsensusService<
-    <C as ConsensusPlugin>::Scope,
+/// The consensus engine de-mls runs per conversation: the integrator's storage
+/// and signer over de-mls's fixed scope key and outcome bus. Built inside
+/// [`crate::Conversation::create`] / `join`.
+pub type ConsensusEngine<C> = ConsensusService<
+    ScopeID,
     <C as ConsensusPlugin>::ConsensusStorage,
-    <C as ConsensusPlugin>::EventBus,
+    OutcomeBus,
     <C as ConsensusPlugin>::Signer,
 >;

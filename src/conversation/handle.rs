@@ -17,15 +17,14 @@ use openmls_traits::{OpenMlsProvider, signatures::Signer};
 use prost::Message;
 use tracing::info;
 
-use hashgraph_like_consensus::events::ConsensusEventBus;
-
 use crate::{
-    BufferedCommitCandidate, ConsensusPlugin, ConsensusServiceFor, ConversationConfig,
+    BufferedCommitCandidate, ConsensusEngine, ConsensusPlugin, ConversationConfig,
     ConversationError, ConversationEvent, ConversationQueues, ConversationState,
     ConversationStateMachine, FreezeBufferOutcome, FreezeFinalizeResult, OperatingMode, Outbound,
     PeerScoreStorage, PeerScoringService, PhaseTimer, ProcessResult, ProposalKind,
-    StewardListService, compute_commit_hash, decode_inbound_payload, finalize_freeze_round,
-    member_set,
+    StewardListService, compute_commit_hash,
+    consensus::outcome_bus::OutcomeReceiver,
+    decode_inbound_payload, finalize_freeze_round, member_set,
     mls_crypto::{
         CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsService,
         OpenMlsService,
@@ -43,13 +42,6 @@ pub enum LeaveOutcome {
     /// active until the next steward commit merges the removal.
     LeaveInitiated,
 }
-
-/// Receiver type the conversation drains from `tick_deadlines`. Resolves to the
-/// `Receiver` associated type on the plugin's [`ConsensusEventBus`], which
-/// is bound to implement [`crate::SyncConsensusReceiver`].
-pub(crate) type ConsensusReceiver<C> = <<C as ConsensusPlugin>::EventBus as ConsensusEventBus<
-    <C as ConsensusPlugin>::Scope,
->>::Receiver;
 
 /// One pending auto-vote: cast `vote` for `proposal_id` once the wall-clock
 /// catches up to `fire_at`. Registered by `initiate_proposal` (Deferred
@@ -77,12 +69,12 @@ pub(crate) struct ConversationServices<C: ConsensusPlugin, Sc: PeerScoreStorage>
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Built from the
     /// consensus service passed at construction.
-    pub(crate) consensus: ConsensusServiceFor<C>,
-    /// Subscriber on `consensus.event_bus()`. Drained by
-    /// `tick_deadlines`, which dispatches each event through
-    /// `apply_consensus_outcome`. Subscribed when the conversation is built in
-    /// [`Conversation::create`] / [`Conversation::join`].
-    pub(crate) consensus_rx: ConsensusReceiver<C>,
+    pub(crate) consensus: ConsensusEngine<C>,
+    /// Drain end of `consensus`'s outcome bus. Walked by `tick_deadlines`,
+    /// which dispatches each event through `handle_consensus_outcome`.
+    /// Subscribed when the conversation is built in [`Conversation::create`] /
+    /// [`Conversation::join`].
+    pub(crate) consensus_rx: OutcomeReceiver,
 }
 
 /// Time-driven conversation state walked once per polling cycle.
@@ -97,7 +89,7 @@ pub(crate) struct Timing {
     /// Pending consensus-session timeouts: `proposal_id -> fire_at`.
     /// Registered when a proposal opens (own or incoming peer); fired by
     /// `tick_deadlines` which calls `consensus.handle_consensus_timeout`.
-    /// Removed when the consensus session resolves naturally via `apply_consensus_outcome`.
+    /// Removed when the consensus session resolves naturally via `handle_consensus_outcome`.
     pub(crate) pending_consensus_timeouts: HashMap<u32, Instant>,
     /// Last freeze-progress snapshot emitted as `ConversationEvent::FreezeProgress`.
     /// `poll()` compares the current `(received, expected)` against this and
@@ -591,7 +583,7 @@ where
     }
 
     /// Drop the pending consensus timeout for `proposal_id`. Called from
-    /// `apply_consensus_outcome` once the library reaches/fails consensus,
+    /// `handle_consensus_outcome` once the library reaches/fails consensus,
     /// so the timeout can't fire a stale `handle_consensus_timeout` against
     /// an already-resolved consensus session.
     pub(crate) fn unregister_consensus_timeout(&mut self, proposal_id: u32) {
@@ -846,7 +838,7 @@ mod tests {
     }
 
     /// `register_consensus_timeout` records `now + delay`;
-    /// `unregister_consensus_timeout` drops it. `apply_consensus_outcome`
+    /// `unregister_consensus_timeout` drops it. `handle_consensus_outcome`
     /// uses the unregister path to drop deadlines on natural resolution
     /// so `tick_deadlines` doesn't fire a stale `handle_consensus_timeout`.
     #[test]

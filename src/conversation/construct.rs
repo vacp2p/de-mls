@@ -1,11 +1,11 @@
-//! Standalone construction of a [`Conversation`] — no `User` required.
+//! Standalone construction of a [`Conversation`].
 //!
 //! [`Conversation::create`] and [`Conversation::join`] take the OpenMLS
-//! provider, the plug-in instances, a ready consensus service, and the durable
+//! provider, the plug-in instances, the consensus backend, and the durable
 //! config as direct arguments. The library builds the per-conversation MLS
-//! service ([`OpenMlsService`]) internally — the creator seeds a fresh group,
-//! the joiner opens one from the welcome — and returns a conversation ready to
-//! drop into a registry.
+//! service ([`OpenMlsService`]) and consensus service internally — the creator
+//! seeds a fresh group, the joiner opens one from the welcome — and returns a
+//! conversation ready to drop into a registry.
 
 use std::error::Error as StdError;
 use std::sync::Arc;
@@ -15,12 +15,13 @@ use openmls::prelude::Ciphersuite;
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 
-use hashgraph_like_consensus::events::ConsensusEventBus;
+use hashgraph_like_consensus::{events::ConsensusEventBus, service::ConsensusService};
 
 use crate::{
-    ConsensusPlugin, ConsensusServiceFor, Conversation, ConversationConfig, ConversationError,
-    ConversationEvent, ConversationQueues, ConversationServices, ConversationStateMachine,
-    PeerScoreStorage, PeerScoringService, StewardListConfig, StewardListService,
+    ConsensusPlugin, Conversation, ConversationConfig, ConversationError, ConversationEvent,
+    ConversationQueues, ConversationServices, ConversationStateMachine, PeerScoreStorage,
+    PeerScoringService, StewardListConfig, StewardListService,
+    consensus::outcome_bus::OutcomeBus,
     mls_crypto::{MlsService, OpenMlsService},
 };
 
@@ -43,7 +44,7 @@ where
         signer: &impl Signer,
         scoring: PeerScoringService<Sc>,
         steward_config: StewardListConfig,
-        consensus: ConsensusServiceFor<C>,
+        consensus: &C,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
         member_id: &[u8],
@@ -90,7 +91,7 @@ where
         conversation_sync_bytes: &[u8],
         scoring: PeerScoringService<Sc>,
         steward_config: StewardListConfig,
-        consensus: ConsensusServiceFor<C>,
+        consensus: &C,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
         member_id: &[u8],
@@ -132,7 +133,7 @@ where
         mls: OpenMlsService,
         mut scoring: PeerScoringService<Sc>,
         steward_config: StewardListConfig,
-        consensus: ConsensusServiceFor<C>,
+        consensus: &C,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
         is_creation: bool,
@@ -157,7 +158,18 @@ where
         let state_machine = ConversationStateMachine::new_as_member();
         let initial_state = state_machine.current_state();
 
-        let consensus_rx = consensus.event_bus().subscribe();
+        // de-mls owns the outcome channel: subscribe the drain end, then move
+        // the bus into the service that publishes resolutions into it. Storage
+        // and signer are drawn from the backend (storage is the shared,
+        // scope-keyed store).
+        let outcome_bus = OutcomeBus::default();
+        let consensus_rx = outcome_bus.subscribe();
+        let consensus = ConsensusService::new_with_components(
+            consensus.storage(),
+            outcome_bus,
+            consensus.signer(),
+            config.max_consensus_sessions,
+        );
         let services = ConversationServices {
             mls,
             scoring,

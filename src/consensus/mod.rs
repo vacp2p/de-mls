@@ -1,18 +1,22 @@
-//! Consensus integration: the plug-in contract, outcome application, and the
-//! conversation-side opening/voting/bridge machinery.
+//! Consensus integration, by file:
 //!
-//! `plugin` defines the [`ConsensusPlugin`] trait and its associated types.
-//! `dispatch` applies a resolved consensus outcome ([`apply_consensus_result`]).
-//! `voting` submits and votes, `events` applies outcomes drained from the
-//! event bus, and `bridge` holds the stateless consensus-library adapters
-//! both use.
+//! - `plugin` — the [`ConsensusPlugin`] contract the integrator implements.
+//! - `outcome_bus` — the channel the consensus service publishes resolved
+//!   outcomes into, drained once per poll.
+//! - `voting` — opening proposals, casting votes, leaving, and the poll tick
+//!   that fires deadlines and drains the bus.
+//! - `apply_result` — `apply_consensus_result`: how a resolved proposal
+//!   reshapes the proposal queues.
+//! - `handle_outcome` — `handle_consensus_outcome`: the follow-up that runs
+//!   once a proposal resolves.
 
-pub(crate) mod bridge;
-mod dispatch;
-mod events;
+mod apply_result;
+mod handle_outcome;
+pub(crate) mod outcome_bus;
 mod plugin;
 mod voting;
 
-pub use dispatch::{ConsensusApplyResult, apply_consensus_result};
-pub use plugin::{ConsensusPlugin, ConsensusServiceFor, SyncConsensusReceiver};
+pub(crate) use apply_result::{ConsensusApplyResult, apply_consensus_result};
+pub(crate) use plugin::ConsensusEngine;
+pub use plugin::ConsensusPlugin;
 pub use voting::CreatorVote;

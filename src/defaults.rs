@@ -8,15 +8,13 @@
 //! - [`crate::defaults::DefaultPeerScoring`] — alias for [`PeerScoringService`]
 //!   over the in-memory store.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 
 use hashgraph_like_consensus::{
-    events::ConsensusEventBus, scope::ConsensusScope, signing::EthereumConsensusSigner,
-    storage::InMemoryConsensusStorage, types::ConsensusEvent,
+    scope::ScopeID, signing::EthereumConsensusSigner, storage::InMemoryConsensusStorage,
 };
 
-use crate::{ConsensusPlugin, PeerScoreStorage, PeerScoringService, SyncConsensusReceiver};
+use crate::{ConsensusPlugin, PeerScoreStorage, PeerScoringService};
 
 // ═══════════════════════════════════════════════════════════════════
 // In-memory peer-score storage
@@ -50,72 +48,37 @@ impl PeerScoreStorage for InMemoryPeerScoreStorage {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Sync consensus event bus
-// ═══════════════════════════════════════════════════════════════════
-
-/// Single-consumer FIFO event bus for [`ConsensusEvent`]s.
-///
-/// `publish` appends to the shared queue; `subscribe` hands back a
-/// receiver that pops from it.
-#[derive(Clone)]
-pub struct SyncEventBus<Scope: ConsensusScope> {
-    queue: Arc<Mutex<VecDeque<(Scope, ConsensusEvent)>>>,
-}
-
-impl<Scope: ConsensusScope> Default for SyncEventBus<Scope> {
-    fn default() -> Self {
-        Self {
-            queue: Arc::new(Mutex::new(VecDeque::new())),
-        }
-    }
-}
-
-impl<Scope: ConsensusScope> ConsensusEventBus<Scope> for SyncEventBus<Scope> {
-    type Receiver = SyncEventReceiver<Scope>;
-
-    fn subscribe(&self) -> Self::Receiver {
-        SyncEventReceiver {
-            queue: Arc::clone(&self.queue),
-        }
-    }
-
-    fn publish(&self, scope: Scope, event: ConsensusEvent) {
-        if let Ok(mut q) = self.queue.lock() {
-            q.push_back((scope, event));
-        }
-    }
-}
-
-/// Receiver paired with [`SyncEventBus`]. Drained via
-/// [`SyncConsensusReceiver::try_recv`].
-pub struct SyncEventReceiver<Scope: ConsensusScope> {
-    queue: Arc<Mutex<VecDeque<(Scope, ConsensusEvent)>>>,
-}
-
-impl<Scope: ConsensusScope> SyncConsensusReceiver<Scope> for SyncEventReceiver<Scope> {
-    fn try_recv(&mut self) -> Option<(Scope, ConsensusEvent)> {
-        self.queue.lock().ok()?.pop_front()
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════
 // Default consensus plug-in
 // ═══════════════════════════════════════════════════════════════════
 
-pub struct DefaultConsensusPlugin;
+/// In-memory consensus backend: one scope-keyed store shared across the
+/// conversations built from it, plus the Ethereum vote signer.
+pub struct DefaultConsensusPlugin {
+    storage: InMemoryConsensusStorage<ScopeID>,
+    signer: EthereumConsensusSigner,
+}
+
+impl DefaultConsensusPlugin {
+    /// Build a backend around `signer`, with a fresh in-memory store that the
+    /// conversations created from it all share.
+    pub fn new(signer: EthereumConsensusSigner) -> Self {
+        Self {
+            storage: InMemoryConsensusStorage::new(),
+            signer,
+        }
+    }
+}
 
 impl ConsensusPlugin for DefaultConsensusPlugin {
-    type Scope = String;
-    type ConsensusStorage = InMemoryConsensusStorage<String>;
-    type EventBus = SyncEventBus<String>;
+    type ConsensusStorage = InMemoryConsensusStorage<ScopeID>;
     type Signer = EthereumConsensusSigner;
 
-    fn new_storage() -> Self::ConsensusStorage {
-        InMemoryConsensusStorage::new()
+    fn storage(&self) -> Self::ConsensusStorage {
+        self.storage.clone()
     }
 
-    fn new_event_bus() -> Self::EventBus {
-        SyncEventBus::default()
+    fn signer(&self) -> Self::Signer {
+        self.signer.clone()
     }
 }
 

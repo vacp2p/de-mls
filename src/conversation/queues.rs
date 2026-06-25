@@ -104,7 +104,7 @@ pub struct ConversationQueues {
     /// future epoch steward can retry them if the current one fails to commit.
     pending_updates: HashMap<Vec<u8>, PendingUpdate>,
     /// Bounded FIFO of proposal IDs with a locally-observed consensus outcome.
-    /// Used by `apply_consensus_outcome` to drop library re-emissions and by
+    /// Used by `handle_consensus_outcome` to drop library re-emissions and by
     /// `forward_incoming_vote` to distinguish benign late peer votes (session
     /// was trimmed after resolution) from votes for unknown proposal IDs.
     resolved_proposals: ResolvedProposalCache,
@@ -654,7 +654,7 @@ const RESOLVED_PROPOSAL_CACHE_CAPACITY: usize = 256;
 /// observed (`ConsensusReached` or timeout-path resolution). Oldest entries
 /// are evicted once `capacity` is reached.
 ///
-/// Serves two callers: (a) duplicate-drop guard in `apply_consensus_outcome`
+/// Serves two callers: (a) duplicate-drop guard in `handle_consensus_outcome`
 /// against consensus-library re-emissions, and (b) late-packet classifier in
 /// `forward_incoming_vote` — a `SessionNotFound` for an id in this cache is
 /// a benign late vote (session was trimmed after we resolved it), while the

@@ -5,7 +5,7 @@
 //! owns `N` [`Member`]s wired to one in-memory bus, and [`TestHarness::process`]
 //! / [`TestHarness::process_until`] drive the polling-and-relay loop until a
 //! predicate holds. Each `Member` bundles the per-participant integrator state
-//! (credential + signer, consensus storage + signer, member id) with its live
+//! (credential + signer, consensus backend, member id) with its live
 //! `Conversation` and a captured-chat buffer.
 //!
 //! Relay model (de-mls layer has no transport subtopic):
@@ -36,13 +36,10 @@ use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
 };
 use de_mls::{
-    ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ConversationState, ScoringConfig,
-    StewardListConfig,
-};
-use de_mls::{
     Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome,
     build_key_package_announcement,
 };
+use de_mls::{ConversationEvent, ConversationState, ScoringConfig, StewardListConfig};
 
 use crate::common::{
     TEST_SUITE, make_scoring, mint_key_package, test_credential, wallet::WalletMemberId,
@@ -50,8 +47,6 @@ use crate::common::{
 
 /// Per-conversation MLS service stack the harness runs.
 pub type TestConversation = Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage>;
-
-const MAX_SESSIONS_PER_SCOPE: usize = 10;
 
 /// Fast sub-second timing so a real-wall-clock polling loop converges in a
 /// handful of rounds. Mirror of the gateway suite's `fast_test_config`.
@@ -67,14 +62,13 @@ pub fn fast_config() -> ConversationConfig {
     }
 }
 
-/// Per-member integrator state: the member's credential + signer, the shared
-/// consensus bits, the seed configs, and the provider it mints a key package
-/// into while waiting for the matching welcome.
+/// Per-member integrator state: the member's credential + signer, the consensus
+/// backend, the seed configs, and the provider it mints a key package into while
+/// waiting for the matching welcome.
 struct Integrator {
     credential: CredentialWithKey,
     signer: SignatureKeyPair,
-    consensus_storage: <DefaultConsensusPlugin as ConsensusPlugin>::ConsensusStorage,
-    consensus_signer: <DefaultConsensusPlugin as ConsensusPlugin>::Signer,
+    consensus: DefaultConsensusPlugin,
     member_id: WalletMemberId,
     scoring_config: ScoringConfig,
     steward_list_config: StewardListConfig,
@@ -92,8 +86,7 @@ impl Integrator {
         Self {
             credential,
             signer,
-            consensus_storage: DefaultConsensusPlugin::new_storage(),
-            consensus_signer: EthereumConsensusSigner::new(eth_signer),
+            consensus: DefaultConsensusPlugin::new(EthereumConsensusSigner::new(eth_signer)),
             member_id,
             scoring_config: ScoringConfig::default(),
             steward_list_config,
@@ -110,17 +103,6 @@ impl Integrator {
     /// which thereby holds the private keys for the matching welcome.
     fn mint_key_package(&mut self) -> KeyPackageBytes {
         mint_key_package(&self.provider, &self.credential, &self.signer)
-    }
-
-    /// Build a fresh per-conversation consensus service drawn from this
-    /// integrator's shared (scope-keyed) storage and signer.
-    fn consensus(&self) -> ConsensusServiceFor<DefaultConsensusPlugin> {
-        ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
-            self.consensus_storage.clone(),
-            DefaultConsensusPlugin::new_event_bus(),
-            self.consensus_signer.clone(),
-            MAX_SESSIONS_PER_SCOPE,
-        )
     }
 
     /// This integrator's `app_id` (its member-id bytes).
@@ -172,7 +154,7 @@ impl Member {
             &integ.signer,
             scoring,
             integ.steward_list_config.clone(),
-            integ.consensus(),
+            &integ.consensus,
             integ.app_id(),
             config.clone(),
             integ.member_id.member_id_bytes(),
@@ -580,7 +562,7 @@ impl Member {
             &welcome.conversation_sync_bytes,
             scoring,
             self.integ.steward_list_config.clone(),
-            self.integ.consensus(),
+            &self.integ.consensus,
             self.integ.app_id(),
             self.pending_config.clone(),
             self.integ.member_id.member_id_bytes(),
