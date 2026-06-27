@@ -19,12 +19,13 @@ use openmls::group::{
 };
 use openmls::key_packages::KeyPackageIn;
 use openmls::prelude::{
-    Ciphersuite, ContentType, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn,
-    ProcessedMessageContent, ProtocolMessage, ProtocolVersion,
+    ContentType, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, ProcessedMessageContent,
+    ProtocolMessage, ProtocolVersion,
 };
 use openmls_traits::storage::StorageProvider;
 use openmls_traits::{OpenMlsProvider, signatures::Signer};
 use prost::Message;
+use tracing::warn;
 
 use crate::{
     mls_crypto::{
@@ -59,21 +60,22 @@ impl MlsService {
         conversation_id: String,
         provider: &Pr,
         credential: CredentialWithKey,
-        ciphersuite: Ciphersuite,
+        group_create_config: &MlsGroupCreateConfig,
         signer: &impl Signer,
     ) -> Result<Self, MlsError>
     where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let config = MlsGroupCreateConfig::builder()
-            .ciphersuite(ciphersuite)
-            .use_ratchet_tree_extension(true)
-            .build();
+        if !group_create_config.use_ratchet_tree_extension() {
+            // DeMLS assumes the ratchet tree extension is being used.
+            // Specifically the MlsGroupJoinConfig requires this extension
+            warn!("Supplied mls config does not use ratchet tree extension");
+        }
         let group = MlsGroup::new_with_group_id(
             provider,
             signer,
-            &config,
+            group_create_config,
             GroupId::from_slice(conversation_id.as_bytes()),
             credential,
         )?;

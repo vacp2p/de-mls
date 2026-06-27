@@ -11,6 +11,7 @@
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use openmls::credentials::{BasicCredential, CredentialWithKey};
+use openmls::group::MlsGroupCreateConfig;
 use openmls::prelude::Ciphersuite;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
@@ -66,7 +67,9 @@ pub(crate) fn make_creator_mls(member_id: &[u8]) -> (TestMls, TestProvider, Sign
         "test-conversation".to_string(),
         &provider,
         credential,
-        TEST_SUITE,
+        &MlsGroupCreateConfig::builder()
+            .use_ratchet_tree_extension(true)
+            .build(),
         &signer,
     )
     .expect("create creator mls");

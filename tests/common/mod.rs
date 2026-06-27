@@ -12,14 +12,11 @@ pub mod wallet;
 use de_mls::defaults::{DefaultPeerScoring, InMemoryPeerScoreStorage};
 use de_mls::{PeerScoringService, ScoringConfig, default_score_deltas};
 use openmls::credentials::{BasicCredential, CredentialWithKey};
+use openmls::group::MlsGroupCreateConfig;
 use openmls::key_packages::KeyPackage;
-use openmls::prelude::Ciphersuite;
 use openmls::prelude::tls_codec::Serialize as _;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
-
-/// Ciphersuite the test fixtures pin.
-pub const TEST_SUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
 /// OpenMLS provider the tests run: the reference `OpenMlsRustCrypto`.
 pub type TestProvider = OpenMlsRustCrypto;
@@ -27,12 +24,20 @@ pub type TestProvider = OpenMlsRustCrypto;
 /// Build a fresh credential + signer for `member_id` (the integrator-side
 /// "credentials" the library no longer owns).
 pub fn test_credential(member_id: &[u8]) -> (CredentialWithKey, SignatureKeyPair) {
-    let signer = SignatureKeyPair::new(TEST_SUITE.signature_algorithm()).expect("signer");
+    let config = test_mls_group_config();
+    let signer = SignatureKeyPair::new(config.ciphersuite().signature_algorithm()).expect("signer");
     let credential = CredentialWithKey {
         credential: BasicCredential::new(member_id.to_vec()).into(),
         signature_key: signer.to_public_vec().into(),
     };
     (credential, signer)
+}
+
+// Build a default Group create configuration, which enables ratchet tree extension
+pub fn test_mls_group_config() -> MlsGroupCreateConfig {
+    MlsGroupCreateConfig::builder()
+        .use_ratchet_tree_extension(true)
+        .build()
 }
 
 /// A minted key package plus the owner's `member_id` — the (bytes, id) bundle
@@ -61,8 +66,9 @@ pub fn mint_key_package(
     signer: &SignatureKeyPair,
 ) -> MintedKeyPackage {
     let member_id = credential.credential.serialized_content().to_vec();
+    let config = test_mls_group_config();
     let bundle = KeyPackage::builder()
-        .build(TEST_SUITE, provider, signer, credential.clone())
+        .build(config.ciphersuite(), provider, signer, credential.clone())
         .expect("key package");
     let bytes = bundle
         .key_package()

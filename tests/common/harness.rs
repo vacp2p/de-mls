@@ -37,9 +37,9 @@ use de_mls::protos::de_mls::messages::v1::{
 use de_mls::{Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome};
 use de_mls::{ConversationEvent, ConversationState, ScoringConfig, StewardListConfig};
 
+use crate::common::test_mls_group_config;
 use crate::common::{
-    MintedKeyPackage, TEST_SUITE, make_scoring, mint_key_package, test_credential,
-    wallet::WalletMemberId,
+    MintedKeyPackage, make_scoring, mint_key_package, test_credential, wallet::WalletMemberId,
 };
 
 /// Per-conversation MLS service stack the harness runs.
@@ -143,6 +143,7 @@ impl Member {
     ) -> Self {
         let mut config = config;
         config.steward_list = steward_list_config.clone();
+        let mls_group_config = test_mls_group_config();
         let integ = Integrator::new(private_key, steward_list_config);
         let scoring = integ.scoring();
         let convo = Conversation::create(
@@ -150,7 +151,7 @@ impl Member {
             integ.member_id.member_id_bytes(),
             &integ.provider,
             integ.credential.clone(),
-            TEST_SUITE,
+            &mls_group_config,
             &integ.signer,
             &integ.consensus,
             scoring,

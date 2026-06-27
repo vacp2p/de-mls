@@ -20,9 +20,11 @@ use de_mls::{Conversation, ConversationState};
 use de_mls::{ConversationEvent, ScoringConfig};
 
 use common::{
-    MintedKeyPackage, TEST_SUITE, TestProvider, make_scoring, mint_key_package, test_credential,
+    MintedKeyPackage, TestProvider, make_scoring, mint_key_package, test_credential,
     wallet::WalletMemberId,
 };
+
+use crate::common::test_mls_group_config;
 
 /// Per-conversation stack the standalone tests build.
 type TestConversation = Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage>;
@@ -85,7 +87,7 @@ fn create_builds_a_working_steward_session_without_user() {
         integrator.member_id.member_id_bytes(),
         &integrator.provider,
         integrator.credential.clone(),
-        TEST_SUITE,
+        &test_mls_group_config(),
         &integrator.signer,
         &integrator.consensus,
         integrator.scoring(),
@@ -137,7 +139,7 @@ fn join_completes_in_one_call() {
         alice.member_id.member_id_bytes(),
         &alice.provider,
         alice.credential.clone(),
-        TEST_SUITE,
+        &test_mls_group_config(),
         &alice.signer,
         &alice.consensus,
         alice.scoring(),
