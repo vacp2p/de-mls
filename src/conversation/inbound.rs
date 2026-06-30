@@ -278,11 +278,11 @@ where
     /// proposals get mirrored into the pending-update buffer so a future
     /// epoch steward can retry if this round fails.
     ///
-    /// RFC §"Partial Freeze Semantics" asks that lower-priority proposals
-    /// from peers be DROPPED during an active emergency, not merely locally
-    /// blocked. We don't drop today — the RFC's Δ-synchrony assumption keeps
-    /// divergence windows small. Consensus-service-level priority gating is
-    /// tracked as a backlog item in `docs/ROADMAP.md`.
+    /// RFC §"Partial Freeze Semantics": while an emergency proposal is
+    /// unfinalized, lower-priority proposals from peers MUST be dropped — not
+    /// buffered, forwarded to consensus, or surfaced for a vote — so they
+    /// cannot land before the emergency resolves. The emergency itself (and
+    /// any higher-priority proposal) is never blocked.
     fn on_incoming_proposal(&mut self, proposal: Proposal) -> Result<(), ConversationError> {
         let decoded = match ConversationUpdateRequest::decode(proposal.payload.as_slice()) {
             Ok(req) => Some(req),
@@ -295,6 +295,21 @@ where
                 None
             }
         };
+        let kind = decoded
+            .as_ref()
+            .map(ProposalKind::of)
+            .unwrap_or(ProposalKind::Commit);
+
+        if self.queues.partial_freeze_blocks(kind) {
+            tracing::debug!(
+                conversation = %self.conversation_id,
+                proposal_id = proposal.proposal_id,
+                ?kind,
+                "dropping lower-priority proposal: active emergency partial-freeze"
+            );
+            return Ok(());
+        }
+
         if let Some(req) = decoded.as_ref() {
             let current_epoch = self.mls().current_epoch()?;
             match &req.payload {
@@ -311,10 +326,6 @@ where
         }
         let proposal_id = proposal.proposal_id;
         let expected_voters = proposal.expected_voters_count;
-        let kind = decoded
-            .as_ref()
-            .map(ProposalKind::of)
-            .unwrap_or(ProposalKind::Commit);
 
         let scope = self.conversation_id.clone();
         self.services

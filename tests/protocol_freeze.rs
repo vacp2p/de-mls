@@ -11,6 +11,7 @@ use de_mls::{ConversationState, StewardListConfig};
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+const CHARLIE: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
 
 #[test]
 fn freeze_cycle_emits_phases_in_order() {
@@ -107,6 +108,67 @@ fn deadlock_ecp_force_freezes_the_group() {
         h.member(0).saw_phase(ConversationState::Freezing)
             && h.member(1).saw_phase(ConversationState::Freezing)
     });
+}
+
+/// RFC §Partial Freeze Semantics: while an emergency proposal is unfinalized, a
+/// lower-priority proposal arriving from a peer MUST be dropped — not buffered
+/// or surfaced for a vote. A `RemoveMember` normally lands in the pending-update
+/// buffer; under an active emergency it must not. The emergency is delivered to
+/// BOB only, so BOB freezes while CHARLIE (the proposer) does not.
+#[test]
+fn active_emergency_drops_incoming_lower_priority_proposal() {
+    let mut h = TestHarness::<3>::bootstrap(
+        [ALICE, BOB, CHARLIE],
+        "pf1",
+        fast_config(),
+        StewardListConfig::new(1, 5).unwrap(),
+    );
+    // Quiesce residual bootstrap traffic.
+    for i in 0..3 {
+        let _ = h.member_mut(i).take_outbound();
+    }
+
+    let target_a = vec![0xA1u8; 20];
+    let target_b = vec![0xB2u8; 20];
+
+    // Baseline (no emergency yet): CHARLIE's RemoveMember reaches BOB and lands
+    // in the pending-update buffer.
+    h.member_mut(2).remove_member(&target_a);
+    let baseline = h.member_mut(2).take_outbound();
+    for o in &baseline {
+        h.member_mut(1).deliver_raw(&o.sender, &o.payload);
+    }
+    assert_eq!(
+        h.member(1).pending_update_count(),
+        1,
+        "baseline: a remove proposal is buffered when no emergency is active"
+    );
+
+    // ALICE raises an emergency; deliver it to BOB only, so BOB's partial freeze
+    // is active while CHARLIE's is not.
+    let epoch = h.epoch();
+    let ecp = ViolationEvidence::deadlock(epoch)
+        .with_creator(b"alice-creator".to_vec())
+        .into_update_request()
+        .unwrap();
+    h.member_mut(0).initiate_proposal(ecp, CreatorVote::Yes);
+    let ecp_out = h.member_mut(0).take_outbound();
+    for o in &ecp_out {
+        h.member_mut(1).deliver_raw(&o.sender, &o.payload);
+    }
+
+    // Under the active emergency, a second lower-priority remove proposal must be
+    // dropped: the pending-update buffer stays unchanged (would be 2 otherwise).
+    h.member_mut(2).remove_member(&target_b);
+    let frozen = h.member_mut(2).take_outbound();
+    for o in &frozen {
+        h.member_mut(1).deliver_raw(&o.sender, &o.payload);
+    }
+    assert_eq!(
+        h.member(1).pending_update_count(),
+        1,
+        "lower-priority proposal must be dropped during an active emergency"
+    );
 }
 
 /// `needle` appears in `haystack` in order (intervening elements allowed).
