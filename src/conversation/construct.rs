@@ -11,7 +11,7 @@ use std::error::Error as StdError;
 use std::sync::Arc;
 
 use openmls::credentials::CredentialWithKey;
-use openmls::prelude::Ciphersuite;
+use openmls::group::MlsGroupCreateConfig;
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 
@@ -40,7 +40,7 @@ where
         member_id: &[u8],
         provider: &Pr,
         credential: CredentialWithKey,
-        ciphersuite: Ciphersuite,
+        group_config: &MlsGroupCreateConfig,
         signer: &impl Signer,
         consensus: &C,
         scoring: PeerScoringService<Sc>,
@@ -55,7 +55,7 @@ where
             conversation_id.to_string(),
             provider,
             credential,
-            ciphersuite,
+            group_config,
             signer,
         )?;
         Self::assemble(
