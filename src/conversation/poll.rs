@@ -323,8 +323,7 @@ where
                 return Ok(());
             }
         };
-        let delay =
-            self.config.commit_inactivity_duration + self.config.recovery_inactivity_duration;
+        let delay = self.config.voting_inactivity_window();
         if Instant::now() < anchor + delay {
             return Ok(());
         }

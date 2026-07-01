@@ -774,6 +774,7 @@ mod conversation_sync_tests {
             proposal_expiration_ms: 3_600_000,
             consensus_timeout_ms: 30_000,
             recovery_inactivity_duration_ms: 5_000,
+            voting_inactivity_duration_ms: 65_000,
         }
     }
 

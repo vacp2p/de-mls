@@ -160,6 +160,7 @@ message TimingConfig {
   uint64 proposal_expiration_ms = 3;
   uint64 consensus_timeout_ms = 4;
   uint64 recovery_inactivity_duration_ms = 5; // RFC §Inactivity Timer #2
+  uint64 voting_inactivity_duration_ms = 6;   // RFC §Inactivity Timer #3 (0 = derive from #1+#2)
 }
 
 enum Outcome {
