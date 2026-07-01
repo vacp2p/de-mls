@@ -18,7 +18,7 @@ use crate::{
 pub enum ConversationEvent {
     /// A decrypted message addressed to the group's chat stream. The payload is
     /// either a `ConversationMessage` (text a member sent) or an
-    /// `EventMembershipChange` (a system notice that someone joined or left) —
+    /// `EventMembershipChange` (a system notice that someone joined) —
     /// both belong in the same stream, so the application renders whichever it
     /// finds. Proposals, votes, and ban requests are not chat traffic; they
     /// surface through [`Self::VoteRequested`] and the membership and consensus

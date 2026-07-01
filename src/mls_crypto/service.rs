@@ -514,3 +514,186 @@ impl MlsService {
         Ok(kind)
     }
 }
+
+#[cfg(test)]
+mod stage_preserves_own_tests {
+    use super::*;
+    use crate::test_fixtures::{TEST_SUITE, TestProvider, make_creator_mls};
+    use openmls::credentials::{BasicCredential, CredentialWithKey};
+    use openmls::key_packages::KeyPackage;
+    use openmls::prelude::tls_codec::Serialize as _;
+    use openmls_basic_credential::SignatureKeyPair;
+
+    fn member_key_package(
+        provider: &TestProvider,
+        member_id: &[u8],
+    ) -> (Vec<u8>, SignatureKeyPair) {
+        let signer = SignatureKeyPair::new(TEST_SUITE.signature_algorithm()).unwrap();
+        let credential = CredentialWithKey {
+            credential: BasicCredential::new(member_id.to_vec()).into(),
+            signature_key: signer.to_public_vec().into(),
+        };
+        let kp = KeyPackage::builder()
+            .build(TEST_SUITE, provider, &signer, credential)
+            .unwrap()
+            .key_package()
+            .tls_serialize_detached()
+            .unwrap();
+        (kp, signer)
+    }
+
+    fn fresh_key_package(provider: &TestProvider, member_id: &[u8]) -> Vec<u8> {
+        member_key_package(provider, member_id).0
+    }
+
+    /// A *failed* remote-commit stage must leave our own pending commit intact.
+    /// OpenMLS only clears the own pending commit when a remote is *successfully*
+    /// processed, so a remote that never processes (malformed / stale / wrong
+    /// group → `Abort`) does not touch it. This is the evidence that the
+    /// lost-own-commit lag is caused by de-mls's explicit pre-discard in
+    /// `apply_in_priority_order`, not by the act of staging a failing remote.
+    #[test]
+    fn failed_remote_stage_preserves_own_pending_commit() {
+        let (mut mls, provider, signer) = make_creator_mls(b"alice");
+
+        // Build a real own pending commit (Add bob) — what a backup steward holds
+        // when the epoch steward's candidate arrives.
+        let bob_kp = fresh_key_package(&provider, b"bob");
+        mls.create_commit_candidate(&provider, &signer, &[MlsCommitInput::Add(bob_kp)])
+            .expect("own commit candidate");
+        let epoch_before = mls.current_epoch().unwrap();
+
+        // Stage an invalid remote commit (garbage). It must not apply, and must
+        // not disturb our own pending commit.
+        let staged = mls.stage_remote_commit(&provider, &[], &[0xFFu8; 64]);
+        assert!(
+            matches!(staged, Ok(StagedCandidateResult::Aborted) | Err(_)),
+            "garbage remote commit must not stage"
+        );
+
+        // Our own pending commit should still merge cleanly → it survived.
+        mls.merge_own_commit(&provider)
+            .expect("own pending commit survived a failed remote stage");
+        assert_eq!(
+            mls.current_epoch().unwrap(),
+            epoch_before + 1,
+            "own commit applied after the failed remote, epoch advanced"
+        );
+    }
+
+    /// The discriminating experiment, and the key enabler for the reorder fix:
+    /// staging a *valid* remote commit while our own commit is pending succeeds,
+    /// and crucially does NOT clear our own — OpenMLS clears the own pending
+    /// commit only when a remote is *merged* (applied), not when it's staged.
+    /// So we can stage + validate any remote, and if we reject it
+    /// (`discard_staged_commit`), our own commit is still there to apply. The
+    /// explicit `discard_own_commit` pre-discard in `apply_in_priority_order` is
+    /// therefore unnecessary and is the sole cause of the lost-own-commit lag.
+    #[test]
+    fn own_commit_survives_staging_then_rejecting_a_valid_remote() {
+        let (mut alice, provider_a, signer_a) = make_creator_mls(b"alice");
+        let provider_b = TestProvider::default();
+        let (bob_kp, bob_signer) = member_key_package(&provider_b, b"bob");
+
+        // Alice adds bob and merges → alice + bob synced at the same epoch.
+        let artifacts = alice
+            .create_commit_candidate(&provider_a, &signer_a, &[MlsCommitInput::Add(bob_kp)])
+            .expect("add bob");
+        alice.merge_own_commit(&provider_a).unwrap();
+        let welcome = artifacts.welcome.expect("welcome for bob");
+        let mut bob = MlsService::new_from_welcome(&provider_b, &welcome)
+            .expect("open welcome")
+            .expect("welcome addressed to bob");
+        let synced_epoch = alice.current_epoch().unwrap();
+        assert_eq!(synced_epoch, bob.current_epoch().unwrap());
+
+        // Bob builds a valid commit (add carol) — a genuine remote candidate.
+        let carol_kp = fresh_key_package(&provider_b, b"carol");
+        let bob_artifacts = bob
+            .create_commit_candidate(&provider_b, &bob_signer, &[MlsCommitInput::Add(carol_kp)])
+            .expect("bob commit");
+
+        // Alice builds her OWN commit (add dave) → alice now has a pending commit.
+        let dave_kp = fresh_key_package(&provider_a, b"dave");
+        alice
+            .create_commit_candidate(&provider_a, &signer_a, &[MlsCommitInput::Add(dave_kp)])
+            .expect("alice own commit");
+
+        // Stage bob's valid remote commit while alice's own is still pending.
+        let staged = alice
+            .stage_remote_commit(&provider_a, &bob_artifacts.proposals, &bob_artifacts.commit)
+            .expect("stage bob's commit");
+        assert!(
+            matches!(staged, StagedCandidateResult::Staged { .. }),
+            "a valid remote stages even while our own commit is pending, got {staged:?}"
+        );
+
+        // Reject the remote (as the round would for a losing/invalid candidate)
+        // — this must NOT take our own pending commit with it.
+        alice.discard_staged_commit(&provider_a).unwrap();
+
+        // Our own commit is still pending and applies cleanly.
+        alice
+            .merge_own_commit(&provider_a)
+            .expect("own pending commit survived staging + rejecting a valid remote");
+        assert_eq!(alice.current_epoch().unwrap(), synced_epoch + 1);
+    }
+
+    /// The surgical fix shape: in de-mls's split staging flow, merging a remote
+    /// does NOT auto-clear our own pending commit (it lingers). So the reorder is
+    /// "discard our own *right before* merging the winning remote" — which
+    /// preserves our own across rejected remotes but cleans it up before applying
+    /// a winner. This test pins that exact sequence: stage → discard own → merge
+    /// remote → our own is gone and the remote applied.
+    #[test]
+    fn discard_own_then_merge_remote_applies_remote_and_clears_own() {
+        let (mut alice, provider_a, signer_a) = make_creator_mls(b"alice");
+        let provider_b = TestProvider::default();
+        let (bob_kp, bob_signer) = member_key_package(&provider_b, b"bob");
+
+        let artifacts = alice
+            .create_commit_candidate(&provider_a, &signer_a, &[MlsCommitInput::Add(bob_kp)])
+            .expect("add bob");
+        alice.merge_own_commit(&provider_a).unwrap();
+        let welcome = artifacts.welcome.expect("welcome for bob");
+        let mut bob = MlsService::new_from_welcome(&provider_b, &welcome)
+            .expect("open welcome")
+            .expect("welcome addressed to bob");
+        let synced_epoch = alice.current_epoch().unwrap();
+
+        // Bob builds a valid commit; alice builds her own → alice has a pending commit.
+        let carol_kp = fresh_key_package(&provider_b, b"carol");
+        let bob_artifacts = bob
+            .create_commit_candidate(&provider_b, &bob_signer, &[MlsCommitInput::Add(carol_kp)])
+            .expect("bob commit");
+        let dave_kp = fresh_key_package(&provider_a, b"dave");
+        alice
+            .create_commit_candidate(&provider_a, &signer_a, &[MlsCommitInput::Add(dave_kp)])
+            .expect("alice own commit");
+
+        // Stage bob's remote (own survives), then — the fix — discard our own
+        // right before merging the winning remote.
+        alice
+            .stage_remote_commit(&provider_a, &bob_artifacts.proposals, &bob_artifacts.commit)
+            .expect("stage bob's commit");
+        alice
+            .discard_own_commit(&provider_a)
+            .expect("discard own before merging the winning remote");
+        alice
+            .merge_staged_commit(&provider_a)
+            .expect("merge the remote after discarding own");
+        assert_eq!(alice.current_epoch().unwrap(), synced_epoch + 1);
+
+        // The remote applied (carol added) and our own was discarded, not
+        // applied (dave absent).
+        let members = alice.members().unwrap();
+        assert!(
+            members.iter().any(|m| m == b"carol"),
+            "the remote commit (add carol) applied"
+        );
+        assert!(
+            !members.iter().any(|m| m == b"dave"),
+            "our own commit (add dave) was discarded before the merge, not applied"
+        );
+    }
+}
