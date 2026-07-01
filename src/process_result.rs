@@ -124,6 +124,19 @@ impl ViolationEvidence {
         }
     }
 
+    /// Wrongdoing that isn't a broken commit or broken proposal — e.g. a
+    /// committer who isn't on the steward list. Scored locally (never filed as
+    /// an ECP) with a milder penalty than the broken-commit/proposal cases.
+    pub fn misbehaving_commit(target: Vec<u8>, epoch: u64, payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            violation_type: ViolationType::MisbehavingCommit as i32,
+            target_member_id: target,
+            evidence_payload: payload.into(),
+            epoch,
+            creator_member_id: Vec::new(),
+        }
+    }
+
     /// Layer 3 anti-deadlock signal — on YES the steward gate relaxes so
     /// any member can produce the recovery commit. No specific target.
     pub fn deadlock(epoch: u64) -> Self {
@@ -168,6 +181,7 @@ impl ViolationEvidence {
             Ok(ViolationType::BrokenCommit) => Some(ScoreEvent::BrokenCommit),
             Ok(ViolationType::BrokenMlsProposal) => Some(ScoreEvent::BrokenMlsProposal),
             Ok(ViolationType::CensorshipInactivity) => Some(ScoreEvent::CensorshipInactivity),
+            Ok(ViolationType::MisbehavingCommit) => Some(ScoreEvent::MisbehavingCommit),
             Ok(ViolationType::ScoreBelowThreshold)
             | Ok(ViolationType::Deadlock)
             | Ok(ViolationType::ViolationUnspecified)

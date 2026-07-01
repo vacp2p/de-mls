@@ -8,7 +8,9 @@ use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 
 use crate::{
     CommitHash, ConversationError, ConversationQueues, FreezeFinalizeResult, FreezeOutcome,
-    ProcessResult, ScoreEvent, ScoreOp, StewardListService,
+    ProcessResult,
+    ScoreEvent::{self, MisbehavingCommit},
+    ScoreOp, StewardListService,
     conversation::BufferedCommitCandidate,
     freeze::round::RoundContext,
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
@@ -32,13 +34,9 @@ enum CandidateOutcome {
     Drop(Option<ScoreOp>),
 }
 
-/// Walk `sorted` best-first; the first candidate that applies wins. Rejected
-/// candidates score a local penalty — no ECP (RFC §Peer Scoring allows direct
-/// local scoring for observable violations).
-///
-/// `own_commit_discarded` enforces MLS's one-pending-commit rule: the first
-/// incoming attempt wipes our own pending commit, so a later lower-priority
-/// local candidate has nothing to apply.
+/// Walk `sorted` best-first; the first candidate that applies wins.
+/// Rejected candidates score a local penalty
+/// (RFC §Peer Scoring allows direct local scoring for observable violations).
 pub(super) fn apply_in_priority_order<Pr>(
     provider: &Pr,
     conversation: &mut ConversationQueues,
@@ -53,28 +51,12 @@ where
     <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
 {
     let mut score_ops: Vec<ScoreOp> = Vec::new();
-    let mut own_commit_discarded = false;
-    let conversation_id = conversation.name().to_owned();
 
     let mut remaining = sorted.into_iter();
     while let Some(chosen) = remaining.next() {
         let apply_result = if chosen.is_local_candidate {
-            if own_commit_discarded {
-                tracing::debug!(
-                    conversation = %conversation_id,
-                    "own pending commit is discarded; skipping local candidate"
-                );
-                continue;
-            }
             apply_local_candidate(provider, conversation, mls, chosen, ctx)?
         } else {
-            if !own_commit_discarded && steward.is_steward(self_member_id) {
-                // A failure here leaves an old pending commit in MLS and
-                // would sabotage every subsequent staging attempt — bubble
-                // the error out of the round instead of pressing on.
-                mls.discard_own_commit(provider)?;
-                own_commit_discarded = true;
-            }
             apply_incoming_candidate(provider, conversation, mls, steward, chosen, ctx)?
         };
 
@@ -91,7 +73,6 @@ where
                     ctx,
                     remaining,
                     steward,
-                    &conversation_id,
                 );
                 return Ok(FreezeFinalizeResult {
                     outcome,
@@ -103,12 +84,12 @@ where
         }
     }
 
-    // No candidate applied. Drop any local pending commit that wasn't
-    // merged or discarded along an incoming-wins path — leaving it
-    // behind would break the next MLS encrypt.
-    if !own_commit_discarded {
-        mls.discard_own_commit(provider)?;
-    }
+    // Defensive cleanup — normally a no-op. A local candidate always wins once
+    // reached, so reaching here means none was in the round: either we built no
+    // commit, or we built one that wasn't buffered (per-round cap / duplicate
+    // hash). In that last case a stray pending commit lingers in MLS and would
+    // block the next operation (only one pending commit allowed), so clear it.
+    mls.discard_own_commit(provider)?;
     conversation.clear_freeze_round();
     Ok(FreezeFinalizeResult {
         outcome: FreezeOutcome::NoCandidate,
@@ -129,15 +110,13 @@ fn record_winner_scores(
     ctx: &RoundContext,
     losers: impl Iterator<Item = BufferedCommitCandidate>,
     sl_service: &StewardListService,
-    conversation_id: &str,
 ) {
     score_ops.push(ScoreOp {
         member_id: committer.to_vec(),
         event: ScoreEvent::SuccessfulCommit,
     });
 
-    // `epoch_steward_id` was resolved through `steward_eligibility`, so
-    // `expected` can't be a queued-removal target — no extra guard needed.
+    // `epoch_steward_id` was resolved through `steward_eligibility`
     if let Some(expected) = ctx.epoch_steward_id.as_deref()
         && expected != committer
         && expected != self_member_id
@@ -156,10 +135,10 @@ fn record_winner_scores(
                 event: ScoreEvent::HonestCommitAttempt,
             });
         } else {
-            tracing::debug!(
-                conversation = %conversation_id,
-                "dropping HonestCommitAttempt: claimed user not on steward list"
-            );
+            score_ops.push(ScoreOp {
+                member_id: claimed,
+                event: MisbehavingCommit,
+            });
         }
     }
 }
@@ -207,8 +186,9 @@ where
 /// Stage, validate, and merge a candidate authored by another steward.
 /// `Drop` (with penalty) on any failed check; `Terminal(Applied)` on merge.
 ///
-/// Caller must have discarded any own pending commit first — MLS allows
-/// only one per conversation.
+/// Staging coexists with our own pending commit — OpenMLS only needs the single
+/// pending slot free at *merge* time, so this discards our own commit right
+/// before merging the winning remote.
 fn apply_incoming_candidate<Pr>(
     provider: &Pr,
     conversation: &mut ConversationQueues,
@@ -261,6 +241,11 @@ where
         return Ok(CandidateOutcome::Drop(violation.target_score_op()));
     }
 
+    // The remote wins. Clear our own pending commit (if any) before applying it:
+    // de-mls's split staging flow doesn't auto-clear it, and a leftover would
+    // block the next MLS operation. Safe — the staged remote is held separately
+    // and survives this discard (see `discard_own_then_merge_remote_*` test).
+    mls.discard_own_commit(provider)?;
     mls.merge_staged_commit(provider)?;
     let committed_batch =
         finalize_committed_batch(conversation, chosen.commit_hash, mls.current_epoch()?);
@@ -426,10 +411,9 @@ fn action_projection_from_mls(action: &MlsProposalOutput) -> (u8, &[u8]) {
 /// RFC §"de-MLS Objects": any steward-list member may commit to preserve
 /// liveness. Epoch-steward priority is about *selection*, not authorization.
 ///
-/// `None` also covers "no list yet" (joiner pre-sync), "list exhausted"
-/// (re-election in progress), and "Layer-3 recovery_mode active" (RFC
-/// §Anti-Deadlock: any member MAY commit to restore liveness; mirrors
-/// the relaxed gate in `create_commit_candidate`).
+/// `None` also covers "no list yet" (joiner pre-sync) and "Layer-3
+/// recovery_mode active" (RFC §Anti-Deadlock: any member MAY commit to restore
+/// liveness; mirrors the relaxed gate in `create_commit_candidate`).
 fn check_commit_sender_authorized(
     conversation: &ConversationQueues,
     sl_service: &StewardListService,
@@ -440,9 +424,6 @@ fn check_commit_sender_authorized(
         return None;
     }
     sl_service.current_list()?;
-    if sl_service.is_exhausted(ctx.current_epoch) {
-        return None;
-    }
     if sl_service.is_steward(commit_sender) {
         return None;
     }
@@ -450,7 +431,7 @@ fn check_commit_sender_authorized(
         conversation = conversation.name(),
         "violation: commit from unauthorized sender"
     );
-    Some(ViolationEvidence::broken_commit(
+    Some(ViolationEvidence::misbehaving_commit(
         commit_sender.to_vec(),
         ctx.current_epoch,
         "commit from unauthorized sender (not on the steward list)",
@@ -481,4 +462,160 @@ fn finalize_committed_batch(
     conversation.note_member_joins(&snapshot, current_epoch);
     conversation.clear_freeze_round();
     snapshot
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::StewardListConfig;
+
+    fn ctx_at(epoch: u64, in_recovery: bool) -> RoundContext {
+        RoundContext {
+            mls_count: 1,
+            self_remove_pending: false,
+            current_epoch: epoch,
+            in_recovery,
+            epoch_steward_id: None,
+        }
+    }
+
+    fn list_over_two_epochs() -> (StewardListService, Vec<u8>, Vec<u8>) {
+        let mut sl = StewardListService::empty(StewardListConfig::new(2, 2).unwrap());
+        let alice = vec![1u8; 20];
+        let bob = vec![2u8; 20];
+        // Installed for epochs [0, 2) → exhausted at epoch 2, members still known.
+        sl.install_list(0, &[alice.clone(), bob.clone()], 2, 0)
+            .unwrap();
+        assert!(sl.is_exhausted(2), "list [0,2) is exhausted at epoch 2");
+        (sl, alice, bob)
+    }
+
+    /// Regression guard: an exhausted list (Layer-2 re-election window) must still
+    /// verify the committer against its members — it does NOT grant the Layer-3
+    /// "any member may commit" permission. A steward's superseding commit passes;
+    /// a non-steward's is rejected.
+    #[test]
+    fn exhausted_list_still_gates_on_membership() {
+        let (sl, alice, _bob) = list_over_two_epochs();
+        let carol = vec![3u8; 20]; // not on the list
+        let queues = ConversationQueues::new("g");
+        let ctx = ctx_at(2, false);
+
+        assert!(
+            check_commit_sender_authorized(&queues, &sl, &alice, &ctx).is_none(),
+            "on-list steward stays authorized when the list is exhausted"
+        );
+        assert!(
+            check_commit_sender_authorized(&queues, &sl, &carol, &ctx).is_some(),
+            "non-steward commit must be rejected even when the list is exhausted"
+        );
+    }
+
+    /// Layer 3: recovery mode is the one gate that opens for any sender.
+    #[test]
+    fn recovery_mode_authorizes_any_sender() {
+        let (sl, _alice, _bob) = list_over_two_epochs();
+        let queues = ConversationQueues::new("g");
+        let ctx = ctx_at(2, true);
+        assert!(
+            check_commit_sender_authorized(&queues, &sl, &[9u8; 20], &ctx).is_none(),
+            "recovery mode authorizes any member"
+        );
+    }
+
+    /// High-level apply-loop behaviour and the regression guard for the
+    /// lost-own-commit lag: when a higher-priority remote candidate fails, our
+    /// own lower-priority local candidate still applies — it is no longer
+    /// discarded out from under us. Under the old pre-discard this returned
+    /// `NoCandidate`.
+    #[test]
+    fn local_candidate_applies_after_a_higher_priority_remote_fails() {
+        use crate::freeze::round::compute_commit_hash;
+        use crate::mls_crypto::MlsCommitInput;
+        use crate::test_fixtures::{TEST_SUITE, make_creator_mls, steward_service_steward};
+        use openmls::credentials::{BasicCredential, CredentialWithKey};
+        use openmls::key_packages::KeyPackage;
+        use openmls::prelude::tls_codec::Serialize as _;
+        use openmls_basic_credential::SignatureKeyPair;
+
+        let (mut mls, provider, signer) = make_creator_mls(b"alice");
+        let alice = b"alice".to_vec();
+        let steward = steward_service_steward(&alice);
+
+        // Alice's real own commit candidate (add bob).
+        let bob_kp = {
+            let s = SignatureKeyPair::new(TEST_SUITE.signature_algorithm()).unwrap();
+            let cred = CredentialWithKey {
+                credential: BasicCredential::new(b"bob".to_vec()).into(),
+                signature_key: s.to_public_vec().into(),
+            };
+            KeyPackage::builder()
+                .build(TEST_SUITE, &provider, &s, cred)
+                .unwrap()
+                .key_package()
+                .tls_serialize_detached()
+                .unwrap()
+        };
+        let artifacts = mls
+            .create_commit_candidate(&provider, &signer, &[MlsCommitInput::Add(bob_kp)])
+            .unwrap();
+        let local = BufferedCommitCandidate {
+            candidate_msg: CommitCandidate {
+                conversation_id: b"test-conversation".to_vec(),
+                mls_proposals: artifacts.proposals.clone(),
+                commit_message: artifacts.commit.clone(),
+                steward_member_id: alice.clone(),
+            },
+            commit_hash: compute_commit_hash(&artifacts.commit),
+            is_local_candidate: true,
+            welcome_bytes: artifacts.welcome.clone(),
+            joiner_identities: vec![b"bob".to_vec()],
+        };
+
+        // A higher-priority remote that fails staging (garbage commit).
+        let failing_remote = BufferedCommitCandidate {
+            candidate_msg: CommitCandidate {
+                conversation_id: b"test-conversation".to_vec(),
+                mls_proposals: vec![],
+                commit_message: vec![0xFFu8; 64],
+                steward_member_id: alice.clone(),
+            },
+            commit_hash: compute_commit_hash(&[0xFFu8; 64]),
+            is_local_candidate: false,
+            welcome_bytes: None,
+            joiner_identities: vec![],
+        };
+
+        let epoch_before = mls.current_epoch().unwrap();
+        let mut conversation = ConversationQueues::new("test-conversation");
+        let ctx = RoundContext {
+            mls_count: 1,
+            self_remove_pending: false,
+            current_epoch: epoch_before,
+            in_recovery: false,
+            epoch_steward_id: Some(alice.clone()),
+        };
+
+        // Remote first (higher priority), our local second.
+        let result = apply_in_priority_order(
+            &provider,
+            &mut conversation,
+            &mut mls,
+            &steward,
+            vec![failing_remote, local],
+            &ctx,
+            &alice,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, FreezeOutcome::Applied { .. }),
+            "own local commit applied after the higher-priority remote failed"
+        );
+        assert_eq!(mls.current_epoch().unwrap(), epoch_before + 1);
+        assert!(
+            mls.is_member(b"bob"),
+            "our own commit (add bob) was applied"
+        );
+    }
 }

@@ -91,6 +91,7 @@ enum ViolationType {
   CENSORSHIP_INACTIVITY = 3; // Steward didn't commit within threshold_duration
   SCORE_BELOW_THRESHOLD = 4; // Member's peer score dropped to/below removal threshold
   DEADLOCK = 5;              // Layer 3: re-election retries exhausted; any member may commit
+  MISBEHAVING_COMMIT = 6;    // Wrongdoing that isn't a broken commit/proposal (e.g. committer not on the steward list);
 }
 
 message ViolationEvidence {

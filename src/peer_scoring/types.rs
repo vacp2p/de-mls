@@ -34,8 +34,8 @@ pub enum ScoreEvent {
     /// Lost a commit race with the same proposals but different MLS entropy —
     /// honest participation (RFC: MUST NOT be misbehavior).
     HonestCommitAttempt,
-    /// Competing commit with a different proposal set than the selected one
-    /// (RFC: MUST be misbehavior).
+    /// Wrongdoing caught after staging that isn't a broken commit or proposal —
+    /// e.g. a committer who isn't on the steward list. Milder penalty.
     MisbehavingCommit,
 }
 
@@ -63,7 +63,9 @@ pub fn default_score_deltas() -> HashMap<ScoreEvent, i64> {
         // Commit selection
         (ScoreEvent::SuccessfulCommit, 10),
         (ScoreEvent::HonestCommitAttempt, 5),
-        (ScoreEvent::MisbehavingCommit, -30),
+        // Milder than a broken commit/proposal: wrongdoing such as committing
+        // while not on the steward list, caught after staging.
+        (ScoreEvent::MisbehavingCommit, -10),
     ])
 }
 
