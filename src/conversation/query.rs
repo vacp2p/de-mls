@@ -49,7 +49,7 @@ where
     /// Commit round progress: `(received, expected)`. Returns `(0, 0)` if not
     /// in freeze or no steward list is known.
     pub fn commit_candidate_count(&self) -> (usize, usize) {
-        let received = self.queues.commit_candidate_count();
+        let received = self.queues.commit_round.candidate_count();
         let expected = self
             .services
             .steward_list

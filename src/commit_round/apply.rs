@@ -7,12 +7,11 @@ use std::error::Error as StdError;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 
 use crate::{
-    CommitHash, CommitRoundOutcome, CommitRoundResult, ConversationError, ConversationQueues,
-    ProcessResult,
+    BufferedCommitCandidate, CommitHash, CommitRoundOutcome, CommitRoundResult, ConversationError,
+    ConversationQueues, ProcessResult,
     ScoreEvent::{self, MisbehavingCommit},
     ScoreOp, StewardListService,
-    commit_round::context::RoundContext,
-    conversation::BufferedCommitCandidate,
+    commit_round::{context::RoundContext, round::discard_and_finish},
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
     protos::de_mls::messages::v1::{
         CommitCandidate, ConversationUpdateRequest, MemberWelcome, ViolationEvidence,
@@ -89,12 +88,7 @@ where
     // commit, or we built one that wasn't buffered (per-round cap / duplicate
     // hash). In that last case a stray pending commit lingers in MLS and would
     // block the next operation (only one pending commit allowed), so clear it.
-    mls.discard_own_commit(provider)?;
-    Ok(CommitRoundResult {
-        outcome: CommitRoundOutcome::NoCandidate,
-        score_ops,
-        committed_batch: Vec::new(),
-    })
+    discard_and_finish(provider, mls, score_ops)
 }
 
 /// Append the scoring side-effects of a winning commit.
@@ -419,7 +413,7 @@ fn action_projection_from_mls(action: &MlsProposalOutput) -> (u8, &[u8]) {
 ///
 /// `None` also covers "no list yet" (joiner pre-sync) and "Layer-3
 /// recovery_mode active" (RFC §Anti-Deadlock: any member MAY commit to restore
-/// liveness; mirrors the relaxed gate in `create_commit_candidate`).
+/// liveness; mirrors the relaxed gate in `build_local_candidate`).
 fn check_commit_sender_authorized(
     conversation: &ConversationQueues,
     steward_list: &StewardListService,

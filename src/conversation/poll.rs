@@ -121,7 +121,7 @@ where
             .services
             .steward_list
             .current_list()
-            .is_some_and(|list| self.queues.commit_candidate_count() >= list.len());
+            .is_some_and(|list| self.queues.commit_round.candidate_count() >= list.len());
 
         if !all_candidates_in && !self.is_freeze_window_elapsed() {
             // Still freezing — surface candidate progress when it changes.
@@ -253,7 +253,7 @@ where
 
                     (event, accused)
                 } else {
-                    self.queues.clear_commit_round();
+                    self.queues.commit_round.clear();
                     let event = self.start_working();
                     (event, false)
                 };
@@ -379,12 +379,10 @@ where
         let Some(event) = self.check_steward_inactivity(proposal_count, inactivity) else {
             return Ok(());
         };
-        let epoch = self.mls().current_epoch()?;
-        self.queues.start_commit_round(epoch);
 
         let self_member_id = Arc::clone(&self.self_member_id);
         let outbound = if self.services.steward_list.is_steward(&self_member_id) {
-            match self.create_commit_candidate(provider, signer, &self_member_id) {
+            match self.build_local_candidate(provider, signer, &self_member_id) {
                 Ok(payload) => payload,
                 Err(e) => {
                     error!(

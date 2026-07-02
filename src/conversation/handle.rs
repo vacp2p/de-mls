@@ -18,11 +18,10 @@ use prost::Message;
 use tracing::info;
 
 use crate::{
-    BufferedCommitCandidate, CommitBufferOutcome, CommitRoundResult, ConsensusEngine,
-    ConsensusPlugin, ConversationConfig, ConversationError, ConversationEvent, ConversationQueues,
-    ConversationState, ConversationStateMachine, OperatingMode, Outbound, PeerScoreStorage,
-    PeerScoringService, PhaseTimer, ProcessResult, ProposalKind, StewardListService,
-    compute_commit_hash,
+    CommitRoundResult, ConsensusEngine, ConsensusPlugin, ConversationConfig, ConversationError,
+    ConversationEvent, ConversationQueues, ConversationState, ConversationStateMachine,
+    OperatingMode, Outbound, PeerScoreStorage, PeerScoringService, PhaseTimer, ProcessResult,
+    ProposalKind, StewardListService,
     consensus::outcome_bus::OutcomeReceiver,
     decode_inbound_payload, finalize_commit_round, member_set,
     mls_crypto::{CommitArtifacts, MlsCommitInput, MlsService},
@@ -222,8 +221,10 @@ where
     // callsites don't destructure the conversation. Protocol logic lives in
     // sibling `core` modules; these are pure delegation.
 
-    /// Build a commit candidate.
-    pub(crate) fn create_commit_candidate<Pr>(
+    /// Build our own commit candidate from the approved proposals: mint the MLS
+    /// commit, buffer it locally, and return the wire bytes to broadcast. The
+    /// remote counterpart is `commit_round::receive_commit_candidate`.
+    pub(crate) fn build_local_candidate<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
@@ -335,32 +336,18 @@ where
             steward_member_id: self_member_id.to_vec(),
         };
 
-        // Welcome bytes are deferred until our merge so joiners can't
-        // advance epoch ahead of the steward.
-        let commit_hash = compute_commit_hash(&candidate.commit_message);
+        // Welcome bytes are buffered here but deferred until our merge, so
+        // joiners can't advance epoch ahead of the steward.
         let epoch = mls.current_epoch()?;
         let max_candidates = mls.members()?.len();
-        let outcome = self.queues.add_commit_candidate(
-            BufferedCommitCandidate {
-                candidate_msg: candidate.clone(),
-                commit_hash,
-                is_local_candidate: true,
-                welcome_bytes: welcome,
-                joiner_identities,
-            },
+        self.queues.commit_round.add(
+            candidate.clone(),
+            true,
+            welcome,
+            joiner_identities,
             epoch,
             max_candidates,
         );
-        // Non-Buffered outcomes are legitimate runtime states (see
-        // `CommitBufferOutcome`), not errors — log at debug.
-        if !matches!(outcome, CommitBufferOutcome::Buffered) {
-            tracing::debug!(
-                conversation = self.queues.name(),
-                epoch,
-                ?outcome,
-                "local commit candidate not buffered",
-            );
-        }
 
         info!(
             conversation = self.queues.name(),
@@ -856,24 +843,24 @@ mod tests {
         conversation.unregister_consensus_timeout(999);
     }
 
-    // ── create_commit_candidate guards ──────────────────────────────────
+    // ── build_local_candidate guards ──────────────────────────────────
 
     #[test]
-    fn create_commit_candidate_errors_for_non_steward_outside_recovery() {
+    fn build_local_candidate_errors_for_non_steward_outside_recovery() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_member());
         let err = conversation
-            .create_commit_candidate(&provider, &signer, b"me")
+            .build_local_candidate(&provider, &signer, b"me")
             .expect_err("non-steward should be rejected");
         assert!(matches!(err, ConversationError::NotASteward));
     }
 
     #[test]
-    fn create_commit_candidate_errors_when_no_approved_proposals() {
+    fn build_local_candidate_errors_when_no_approved_proposals() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_steward(b"me"));
         let err = conversation
-            .create_commit_candidate(&provider, &signer, b"me")
+            .build_local_candidate(&provider, &signer, b"me")
             .expect_err("empty approved queue should be rejected");
         assert!(matches!(err, ConversationError::NoProposals));
     }
@@ -883,7 +870,7 @@ mod tests {
     /// commit. The error carries the offending proposal ids so the
     /// orchestrator can drop them.
     #[test]
-    fn create_commit_candidate_errors_on_emergency_in_approved_queue() {
+    fn build_local_candidate_errors_on_emergency_in_approved_queue() {
         use crate::protos::de_mls::messages::v1::ViolationEvidence;
 
         let (mut conversation, provider, signer) =
@@ -895,7 +882,7 @@ mod tests {
         conversation.queues.insert_approved_proposal(50, emergency);
 
         let err = conversation
-            .create_commit_candidate(&provider, &signer, b"me")
+            .build_local_candidate(&provider, &signer, b"me")
             .expect_err("emergency in approved queue should be rejected");
         let ConversationError::UnexpectedNonMlsProposals { proposal_ids } = err else {
             panic!("expected UnexpectedNonMlsProposals, got {err:?}");

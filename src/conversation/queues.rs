@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use indexmap::{IndexMap, IndexSet};
 
 use crate::{
-    commit_round::CommitHash,
+    commit_round::{CommitHash, CommitRoundBuffer},
     conversation::util::{
         is_auto_approved_entry, member_set, self_leave_proposal_id, target_member_id_of,
     },
@@ -37,49 +37,6 @@ pub struct PendingUpdate {
 /// rebroadcast window.
 const MAX_COMMITTED_HASHES: usize = 10;
 
-/// A commit candidate buffered during freeze for later selection.
-#[derive(Clone, Debug)]
-pub struct BufferedCommitCandidate {
-    pub candidate_msg: CommitCandidate,
-    pub commit_hash: CommitHash,
-    pub is_local_candidate: bool,
-    pub welcome_bytes: Option<Vec<u8>>,
-    /// Member ids admitted by this commit's welcome (one per Add). Set only
-    /// on the local candidate, where `welcome_bytes` is held; empty on remote
-    /// candidates, which never carry a welcome.
-    pub joiner_identities: Vec<Vec<u8>>,
-}
-
-/// Outcome of [`ConversationQueues::add_commit_candidate`]. An enum rather than
-/// `Result<(), _>` because the non-success cases are well-defined
-/// protocol states (retransmit, late offer, spoofed fork) that callers
-/// handle differently.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommitBufferOutcome {
-    /// Candidate stored in the buffer for this epoch.
-    Buffered,
-    /// A candidate with the same commit hash is already buffered.
-    DuplicateHash,
-    /// Buffer already holds one candidate per member; the rest are refused.
-    CapReached,
-}
-
-/// In-memory commit-round state for deterministic selection.
-#[derive(Clone, Debug)]
-struct CommitRound {
-    epoch: u64,
-    candidates: Vec<BufferedCommitCandidate>,
-}
-
-impl CommitRound {
-    fn new(epoch: u64) -> Self {
-        Self {
-            epoch,
-            candidates: Vec::new(),
-        }
-    }
-}
-
 /// Per-conversation protocol state. Stewards batch commits; members vote.
 /// Construct with [`ConversationQueues::new`].
 pub struct ConversationQueues {
@@ -99,7 +56,7 @@ pub struct ConversationQueues {
     /// Recent commit hashes for dedup.
     committed_batch_hashes: VecDeque<CommitHash>,
     /// Commit-round candidate buffer for deterministic selection.
-    commit_round: Option<CommitRound>,
+    pub(crate) commit_round: CommitRoundBuffer,
     /// Buffer of membership updates (Add/Remove) that every member records so a
     /// future epoch steward can retry them if the current one fails to commit.
     pending_updates: HashMap<Vec<u8>, PendingUpdate>,
@@ -134,7 +91,7 @@ impl ConversationQueues {
             active_emergency_ids: HashSet::new(),
             pending_removal_targets: HashSet::new(),
             committed_batch_hashes: VecDeque::new(),
-            commit_round: None,
+            commit_round: CommitRoundBuffer::default(),
             pending_updates: HashMap::new(),
             resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
@@ -366,7 +323,7 @@ impl ConversationQueues {
 
     /// Check if a commit hash has already been committed (in committed history).
     ///
-    /// Note: commit round buffer dedup is handled separately by `add_commit_candidate`.
+    /// Note: commit round buffer dedup is handled separately by `CommitRoundBuffer::add`.
     pub(crate) fn has_committed_hash(&self, commit_hash: &CommitHash) -> bool {
         self.committed_batch_hashes
             .iter()
@@ -395,55 +352,6 @@ impl ConversationQueues {
         true
     }
 
-    // ─────────────────────────── Commit Round ───────────────────────────
-
-    /// Open the commit round for `epoch`, creating one if none exists or the
-    /// buffered round is for a different epoch. Idempotent: a repeat call for
-    /// the same epoch keeps the existing round and its buffered candidates.
-    pub fn start_commit_round(&mut self, epoch: u64) {
-        if !matches!(self.commit_round, Some(ref round) if round.epoch == epoch) {
-            self.commit_round = Some(CommitRound::new(epoch));
-        }
-    }
-
-    /// Buffer a validated candidate, opening (or continuing) the round for
-    /// `epoch`. `max_candidates` caps the buffer at one-per-member; beyond
-    /// that a distinct candidate is spoofed/forked and refused.
-    pub fn add_commit_candidate(
-        &mut self,
-        candidate: BufferedCommitCandidate,
-        epoch: u64,
-        max_candidates: usize,
-    ) -> CommitBufferOutcome {
-        self.start_commit_round(epoch);
-        // `start_commit_round` guarantees `Some(round @ epoch)`; borrow it.
-        let round = self
-            .commit_round
-            .get_or_insert_with(|| CommitRound::new(epoch));
-
-        if round
-            .candidates
-            .iter()
-            .any(|c| c.commit_hash == candidate.commit_hash)
-        {
-            return CommitBufferOutcome::DuplicateHash;
-        }
-        if round.candidates.len() >= max_candidates {
-            return CommitBufferOutcome::CapReached;
-        }
-
-        round.candidates.push(candidate);
-        CommitBufferOutcome::Buffered
-    }
-
-    /// Get the number of buffered commit candidates in the active commit round.
-    pub fn commit_candidate_count(&self) -> usize {
-        self.commit_round
-            .as_ref()
-            .map(|r| r.candidates.len())
-            .unwrap_or(0)
-    }
-
     // ──────────────────────── Early (pre-approval) Candidates ────────────────────────
 
     /// Stash a commit candidate that arrived before its proposal was locally
@@ -469,30 +377,6 @@ impl ConversationQueues {
             .filter(|(e, _)| *e == epoch)
             .map(|(_, c)| c)
             .collect()
-    }
-
-    /// Whether a commit round is currently open.
-    pub(crate) fn has_commit_round(&self) -> bool {
-        self.commit_round.is_some()
-    }
-
-    /// Clear commit-round state.
-    pub(crate) fn clear_commit_round(&mut self) {
-        self.commit_round = None;
-    }
-
-    /// Move the active round's candidates out and clear the round.
-    /// Returns `None` when no round is active or its epoch doesn't match.
-    pub(crate) fn take_round_candidates(
-        &mut self,
-        epoch: u64,
-    ) -> Option<Vec<BufferedCommitCandidate>> {
-        let round = self.commit_round.take()?;
-        if round.epoch != epoch {
-            self.commit_round = Some(round);
-            return None;
-        }
-        Some(round.candidates)
     }
 
     // ─────────────────────────── Pending Update Buffer ───────────────────────────

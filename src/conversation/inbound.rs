@@ -27,7 +27,7 @@ use tracing::{error, info, warn};
 use crate::{
     ConsensusPlugin, ConversationEvent, PeerScoreStorage, ProcessResult, ProposalKind,
     ScoreSnapshot, StewardList, StewardListConfig,
-    commit_round::{buffer_commit_candidate, compute_commit_hash},
+    commit_round::{compute_commit_hash, receive_commit_candidate},
     conversation::{ConversationQueues, member_set},
     mls_crypto::{DecryptedMessage, MlsService},
     process_result::NoopReason,
@@ -80,7 +80,7 @@ where
     if let Ok(app_message) = AppMessage::decode(payload) {
         match app_message.payload {
             Some(app_message::Payload::CommitCandidate(candidate)) => {
-                return buffer_commit_candidate(conversation, mls, candidate);
+                return receive_commit_candidate(conversation, mls, candidate);
             }
             Some(app_message::Payload::MemberWelcome(welcome)) => {
                 if welcome.welcome_bytes.is_empty() {
@@ -489,12 +489,10 @@ where
         let Some(event) = self.start_freezing() else {
             return Ok(());
         };
-        let epoch = self.mls().current_epoch()?;
-        self.queues.start_commit_round(epoch);
 
         let self_member_id = Arc::clone(&self.self_member_id);
         let outbound = if self.services.steward_list.is_steward(&self_member_id) {
-            match self.create_commit_candidate(provider, signer, &self_member_id) {
+            match self.build_local_candidate(provider, signer, &self_member_id) {
                 Ok(payload) => payload,
                 Err(e) => {
                     error!(

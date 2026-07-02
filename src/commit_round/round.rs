@@ -4,18 +4,15 @@
 
 use std::error::Error as StdError;
 
-use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
-use sha2::{Digest, Sha256};
-use tracing::info;
-
 use crate::{
-    CommitBufferOutcome, ConversationError, ConversationQueues, NoopReason, ProcessResult, ScoreOp,
-    StewardListService,
+    BufferedCommitCandidate, ConversationError, ConversationQueues, NoopReason, ProcessResult,
+    ScoreOp, StewardListService,
     commit_round::{apply::apply_in_priority_order, context::RoundContext},
-    conversation::BufferedCommitCandidate,
     mls_crypto::{MlsMessageKind, MlsService},
     protos::de_mls::messages::v1::{CommitCandidate, ConversationUpdateRequest, MemberWelcome},
 };
+use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
+use sha2::{Digest, Sha256};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // PUBLIC API
@@ -57,10 +54,11 @@ pub fn compute_commit_hash(commit_message: &[u8]) -> CommitHash {
     CommitHash(hasher.finalize().into())
 }
 
-/// Buffer a remote commit candidate. Enforces non-empty proposals/commit,
-/// valid MLS wire kinds, non-empty `steward_member_id`, and non-duplicate
-/// hash. No MLS state is mutated.
-pub fn buffer_commit_candidate(
+/// Ingest a commit candidate received from a peer: validate it (non-empty
+/// proposals/commit, valid MLS wire kinds, non-empty `steward_member_id`,
+/// non-duplicate hash) and buffer it into the commit round. No MLS state is
+/// mutated. The local-candidate counterpart is `Conversation::build_local_candidate`.
+pub fn receive_commit_candidate(
     conversation: &mut ConversationQueues,
     mls: &MlsService,
     candidate_msg: CommitCandidate,
@@ -107,54 +105,27 @@ pub fn buffer_commit_candidate(
     let epoch = mls.current_epoch()?;
     let max_candidates = mls.members()?.len();
 
-    // Valid candidate — auto-start a round if there are approved proposals.
-    if !conversation.has_commit_round() {
-        if conversation.approved_proposals_count() == 0 {
-            // The proposal isn't locally approved yet — the consensus outcome
-            // is still in flight (a peer steward can reach consensus and
-            // broadcast this commit before we apply our own vote). Stash for
-            // replay once approval lands rather than dropping; otherwise we'd
-            // never apply the commit and would fall an epoch behind.
-            tracing::debug!(conversation = %conversation_id, "candidate stashed: proposal not yet approved");
-            conversation.stash_early_candidate(epoch, candidate_msg, max_candidates);
-            return Ok(ProcessResult::Noop(NoopReason::CandidateStashedEarly));
-        }
-        conversation.start_commit_round(epoch);
+    // The proposal may not be locally approved yet — the consensus outcome can
+    // still be in flight (a peer steward can reach consensus and broadcast this
+    // commit before our own vote lands). Stash for replay once approval arrives
+    // rather than dropping; otherwise we'd never apply the commit and would fall
+    // an epoch behind. Once approved, `add` opens the round on the first candidate.
+    if conversation.approved_proposals_count() == 0 {
+        tracing::debug!(conversation = %conversation_id, "candidate stashed: proposal not yet approved");
+        conversation.stash_early_candidate(epoch, candidate_msg, max_candidates);
+        return Ok(ProcessResult::Noop(NoopReason::CandidateStashedEarly));
     }
 
     let steward = candidate_msg.steward_member_id.clone();
-    let outcome = conversation.add_commit_candidate(
-        BufferedCommitCandidate {
-            candidate_msg,
-            commit_hash,
-            is_local_candidate: false,
-            welcome_bytes: None,
-            joiner_identities: Vec::new(),
-        },
+    let outcome = conversation.commit_round.add(
+        candidate_msg,
+        false,
+        None,
+        Vec::new(),
         epoch,
         max_candidates,
     );
-    match outcome {
-        CommitBufferOutcome::Buffered => {
-            info!(
-                conversation = %conversation_id,
-                epoch,
-                total_candidates = conversation.commit_candidate_count(),
-                "remote candidate buffered"
-            );
-            Ok(ProcessResult::CommitCandidateReceived {
-                steward_id: steward,
-            })
-        }
-        // Legitimate runtime states, not errors — drop quietly.
-        CommitBufferOutcome::DuplicateHash => {
-            Ok(ProcessResult::Noop(NoopReason::DuplicateBufferedHash))
-        }
-        CommitBufferOutcome::CapReached => {
-            tracing::debug!(conversation = %conversation_id, "candidate ignored: buffer full");
-            Ok(ProcessResult::Noop(NoopReason::CandidateBufferFull))
-        }
-    }
+    Ok(outcome.into_process_result(steward))
 }
 
 /// Re-buffer any commit candidates stashed before their proposal was locally
@@ -167,7 +138,7 @@ pub fn replay_early_candidates(
 ) -> Result<(), ConversationError> {
     let epoch = mls.current_epoch()?;
     for candidate in conversation.take_early_candidates(epoch) {
-        buffer_commit_candidate(conversation, mls, candidate)?;
+        receive_commit_candidate(conversation, mls, candidate)?;
     }
     Ok(())
 }
@@ -188,9 +159,12 @@ where
     <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
 {
     let current_epoch = mls.current_epoch()?;
-    let candidates = conversation
-        .take_round_candidates(current_epoch)
-        .unwrap_or_default();
+    let candidates = conversation.commit_round.take(current_epoch);
+    // No candidates buffered for this epoch (or the round is stale) — nothing to
+    // rank or apply.
+    if candidates.is_empty() {
+        return discard_and_finish(provider, mls, Vec::new());
+    }
 
     let ctx = RoundContext::snapshot(
         conversation,
@@ -201,12 +175,10 @@ where
         self_member_id,
     )?;
     let sorted = rank_applicable_candidates(candidates, &ctx, allow_subset_candidates);
-
-    // Nothing applicable — empty round, stale epoch, or every candidate filtered
-    // out. Drop any local pending commit and report a no-op.
+    // Every candidate was filtered out (action count didn't match the voted
+    // set) — nothing applicable.
     if sorted.is_empty() {
-        mls.discard_own_commit(provider)?;
-        return Ok(CommitRoundResult::default());
+        return discard_and_finish(provider, mls, Vec::new());
     }
 
     apply_in_priority_order(
@@ -218,6 +190,25 @@ where
         &ctx,
         self_member_id,
     )
+}
+
+/// No candidate applied: drop any local pending commit (otherwise the next MLS
+/// operation trips on a lingering pending commit) and report a no-op carrying
+/// any penalties accrued while trying candidates.
+pub(super) fn discard_and_finish<Pr>(
+    provider: &Pr,
+    mls: &mut MlsService,
+    score_ops: Vec<ScoreOp>,
+) -> Result<CommitRoundResult, ConversationError>
+where
+    Pr: OpenMlsProvider,
+    <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+{
+    mls.discard_own_commit(provider)?;
+    Ok(CommitRoundResult {
+        score_ops,
+        ..Default::default()
+    })
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

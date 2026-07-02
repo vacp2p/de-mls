@@ -5,25 +5,25 @@
 use crate::{ConversationError, ConversationQueues, StewardListService, mls_crypto::MlsService};
 
 /// Pre-merge round state used during candidate apply.
-pub(super) struct RoundContext {
+pub struct RoundContext {
     /// Number of MLS-producing approvals (Add/Remove). Used to filter
     /// candidates whose proposal count doesn't match the voted set.
-    pub(super) mls_count: usize,
+    pub mls_count: usize,
     /// Flips the local apply's terminal result to `LeaveConversation`
     /// when our removal is in the batch.
-    pub(super) self_remove_pending: bool,
-    pub(super) current_epoch: u64,
+    pub self_remove_pending: bool,
+    pub current_epoch: u64,
     /// RFC §Layer 3 Anti-Deadlock: any member MAY commit when set;
     /// otherwise the commit sender must be on the steward list.
-    pub(super) in_recovery: bool,
+    pub in_recovery: bool,
     /// Pre-merge eligibility-filtered steward expected at
     /// `current_epoch`. Used to penalise an absent steward when a
     /// backup commits in their place.
-    pub(super) epoch_steward_id: Option<Vec<u8>>,
+    pub epoch_steward_id: Option<Vec<u8>>,
 }
 
 impl RoundContext {
-    pub(super) fn snapshot(
+    pub fn snapshot(
         conversation: &ConversationQueues,
         mls: &MlsService,
         steward_list: &StewardListService,
