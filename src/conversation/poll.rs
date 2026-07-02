@@ -17,8 +17,8 @@ use prost::Message;
 use tracing::{error, info, warn};
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
-    DispatchOutcome, FreezeFinalizeResult, FreezeOutcome, PeerScoreStorage, ScoreEvent, ScoreOp,
+    CommitRoundOutcome, CommitRoundResult, ConsensusPlugin, Conversation, ConversationError,
+    ConversationEvent, ConversationState, DispatchOutcome, PeerScoreStorage, ScoreEvent, ScoreOp,
     protos::de_mls::messages::v1::AppMessage,
 };
 
@@ -61,13 +61,13 @@ where
 
         self.tick_deadlines(provider, signer);
 
-        match self.advance_freeze(provider, signer) {
+        match self.advance_freezing(provider, signer) {
             Ok(DispatchOutcome::LeaveRequested) => leave_requested = true,
             Ok(_) => {}
             Err(e) => warn!(
                 conversation = %self.conversation_id,
                 error = %e,
-                "advance_freeze error in poll"
+                "advance_freezing error in poll"
             ),
         }
 
@@ -94,13 +94,13 @@ where
     }
 
     /// Drive the freeze phase forward. While `Freezing`, emits
-    /// [`ConversationEvent::FreezeProgress`] as candidates arrive; once all
+    /// [`ConversationEvent::CommitRoundProgress`] as candidates arrive; once all
     /// expected candidates are in or the freeze window elapses, transitions
     /// to `Selection`, finalises the round, and dispatches the resulting
     /// [`crate::ProcessResult`]. Returns
     /// [`DispatchOutcome::LeaveRequested`] if the applied commit ejected the
     /// local member — `poll()` surfaces that as `leave_requested`.
-    fn advance_freeze<Pr>(
+    fn advance_freezing<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
@@ -111,7 +111,7 @@ where
     {
         let state = self.current_state();
         if state != ConversationState::Freezing {
-            self.timing.last_freeze_progress = None;
+            self.timing.last_commit_round_progress = None;
             return Ok(DispatchOutcome::Done);
         }
 
@@ -121,18 +121,18 @@ where
             .services
             .steward_list
             .current_list()
-            .is_some_and(|list| self.queues.freeze_candidate_count() >= list.len());
+            .is_some_and(|list| self.queues.commit_candidate_count() >= list.len());
 
-        if !all_candidates_in && !self.is_freeze_timed_out() {
+        if !all_candidates_in && !self.is_freeze_window_elapsed() {
             // Still freezing — surface candidate progress when it changes.
-            let (received, expected) = self.freeze_candidate_count();
-            if self.timing.last_freeze_progress != Some((received, expected)) {
-                self.timing.last_freeze_progress = Some((received, expected));
-                self.emit_event(ConversationEvent::FreezeProgress { received, expected });
+            let (received, expected) = self.commit_candidate_count();
+            if self.timing.last_commit_round_progress != Some((received, expected)) {
+                self.timing.last_commit_round_progress = Some((received, expected));
+                self.emit_event(ConversationEvent::CommitRoundProgress { received, expected });
             }
             return Ok(DispatchOutcome::Done);
         }
-        self.timing.last_freeze_progress = None;
+        self.timing.last_commit_round_progress = None;
 
         let selection_event = self.start_selection();
         let has_proposals = self.queues.approved_proposals_count() > 0;
@@ -141,14 +141,17 @@ where
         let conversation_id = self.conversation_id.clone();
         let allow_subset = self.services.steward_list.config().allow_subset_candidates;
         let self_member_id = Arc::clone(&self.self_member_id);
-        let mut finalize_result =
-            match self.finalize_freeze_round(provider, allow_subset, &self_member_id) {
-                Ok(result) => result,
-                Err(e) => {
-                    error!(conversation = %conversation_id, error = %e, "freeze finalize failed");
-                    FreezeFinalizeResult::default()
-                }
-            };
+        let mut finalize_result = match self.finalize_commit_round(
+            provider,
+            allow_subset,
+            &self_member_id,
+        ) {
+            Ok(result) => result,
+            Err(e) => {
+                error!(conversation = %conversation_id, error = %e, "commit-round finalize failed");
+                CommitRoundResult::default()
+            }
+        };
         // Apply locally-observed score events. These come from dropped
         // candidates in the phase-3 loop (RFC §Peer Scoring: direct local
         // observation, no ECP needed). The removal sweep below picks up any
@@ -171,11 +174,11 @@ where
         if applied_score_ops
             && let Err(e) = self.check_and_initiate_score_removals(provider, signer)
         {
-            error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze finalize)");
+            error!(conversation = %conversation_id, error = %e, "score-removal check failed (commit-round finalize)");
         }
 
         match finalize_result.outcome {
-            FreezeOutcome::Applied { result, welcome } => {
+            CommitRoundOutcome::Applied { result, welcome } => {
                 if let Some(mut welcome) = welcome {
                     // Bundle ConversationSync (steward list + timing +
                     // scores) into the welcome event so the integrator
@@ -211,7 +214,7 @@ where
                 };
                 Ok(outcome)
             }
-            FreezeOutcome::NoCandidate => {
+            CommitRoundOutcome::NoCandidate => {
                 // `accuse_target` is `Some` only when we had approved proposals
                 // go unanswered *and* can attribute the miss to a live steward
                 // other than ourselves. Self-penalties are skipped — the
@@ -250,7 +253,7 @@ where
 
                     (event, accused)
                 } else {
-                    self.queues.clear_freeze_round();
+                    self.queues.clear_commit_round();
                     let event = self.start_working();
                     (event, false)
                 };
@@ -336,7 +339,7 @@ where
     }
 
     /// Steward-inactivity freeze entry: once the inactivity timer fires with
-    /// approved work pending, start the freeze round and transition into
+    /// approved work pending, start the commit round and transition into
     /// `Freezing`. Stewards build their own commit candidate too;
     /// candidate-build failure is logged and the freeze transition proceeds
     /// (peers' candidates still get processed). No-ops outside `Working`
@@ -377,7 +380,7 @@ where
             return Ok(());
         };
         let epoch = self.mls().current_epoch()?;
-        self.queues.start_freeze_round(epoch);
+        self.queues.start_commit_round(epoch);
 
         let self_member_id = Arc::clone(&self.self_member_id);
         let outbound = if self.services.steward_list.is_steward(&self_member_id) {

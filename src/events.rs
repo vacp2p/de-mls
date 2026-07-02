@@ -58,7 +58,7 @@ pub enum ConversationEvent {
     /// membership now reflects them.
     CommitApplied(Vec<ConversationUpdateRequest>),
 
-    /// The conversation moved into a new lifecycle phase, such as a freeze
+    /// The conversation moved into a new lifecycle phase, such as a commit
     /// round or steward selection — a window into where it sits in its
     /// commit-and-recovery cycle.
     PhaseChange(ConversationState),
@@ -86,8 +86,8 @@ pub enum ConversationEvent {
         timestamp: u64,
     },
 
-    /// During a freeze round, the tally of steward commit candidates moved:
-    /// `received` of `expected` are now in. It ticks as candidates arrive,
-    /// enough to drive a progress indicator.
-    FreezeProgress { received: usize, expected: usize },
+    /// Progress of a commit round: `received` of `expected` steward commit
+    /// candidates have arrived. Re-emitted whenever the count changes, so it
+    /// can back a progress indicator.
+    CommitRoundProgress { received: usize, expected: usize },
 }

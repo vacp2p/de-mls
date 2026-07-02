@@ -1,5 +1,5 @@
 //! Pre-merge round snapshot. [`RoundContext`] is the eligibility-filtered view
-//! of the freeze round that per-candidate apply reads from; `snapshot` builds it
+//! of the commit round that per-candidate apply reads from; `snapshot` builds it
 //! once, before the apply loop runs.
 
 use crate::{ConversationError, ConversationQueues, StewardListService, mls_crypto::MlsService};

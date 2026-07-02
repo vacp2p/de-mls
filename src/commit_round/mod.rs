@@ -1,4 +1,4 @@
-//! Freeze round candidate processing, selection, and commit application.
+//! Commit round candidate processing, selection, and commit application.
 //!
 //! Submodules:
 //! - `round` — public surface (buffer/replay/finalize) and priority selection.
@@ -10,6 +10,6 @@ mod context;
 mod round;
 
 pub use round::{
-    CommitHash, FreezeFinalizeResult, FreezeOutcome, buffer_commit_candidate, compute_commit_hash,
-    finalize_freeze_round, replay_early_candidates,
+    CommitHash, CommitRoundOutcome, CommitRoundResult, buffer_commit_candidate,
+    compute_commit_hash, finalize_commit_round, replay_early_candidates,
 };

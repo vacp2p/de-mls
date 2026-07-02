@@ -177,7 +177,7 @@ impl MlsService {
     /// the steward to broadcast.
     ///
     /// The candidate is staged locally, not applied — another steward's commit
-    /// may win the freeze round. Resolve it before the next MLS operation:
+    /// may win the commit round. Resolve it before the next MLS operation:
     /// [`merge_own_commit`](Self::merge_own_commit) if it wins,
     /// [`discard_own_commit`](Self::discard_own_commit) otherwise; a leftover
     /// pending commit blocks the next commit or message.
@@ -239,7 +239,7 @@ impl MlsService {
     }
 
     /// Apply our staged commit, advancing the epoch — call once our candidate
-    /// has won the freeze round.
+    /// has won the commit round.
     pub fn merge_own_commit<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
     where
         Pr: OpenMlsProvider,

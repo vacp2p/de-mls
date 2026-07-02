@@ -34,6 +34,6 @@ pub use handle::{Conversation, LeaveOutcome};
 pub use inbound::{DispatchOutcome, decode_inbound_payload};
 pub use messaging::Outbound;
 pub use poll::PollOutcome;
-pub use queues::{BufferedCommitCandidate, ConversationQueues, FreezeBufferOutcome, ProposalId};
+pub use queues::{BufferedCommitCandidate, CommitBufferOutcome, ConversationQueues, ProposalId};
 pub use state_machine::{ConversationState, ConversationStateMachine, OperatingMode};
 pub use util::{member_set, self_leave_proposal_id, target_member_id_of};

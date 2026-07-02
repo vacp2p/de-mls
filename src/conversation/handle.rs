@@ -18,13 +18,13 @@ use prost::Message;
 use tracing::info;
 
 use crate::{
-    BufferedCommitCandidate, ConsensusEngine, ConsensusPlugin, ConversationConfig,
-    ConversationError, ConversationEvent, ConversationQueues, ConversationState,
-    ConversationStateMachine, FreezeBufferOutcome, FreezeFinalizeResult, OperatingMode, Outbound,
-    PeerScoreStorage, PeerScoringService, PhaseTimer, ProcessResult, ProposalKind,
-    StewardListService, compute_commit_hash,
+    BufferedCommitCandidate, CommitBufferOutcome, CommitRoundResult, ConsensusEngine,
+    ConsensusPlugin, ConversationConfig, ConversationError, ConversationEvent, ConversationQueues,
+    ConversationState, ConversationStateMachine, OperatingMode, Outbound, PeerScoreStorage,
+    PeerScoringService, PhaseTimer, ProcessResult, ProposalKind, StewardListService,
+    compute_commit_hash,
     consensus::outcome_bus::OutcomeReceiver,
-    decode_inbound_payload, finalize_freeze_round, member_set,
+    decode_inbound_payload, finalize_commit_round, member_set,
     mls_crypto::{CommitArtifacts, MlsCommitInput, MlsService},
     protos::de_mls::messages::v1::{
         AppMessage, CommitCandidate, conversation_update_request::Payload,
@@ -88,12 +88,12 @@ pub(crate) struct Timing {
     /// `tick_deadlines` which calls `consensus.handle_consensus_timeout`.
     /// Removed when the consensus session resolves naturally via `handle_consensus_outcome`.
     pub(crate) pending_consensus_timeouts: HashMap<u32, Instant>,
-    /// Last freeze-progress snapshot emitted as `ConversationEvent::FreezeProgress`.
+    /// Last commit-round progress snapshot emitted as `ConversationEvent::CommitRoundProgress`.
     /// `poll()` compares the current `(received, expected)` against this and
     /// emits a new event only when the count changes, avoiding repeated events
     /// on consecutive polling ticks that observe the same progress. Reset to
     /// `None` when the conversation leaves `Freezing`.
-    pub(crate) last_freeze_progress: Option<(usize, usize)>,
+    pub(crate) last_commit_round_progress: Option<(usize, usize)>,
     /// Anchor for the backup-steward proposal takeover: set when an
     /// unproposed buffered membership update first appears with no live
     /// proposal for it. A backup steward proposes the buffered update once
@@ -105,13 +105,13 @@ pub(crate) struct Timing {
 
 impl Timing {
     /// Fresh time-driven state: a cleared phase timer, no pending votes or
-    /// timeouts, and no recorded freeze progress.
+    /// timeouts, and no recorded commit-round progress.
     fn new() -> Self {
         Self {
             phase_timer: PhaseTimer::new(),
             pending_auto_votes: HashMap::new(),
             pending_consensus_timeouts: HashMap::new(),
-            last_freeze_progress: None,
+            last_commit_round_progress: None,
             buffered_propose_anchor: None,
         }
     }
@@ -340,7 +340,7 @@ where
         let commit_hash = compute_commit_hash(&candidate.commit_message);
         let epoch = mls.current_epoch()?;
         let max_candidates = mls.members()?.len();
-        let outcome = self.queues.add_freeze_candidate(
+        let outcome = self.queues.add_commit_candidate(
             BufferedCommitCandidate {
                 candidate_msg: candidate.clone(),
                 commit_hash,
@@ -352,8 +352,8 @@ where
             max_candidates,
         );
         // Non-Buffered outcomes are legitimate runtime states (see
-        // `FreezeBufferOutcome`), not errors — log at debug.
-        if !matches!(outcome, FreezeBufferOutcome::Buffered) {
+        // `CommitBufferOutcome`), not errors — log at debug.
+        if !matches!(outcome, CommitBufferOutcome::Buffered) {
             tracing::debug!(
                 conversation = self.queues.name(),
                 epoch,
@@ -373,20 +373,20 @@ where
         Ok(Some(candidate_msg.encode_to_vec()))
     }
 
-    /// Finalize the active freeze round.
-    pub(crate) fn finalize_freeze_round<Pr>(
+    /// Finalize the active commit round.
+    pub(crate) fn finalize_commit_round<Pr>(
         &mut self,
         provider: &Pr,
         allow_subset_candidates: bool,
         self_member_id: &[u8],
-    ) -> Result<FreezeFinalizeResult, ConversationError>
+    ) -> Result<CommitRoundResult, ConversationError>
     where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
         let in_recovery = self.operating_mode == OperatingMode::Recovery;
         let mls = &mut self.services.mls;
-        finalize_freeze_round(
+        finalize_commit_round(
             provider,
             &mut self.queues,
             mls,
@@ -620,7 +620,7 @@ where
     }
 
     /// `true` once the freeze window elapsed while in `Freezing`.
-    pub(crate) fn is_freeze_timed_out(&self) -> bool {
+    pub(crate) fn is_freeze_window_elapsed(&self) -> bool {
         self.current_state() == ConversationState::Freezing
             && self
                 .timing

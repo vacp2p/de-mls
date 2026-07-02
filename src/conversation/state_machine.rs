@@ -10,7 +10,7 @@ pub enum ConversationState {
     /// Members have stopped accepting new proposals; commit candidates
     /// are buffered for deterministic selection.
     Freezing,
-    /// Selection phase: the freeze-round candidate has been picked and
+    /// Selection phase: the commit-round candidate has been picked and
     /// is being merged.
     Selection,
     /// Recovery: a steward election is in flight after a missed commit.

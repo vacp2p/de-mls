@@ -144,7 +144,7 @@ where
             .insert_pending_update(request.clone(), current_epoch);
 
         // Only the epoch steward proposes immediately. The buffer
-        // survives freeze rounds so a later steward can retry.
+        // survives commit rounds so a later steward can retry.
         let is_epoch_steward = {
             let eligible = self.queues.steward_eligibility(&members);
             self.services

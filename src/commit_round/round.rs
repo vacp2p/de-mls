@@ -1,6 +1,6 @@
-//! Freeze-round public surface, per-round setup, and priority selection.
+//! Commit-round public surface, per-round setup, and priority selection.
 //!
-//! Per-candidate apply lives in the sibling [`crate::freeze::apply`] module.
+//! Per-candidate apply lives in the sibling [`crate::commit_round::apply`] module.
 
 use std::error::Error as StdError;
 
@@ -9,10 +9,10 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::{
-    ConversationError, ConversationQueues, FreezeBufferOutcome, NoopReason, ProcessResult, ScoreOp,
+    CommitBufferOutcome, ConversationError, ConversationQueues, NoopReason, ProcessResult, ScoreOp,
     StewardListService,
+    commit_round::{apply::apply_in_priority_order, context::RoundContext},
     conversation::BufferedCommitCandidate,
-    freeze::{apply::apply_in_priority_order, context::RoundContext},
     mls_crypto::{MlsMessageKind, MlsService},
     protos::de_mls::messages::v1::{CommitCandidate, ConversationUpdateRequest, MemberWelcome},
 };
@@ -21,10 +21,10 @@ use crate::{
 // PUBLIC API
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// What [`finalize_freeze_round`] hands back to the caller.
+/// What [`finalize_commit_round`] hands back to the caller.
 #[derive(Debug, Clone, Default)]
-pub struct FreezeFinalizeResult {
-    pub outcome: FreezeOutcome,
+pub struct CommitRoundResult {
+    pub outcome: CommitRoundOutcome,
     pub score_ops: Vec<ScoreOp>,
     /// Just-committed approvals in FIFO order. Empty on no-op or when
     /// an urgent-target commit drops only its entry.
@@ -32,7 +32,7 @@ pub struct FreezeFinalizeResult {
 }
 
 #[derive(Debug, Clone, Default)]
-pub enum FreezeOutcome {
+pub enum CommitRoundOutcome {
     Applied {
         result: ProcessResult,
         /// Welcome artifact when our own commit added members.
@@ -67,7 +67,7 @@ pub fn buffer_commit_candidate(
 ) -> Result<ProcessResult, ConversationError> {
     let conversation_id = conversation.name().to_owned();
 
-    // Validate fully before touching freeze-round state: a dup/malformed
+    // Validate fully before touching commit-round state: a dup/malformed
     // candidate must not open a round only to return Noop.
     let commit_hash = compute_commit_hash(&candidate_msg.commit_message);
     if conversation.has_committed_hash(&commit_hash) {
@@ -108,7 +108,7 @@ pub fn buffer_commit_candidate(
     let max_candidates = mls.members()?.len();
 
     // Valid candidate — auto-start a round if there are approved proposals.
-    if !conversation.has_freeze_round() {
+    if !conversation.has_commit_round() {
         if conversation.approved_proposals_count() == 0 {
             // The proposal isn't locally approved yet — the consensus outcome
             // is still in flight (a peer steward can reach consensus and
@@ -119,11 +119,11 @@ pub fn buffer_commit_candidate(
             conversation.stash_early_candidate(epoch, candidate_msg, max_candidates);
             return Ok(ProcessResult::Noop(NoopReason::CandidateStashedEarly));
         }
-        conversation.start_freeze_round(epoch);
+        conversation.start_commit_round(epoch);
     }
 
     let steward = candidate_msg.steward_member_id.clone();
-    let outcome = conversation.add_freeze_candidate(
+    let outcome = conversation.add_commit_candidate(
         BufferedCommitCandidate {
             candidate_msg,
             commit_hash,
@@ -135,11 +135,11 @@ pub fn buffer_commit_candidate(
         max_candidates,
     );
     match outcome {
-        FreezeBufferOutcome::Buffered => {
+        CommitBufferOutcome::Buffered => {
             info!(
                 conversation = %conversation_id,
                 epoch,
-                total_candidates = conversation.freeze_candidate_count(),
+                total_candidates = conversation.commit_candidate_count(),
                 "remote candidate buffered"
             );
             Ok(ProcessResult::CommitCandidateReceived {
@@ -147,10 +147,10 @@ pub fn buffer_commit_candidate(
             })
         }
         // Legitimate runtime states, not errors — drop quietly.
-        FreezeBufferOutcome::DuplicateHash => {
+        CommitBufferOutcome::DuplicateHash => {
             Ok(ProcessResult::Noop(NoopReason::DuplicateBufferedHash))
         }
-        FreezeBufferOutcome::CapReached => {
+        CommitBufferOutcome::CapReached => {
             tracing::debug!(conversation = %conversation_id, "candidate ignored: buffer full");
             Ok(ProcessResult::Noop(NoopReason::CandidateBufferFull))
         }
@@ -160,7 +160,7 @@ pub fn buffer_commit_candidate(
 /// Re-buffer any commit candidates stashed before their proposal was locally
 /// approved. Call after a consensus outcome populates the approved queue: a
 /// candidate that lost the race against its own approval is now buffered into
-/// the freeze round and applied normally.
+/// the commit round and applied normally.
 pub fn replay_early_candidates(
     conversation: &mut ConversationQueues,
     mls: &MlsService,
@@ -174,7 +174,7 @@ pub fn replay_early_candidates(
 
 /// Snapshot round state, rank the buffered candidates by RFC priority, and
 /// apply best-first — falling back to the next when MLS staging rejects one.
-pub fn finalize_freeze_round<Pr>(
+pub fn finalize_commit_round<Pr>(
     provider: &Pr,
     conversation: &mut ConversationQueues,
     mls: &mut MlsService,
@@ -182,7 +182,7 @@ pub fn finalize_freeze_round<Pr>(
     in_recovery: bool,
     allow_subset_candidates: bool,
     self_member_id: &[u8],
-) -> Result<FreezeFinalizeResult, ConversationError>
+) -> Result<CommitRoundResult, ConversationError>
 where
     Pr: OpenMlsProvider,
     <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
@@ -206,7 +206,7 @@ where
     // out. Drop any local pending commit and report a no-op.
     if sorted.is_empty() {
         mls.discard_own_commit(provider)?;
-        return Ok(FreezeFinalizeResult::default());
+        return Ok(CommitRoundResult::default());
     }
 
     apply_in_priority_order(

@@ -35,7 +35,7 @@ pub enum ProcessResult {
     /// MLS state advanced (batch commit applied).
     ConversationUpdated,
 
-    /// Remote commit candidate was buffered in the active freeze round.
+    /// Remote commit candidate was buffered in the active commit round.
     CommitCandidateReceived { steward_id: Vec<u8> },
 
     /// Conversation-sync message from the steward.
@@ -75,7 +75,7 @@ pub enum NoopReason {
     WireKindMismatch,
     /// Identical commit hash is already buffered for this round.
     DuplicateBufferedHash,
-    /// Freeze-round buffer is full (one candidate per member already held).
+    /// Commit-round buffer is full (one candidate per member already held).
     CandidateBufferFull,
     /// Candidate arrived before its proposal was locally approved (consensus
     /// outcome still in flight). Stashed for replay once approval lands.

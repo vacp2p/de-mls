@@ -1,5 +1,5 @@
 //! Per-conversation protocol-queue state: approved/voting proposal queues,
-//! freeze-round candidate buffer, pending-update buffer, urgent-commit
+//! commit-round candidate buffer, pending-update buffer, urgent-commit
 //! target, ECP dedup.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -7,10 +7,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use indexmap::{IndexMap, IndexSet};
 
 use crate::{
+    commit_round::CommitHash,
     conversation::util::{
         is_auto_approved_entry, member_set, self_leave_proposal_id, target_member_id_of,
     },
-    freeze::CommitHash,
     proposal_kind::ProposalKind,
     protos::de_mls::messages::v1::{
         CommitCandidate, ConversationUpdateRequest, conversation_update_request,
@@ -50,12 +50,12 @@ pub struct BufferedCommitCandidate {
     pub joiner_identities: Vec<Vec<u8>>,
 }
 
-/// Outcome of [`ConversationQueues::add_freeze_candidate`]. An enum rather than
+/// Outcome of [`ConversationQueues::add_commit_candidate`]. An enum rather than
 /// `Result<(), _>` because the non-success cases are well-defined
 /// protocol states (retransmit, late offer, spoofed fork) that callers
 /// handle differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FreezeBufferOutcome {
+pub enum CommitBufferOutcome {
     /// Candidate stored in the buffer for this epoch.
     Buffered,
     /// A candidate with the same commit hash is already buffered.
@@ -64,14 +64,14 @@ pub enum FreezeBufferOutcome {
     CapReached,
 }
 
-/// In-memory freeze-round state for deterministic selection.
+/// In-memory commit-round state for deterministic selection.
 #[derive(Clone, Debug)]
-struct FreezeRound {
+struct CommitRound {
     epoch: u64,
     candidates: Vec<BufferedCommitCandidate>,
 }
 
-impl FreezeRound {
+impl CommitRound {
     fn new(epoch: u64) -> Self {
         Self {
             epoch,
@@ -98,8 +98,8 @@ pub struct ConversationQueues {
     pending_removal_targets: HashSet<Vec<u8>>,
     /// Recent commit hashes for dedup.
     committed_batch_hashes: VecDeque<CommitHash>,
-    /// Freeze-round candidate buffer for deterministic selection.
-    freeze_round: Option<FreezeRound>,
+    /// Commit-round candidate buffer for deterministic selection.
+    commit_round: Option<CommitRound>,
     /// Buffer of membership updates (Add/Remove) that every member records so a
     /// future epoch steward can retry them if the current one fails to commit.
     pending_updates: HashMap<Vec<u8>, PendingUpdate>,
@@ -134,7 +134,7 @@ impl ConversationQueues {
             active_emergency_ids: HashSet::new(),
             pending_removal_targets: HashSet::new(),
             committed_batch_hashes: VecDeque::new(),
-            freeze_round: None,
+            commit_round: None,
             pending_updates: HashMap::new(),
             resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
@@ -366,7 +366,7 @@ impl ConversationQueues {
 
     /// Check if a commit hash has already been committed (in committed history).
     ///
-    /// Note: freeze round buffer dedup is handled separately by `add_freeze_candidate`.
+    /// Note: commit round buffer dedup is handled separately by `add_commit_candidate`.
     pub(crate) fn has_committed_hash(&self, commit_hash: &CommitHash) -> bool {
         self.committed_batch_hashes
             .iter()
@@ -395,50 +395,50 @@ impl ConversationQueues {
         true
     }
 
-    // ─────────────────────────── Freeze Round ───────────────────────────
+    // ─────────────────────────── Commit Round ───────────────────────────
 
-    /// Open the freeze round for `epoch`, creating one if none exists or the
+    /// Open the commit round for `epoch`, creating one if none exists or the
     /// buffered round is for a different epoch. Idempotent: a repeat call for
     /// the same epoch keeps the existing round and its buffered candidates.
-    pub fn start_freeze_round(&mut self, epoch: u64) {
-        if !matches!(self.freeze_round, Some(ref round) if round.epoch == epoch) {
-            self.freeze_round = Some(FreezeRound::new(epoch));
+    pub fn start_commit_round(&mut self, epoch: u64) {
+        if !matches!(self.commit_round, Some(ref round) if round.epoch == epoch) {
+            self.commit_round = Some(CommitRound::new(epoch));
         }
     }
 
     /// Buffer a validated candidate, opening (or continuing) the round for
     /// `epoch`. `max_candidates` caps the buffer at one-per-member; beyond
     /// that a distinct candidate is spoofed/forked and refused.
-    pub fn add_freeze_candidate(
+    pub fn add_commit_candidate(
         &mut self,
         candidate: BufferedCommitCandidate,
         epoch: u64,
         max_candidates: usize,
-    ) -> FreezeBufferOutcome {
-        self.start_freeze_round(epoch);
-        // `start_freeze_round` guarantees `Some(round @ epoch)`; borrow it.
+    ) -> CommitBufferOutcome {
+        self.start_commit_round(epoch);
+        // `start_commit_round` guarantees `Some(round @ epoch)`; borrow it.
         let round = self
-            .freeze_round
-            .get_or_insert_with(|| FreezeRound::new(epoch));
+            .commit_round
+            .get_or_insert_with(|| CommitRound::new(epoch));
 
         if round
             .candidates
             .iter()
             .any(|c| c.commit_hash == candidate.commit_hash)
         {
-            return FreezeBufferOutcome::DuplicateHash;
+            return CommitBufferOutcome::DuplicateHash;
         }
         if round.candidates.len() >= max_candidates {
-            return FreezeBufferOutcome::CapReached;
+            return CommitBufferOutcome::CapReached;
         }
 
         round.candidates.push(candidate);
-        FreezeBufferOutcome::Buffered
+        CommitBufferOutcome::Buffered
     }
 
-    /// Get the number of buffered commit candidates in the active freeze round.
-    pub fn freeze_candidate_count(&self) -> usize {
-        self.freeze_round
+    /// Get the number of buffered commit candidates in the active commit round.
+    pub fn commit_candidate_count(&self) -> usize {
+        self.commit_round
             .as_ref()
             .map(|r| r.candidates.len())
             .unwrap_or(0)
@@ -471,14 +471,14 @@ impl ConversationQueues {
             .collect()
     }
 
-    /// Whether a freeze round is currently open.
-    pub(crate) fn has_freeze_round(&self) -> bool {
-        self.freeze_round.is_some()
+    /// Whether a commit round is currently open.
+    pub(crate) fn has_commit_round(&self) -> bool {
+        self.commit_round.is_some()
     }
 
-    /// Clear freeze-round state.
-    pub(crate) fn clear_freeze_round(&mut self) {
-        self.freeze_round = None;
+    /// Clear commit-round state.
+    pub(crate) fn clear_commit_round(&mut self) {
+        self.commit_round = None;
     }
 
     /// Move the active round's candidates out and clear the round.
@@ -487,9 +487,9 @@ impl ConversationQueues {
         &mut self,
         epoch: u64,
     ) -> Option<Vec<BufferedCommitCandidate>> {
-        let round = self.freeze_round.take()?;
+        let round = self.commit_round.take()?;
         if round.epoch != epoch {
-            self.freeze_round = Some(round);
+            self.commit_round = Some(round);
             return None;
         }
         Some(round.candidates)

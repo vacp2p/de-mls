@@ -51,7 +51,7 @@ pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
 #[derive(Debug, Clone)]
 pub struct ConversationConfig {
     /// RFC §Inactivity Timer #1: how long the epoch steward has to commit
-    /// approved proposals before honest members enter the freeze round.
+    /// approved proposals before honest members enter the commit round.
     pub commit_inactivity_duration: Duration,
     /// Freeze window before deterministic selection.
     ///

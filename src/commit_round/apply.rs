@@ -7,12 +7,12 @@ use std::error::Error as StdError;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 
 use crate::{
-    CommitHash, ConversationError, ConversationQueues, FreezeFinalizeResult, FreezeOutcome,
+    CommitHash, CommitRoundOutcome, CommitRoundResult, ConversationError, ConversationQueues,
     ProcessResult,
     ScoreEvent::{self, MisbehavingCommit},
     ScoreOp, StewardListService,
+    commit_round::context::RoundContext,
     conversation::BufferedCommitCandidate,
-    freeze::context::RoundContext,
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
     protos::de_mls::messages::v1::{
         CommitCandidate, ConversationUpdateRequest, MemberWelcome, ViolationEvidence,
@@ -27,7 +27,7 @@ use crate::{
 /// `steward_member_id` cannot redirect the `SuccessfulCommit` reward.
 enum CandidateOutcome {
     Terminal {
-        outcome: FreezeOutcome,
+        outcome: CommitRoundOutcome,
         committer: Vec<u8>,
         committed_batch: Vec<ConversationUpdateRequest>,
     },
@@ -45,7 +45,7 @@ pub(super) fn apply_in_priority_order<Pr>(
     sorted: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
     self_member_id: &[u8],
-) -> Result<FreezeFinalizeResult, ConversationError>
+) -> Result<CommitRoundResult, ConversationError>
 where
     Pr: OpenMlsProvider,
     <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
@@ -74,7 +74,7 @@ where
                     remaining,
                     steward_list,
                 );
-                return Ok(FreezeFinalizeResult {
+                return Ok(CommitRoundResult {
                     outcome,
                     score_ops,
                     committed_batch,
@@ -90,8 +90,8 @@ where
     // hash). In that last case a stray pending commit lingers in MLS and would
     // block the next operation (only one pending commit allowed), so clear it.
     mls.discard_own_commit(provider)?;
-    Ok(FreezeFinalizeResult {
-        outcome: FreezeOutcome::NoCandidate,
+    Ok(CommitRoundResult {
+        outcome: CommitRoundOutcome::NoCandidate,
         score_ops,
         committed_batch: Vec::new(),
     })
@@ -176,7 +176,7 @@ where
         ProcessResult::ConversationUpdated
     };
     Ok(CandidateOutcome::Terminal {
-        outcome: FreezeOutcome::Applied { result, welcome },
+        outcome: CommitRoundOutcome::Applied { result, welcome },
         committer: chosen.candidate_msg.steward_member_id,
         committed_batch,
     })
@@ -250,7 +250,7 @@ where
         ProcessResult::ConversationUpdated
     };
     Ok(CandidateOutcome::Terminal {
-        outcome: FreezeOutcome::Applied {
+        outcome: CommitRoundOutcome::Applied {
             result,
             welcome: None,
         },
@@ -446,7 +446,7 @@ fn check_commit_sender_authorized(
 
 /// Apply post-commit bookkeeping and return the cleared batch (empty when
 /// the commit was urgent-target-only and only the targeted entry was
-/// dropped). Caller surfaces the batch through `FreezeFinalizeResult` so
+/// dropped). Caller surfaces the batch through `CommitRoundResult` so
 /// it can be archived for UI history.
 fn finalize_committed_batch(
     conversation: &mut ConversationQueues,
@@ -531,7 +531,7 @@ mod tests {
     /// loop falls through to it rather than discarding it out from under us.
     #[test]
     fn local_candidate_applies_after_a_higher_priority_remote_fails() {
-        use crate::freeze::round::compute_commit_hash;
+        use crate::commit_round::round::compute_commit_hash;
         use crate::mls_crypto::MlsCommitInput;
         use crate::test_fixtures::{TEST_SUITE, make_creator_mls, steward_service_steward};
         use openmls::credentials::{BasicCredential, CredentialWithKey};
@@ -610,7 +610,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            matches!(result.outcome, FreezeOutcome::Applied { .. }),
+            matches!(result.outcome, CommitRoundOutcome::Applied { .. }),
             "own local commit applied after the higher-priority remote failed"
         );
         assert_eq!(mls.current_epoch().unwrap(), epoch_before + 1);

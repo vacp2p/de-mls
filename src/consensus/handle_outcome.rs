@@ -87,7 +87,7 @@ where
 
         // A peer steward can reach consensus and broadcast its commit
         // candidate before our own outcome lands. Now that the approved
-        // queue is populated, replay any stashed candidate so the freeze
+        // queue is populated, replay any stashed candidate so the commit
         // round starts with it instead of empty (which would force a
         // needless reelection).
         self.replay_early_candidates()?;

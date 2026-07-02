@@ -27,8 +27,8 @@ use tracing::{error, info, warn};
 use crate::{
     ConsensusPlugin, ConversationEvent, PeerScoreStorage, ProcessResult, ProposalKind,
     ScoreSnapshot, StewardList, StewardListConfig,
+    commit_round::{buffer_commit_candidate, compute_commit_hash},
     conversation::{ConversationQueues, member_set},
-    freeze::{buffer_commit_candidate, compute_commit_hash},
     mls_crypto::{DecryptedMessage, MlsService},
     process_result::NoopReason,
     protos::de_mls::messages::v1::{
@@ -384,7 +384,7 @@ where
     /// A commit merged. Sync scoring + pending-update buffers, transition to
     /// Working, and run steward housekeeping (list reconcile, election
     /// kick-off, buffered-update drain). The commit author's `SuccessfulCommit`
-    /// reward is emitted by `finalize_freeze_round`, not here.
+    /// reward is emitted by `finalize_commit_round`, not here.
     fn on_conversation_updated<Pr>(
         &mut self,
         provider: &Pr,
@@ -490,7 +490,7 @@ where
             return Ok(());
         };
         let epoch = self.mls().current_epoch()?;
-        self.queues.start_freeze_round(epoch);
+        self.queues.start_commit_round(epoch);
 
         let self_member_id = Arc::clone(&self.self_member_id);
         let outbound = if self.services.steward_list.is_steward(&self_member_id) {
