@@ -360,6 +360,44 @@ where
         Ok(Some(candidate_msg.encode_to_vec()))
     }
 
+    /// Finish entering `Freezing`: announce the phase change, and — if we're a
+    /// steward — mint our own commit candidate and broadcast it to open the
+    /// round. Non-stewards just announce and wait for a steward's candidate.
+    /// `event` is the transition returned by `start_freezing` /
+    /// `check_steward_inactivity`.
+    pub(crate) fn on_freeze_entered<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+        event: ConversationState,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let self_member_id = Arc::clone(&self.self_member_id);
+        let outbound = if self.services.steward_list.is_steward(&self_member_id) {
+            match self.build_local_candidate(provider, signer, &self_member_id) {
+                Ok(payload) => payload,
+                Err(e) => {
+                    tracing::error!(
+                        conversation = %self.conversation_id,
+                        error = %e,
+                        "own commit candidate build failed"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        self.emit_event(ConversationEvent::PhaseChange(event));
+        if let Some(payload) = outbound {
+            self.broadcast(payload);
+        }
+        Ok(())
+    }
+
     /// Finalize the active commit round.
     pub(crate) fn finalize_commit_round<Pr>(
         &mut self,

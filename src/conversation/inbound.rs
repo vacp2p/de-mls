@@ -15,7 +15,6 @@
 //!   the consensus scope.
 
 use std::error::Error as StdError;
-use std::sync::Arc;
 
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
@@ -490,27 +489,7 @@ where
             return Ok(());
         };
 
-        let self_member_id = Arc::clone(&self.self_member_id);
-        let outbound = if self.services.steward_list.is_steward(&self_member_id) {
-            match self.build_local_candidate(provider, signer, &self_member_id) {
-                Ok(payload) => payload,
-                Err(e) => {
-                    error!(
-                        conversation = %self.conversation_id,
-                        error = %e,
-                        "own commit candidate build failed"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        self.emit_event(ConversationEvent::PhaseChange(event));
-        if let Some(payload) = outbound {
-            self.broadcast(payload);
-        }
+        self.on_freeze_entered(provider, signer, event)?;
         Ok(())
     }
 
