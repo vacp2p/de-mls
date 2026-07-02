@@ -1,11 +1,12 @@
 //! Freeze round candidate processing, selection, and commit application.
 //!
-//! Two submodules:
-//! - `round` — public surface plus per-round setup and priority selection.
-//! - `apply` — phase-3 loop: per-candidate apply, staging, validation,
-//!   and post-commit bookkeeping.
+//! Submodules:
+//! - `round` — public surface (buffer/replay/finalize) and priority selection.
+//! - `context` — the pre-merge `RoundContext` snapshot that apply reads from.
+//! - `apply` — per-candidate apply, staging, validation, post-commit bookkeeping.
 
 mod apply;
+mod context;
 mod round;
 
 pub use round::{

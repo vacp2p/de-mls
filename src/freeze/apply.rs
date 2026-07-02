@@ -12,7 +12,7 @@ use crate::{
     ScoreEvent::{self, MisbehavingCommit},
     ScoreOp, StewardListService,
     conversation::BufferedCommitCandidate,
-    freeze::round::RoundContext,
+    freeze::context::RoundContext,
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
     protos::de_mls::messages::v1::{
         CommitCandidate, ConversationUpdateRequest, MemberWelcome, ViolationEvidence,
@@ -41,7 +41,7 @@ pub(super) fn apply_in_priority_order<Pr>(
     provider: &Pr,
     conversation: &mut ConversationQueues,
     mls: &mut MlsService,
-    steward: &StewardListService,
+    steward_list: &StewardListService,
     sorted: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
     self_member_id: &[u8],
@@ -57,7 +57,7 @@ where
         let apply_result = if chosen.is_local_candidate {
             apply_local_candidate(provider, conversation, mls, chosen, ctx)?
         } else {
-            apply_incoming_candidate(provider, conversation, mls, steward, chosen, ctx)?
+            apply_incoming_candidate(provider, conversation, mls, steward_list, chosen, ctx)?
         };
 
         match apply_result {
@@ -72,7 +72,7 @@ where
                     self_member_id,
                     ctx,
                     remaining,
-                    steward,
+                    steward_list,
                 );
                 return Ok(FreezeFinalizeResult {
                     outcome,
@@ -90,7 +90,6 @@ where
     // hash). In that last case a stray pending commit lingers in MLS and would
     // block the next operation (only one pending commit allowed), so clear it.
     mls.discard_own_commit(provider)?;
-    conversation.clear_freeze_round();
     Ok(FreezeFinalizeResult {
         outcome: FreezeOutcome::NoCandidate,
         score_ops,
@@ -109,14 +108,16 @@ fn record_winner_scores(
     self_member_id: &[u8],
     ctx: &RoundContext,
     losers: impl Iterator<Item = BufferedCommitCandidate>,
-    sl_service: &StewardListService,
+    steward_list: &StewardListService,
 ) {
     score_ops.push(ScoreOp {
         member_id: committer.to_vec(),
         event: ScoreEvent::SuccessfulCommit,
     });
 
-    // `epoch_steward_id` was resolved through `steward_eligibility`
+    // `epoch_steward_id` is eligibility-filtered in `RoundContext::snapshot`, so
+    // an absent expected steward is genuinely at fault. Penalise it — but never
+    // ourselves, and not the member who actually committed.
     if let Some(expected) = ctx.epoch_steward_id.as_deref()
         && expected != committer
         && expected != self_member_id
@@ -129,7 +130,7 @@ fn record_winner_scores(
 
     for loser in losers {
         let claimed = loser.candidate_msg.steward_member_id;
-        if sl_service.is_steward(&claimed) {
+        if steward_list.is_steward(&claimed) {
             score_ops.push(ScoreOp {
                 member_id: claimed,
                 event: ScoreEvent::HonestCommitAttempt,
@@ -142,8 +143,6 @@ fn record_winner_scores(
         }
     }
 }
-
-// ─────────────────────────── Application Paths ───────────────────────────
 
 /// Merge our own commit and surface the welcome we held back until merge.
 /// Validation happened at commit-creation time, so no re-staging is needed.
@@ -178,7 +177,7 @@ where
     };
     Ok(CandidateOutcome::Terminal {
         outcome: FreezeOutcome::Applied { result, welcome },
-        committer: chosen.candidate_msg.steward_member_id.clone(),
+        committer: chosen.candidate_msg.steward_member_id,
         committed_batch,
     })
 }
@@ -193,7 +192,7 @@ fn apply_incoming_candidate<Pr>(
     provider: &Pr,
     conversation: &mut ConversationQueues,
     mls: &mut MlsService,
-    sl_service: &StewardListService,
+    steward_list: &StewardListService,
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
 ) -> Result<CandidateOutcome, ConversationError>
@@ -201,44 +200,39 @@ where
     Pr: OpenMlsProvider,
     <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
 {
-    let conversation_id = conversation.name().to_owned();
-
-    let (commit_sender, self_removed, commit_actions) =
-        match stage_candidate(provider, mls, &conversation_id, &chosen.candidate_msg, ctx)? {
-            StagingOutcome::Staged {
-                commit_sender,
-                self_removed,
-                commit_actions,
-            } => (commit_sender, self_removed, commit_actions),
-            StagingOutcome::Abort => {
-                // The commit never staged (stale epoch, wrong group, malformed),
-                // so its sender was never MLS-authenticated. The only id we hold
-                // is the plaintext wire `steward_member_id`, which is forgeable —
-                // scoring it would let anyone grief a victim with junk
-                // candidates. Drop without penalty and try the next candidate.
-                mls.discard_staged_commit(provider)?;
-                return Ok(CandidateOutcome::Drop(None));
-            }
-            StagingOutcome::Violation(v) => {
-                mls.discard_staged_commit(provider)?;
-                return Ok(CandidateOutcome::Drop(v.target_score_op()));
-            }
-        };
+    // Validation ladder: stage → authorize sender → match actions. The first
+    // failing gate rolls back the staging and drops; the caller's loop then
+    // tries the next candidate.
+    let (commit_sender, self_removed, commit_actions) = match stage_candidate(
+        provider,
+        mls,
+        conversation.name(),
+        &chosen.candidate_msg,
+        ctx,
+    )? {
+        StagingOutcome::Staged {
+            commit_sender,
+            self_removed,
+            commit_actions,
+        } => (commit_sender, self_removed, commit_actions),
+        StagingOutcome::Abort => return reject_staged(mls, provider, None),
+        StagingOutcome::Violation(v) => {
+            return reject_staged(mls, provider, v.target_score_op());
+        }
+    };
 
     // Commit sender must be on the steward list (RFC §"Commit validation service").
     if let Some(violation) =
-        check_commit_sender_authorized(conversation, sl_service, &commit_sender, ctx)
+        check_commit_sender_authorized(conversation, steward_list, &commit_sender, ctx)
     {
-        mls.discard_staged_commit(provider)?;
-        return Ok(CandidateOutcome::Drop(violation.target_score_op()));
+        return reject_staged(mls, provider, violation.target_score_op());
     }
 
     // MLS actions must match the set we voted to approve.
     if let Some(violation) =
         validate_commit_candidate(conversation, &commit_sender, &commit_actions, ctx)?
     {
-        mls.discard_staged_commit(provider)?;
-        return Ok(CandidateOutcome::Drop(violation.target_score_op()));
+        return reject_staged(mls, provider, violation.target_score_op());
     }
 
     // The remote wins. Clear our own pending commit (if any) before applying it:
@@ -250,7 +244,6 @@ where
     let committed_batch =
         finalize_committed_batch(conversation, chosen.commit_hash, mls.current_epoch()?);
 
-    // Remote candidates never carry welcome bytes — only the author sends those.
     let result = if self_removed {
         ProcessResult::LeaveConversation
     } else {
@@ -264,6 +257,21 @@ where
         committer: commit_sender,
         committed_batch,
     })
+}
+
+/// Roll back a staged remote candidate and drop it, optionally with a penalty,
+/// so the priority loop falls through to the next candidate.
+fn reject_staged<Pr>(
+    mls: &mut MlsService,
+    provider: &Pr,
+    penalty: Option<ScoreOp>,
+) -> Result<CandidateOutcome, ConversationError>
+where
+    Pr: OpenMlsProvider,
+    <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+{
+    mls.discard_staged_commit(provider)?;
+    Ok(CandidateOutcome::Drop(penalty))
 }
 
 // ─────────────────────────── MLS Staging ───────────────────────────
@@ -344,8 +352,6 @@ where
     })
 }
 
-// ─────────────────────────── Validation ───────────────────────────
-
 /// Check that a commit's MLS actions match the voted-approved set.
 /// `Some(evidence)` on mismatch.
 ///
@@ -416,15 +422,15 @@ fn action_projection_from_mls(action: &MlsProposalOutput) -> (u8, &[u8]) {
 /// liveness; mirrors the relaxed gate in `create_commit_candidate`).
 fn check_commit_sender_authorized(
     conversation: &ConversationQueues,
-    sl_service: &StewardListService,
+    steward_list: &StewardListService,
     commit_sender: &[u8],
     ctx: &RoundContext,
 ) -> Option<ViolationEvidence> {
     if ctx.in_recovery {
         return None;
     }
-    sl_service.current_list()?;
-    if sl_service.is_steward(commit_sender) {
+    steward_list.current_list()?;
+    if steward_list.is_steward(commit_sender) {
         return None;
     }
     tracing::warn!(
@@ -437,8 +443,6 @@ fn check_commit_sender_authorized(
         "commit from unauthorized sender (not on the steward list)",
     ))
 }
-
-// ─────────────────────────── State Utilities ───────────────────────────
 
 /// Apply post-commit bookkeeping and return the cleared batch (empty when
 /// the commit was urgent-target-only and only the targeted entry was
@@ -460,7 +464,6 @@ fn finalize_committed_batch(
     // Stamp join epochs for members this commit added, so the next reconcile
     // doesn't count them toward an election they can't yet participate in.
     conversation.note_member_joins(&snapshot, current_epoch);
-    conversation.clear_freeze_round();
     snapshot
 }
 
@@ -490,10 +493,10 @@ mod tests {
         (sl, alice, bob)
     }
 
-    /// Regression guard: an exhausted list (Layer-2 re-election window) must still
-    /// verify the committer against its members — it does NOT grant the Layer-3
-    /// "any member may commit" permission. A steward's superseding commit passes;
-    /// a non-steward's is rejected.
+    /// An exhausted list (Layer-2 re-election window) must still verify the
+    /// committer against its members — it does NOT grant the Layer-3 "any member
+    /// may commit" permission. A steward's superseding commit passes; a
+    /// non-steward's is rejected.
     #[test]
     fn exhausted_list_still_gates_on_membership() {
         let (sl, alice, _bob) = list_over_two_epochs();
@@ -523,11 +526,9 @@ mod tests {
         );
     }
 
-    /// High-level apply-loop behaviour and the regression guard for the
-    /// lost-own-commit lag: when a higher-priority remote candidate fails, our
-    /// own lower-priority local candidate still applies — it is no longer
-    /// discarded out from under us. Under the old pre-discard this returned
-    /// `NoCandidate`.
+    /// High-level apply-loop behaviour: when a higher-priority remote candidate
+    /// fails staging, our own lower-priority local candidate still applies — the
+    /// loop falls through to it rather than discarding it out from under us.
     #[test]
     fn local_candidate_applies_after_a_higher_priority_remote_fails() {
         use crate::freeze::round::compute_commit_hash;

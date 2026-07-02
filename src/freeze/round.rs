@@ -12,12 +12,9 @@ use crate::{
     ConversationError, ConversationQueues, FreezeBufferOutcome, NoopReason, ProcessResult, ScoreOp,
     StewardListService,
     conversation::BufferedCommitCandidate,
-    freeze::apply::apply_in_priority_order,
+    freeze::{apply::apply_in_priority_order, context::RoundContext},
     mls_crypto::{MlsMessageKind, MlsService},
-    protos::de_mls::messages::v1::{
-        CommitCandidate, ConversationUpdateRequest, MemberWelcome,
-        conversation_update_request::Payload,
-    },
+    protos::de_mls::messages::v1::{CommitCandidate, ConversationUpdateRequest, MemberWelcome},
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -65,7 +62,7 @@ pub fn compute_commit_hash(commit_message: &[u8]) -> CommitHash {
 /// hash. No MLS state is mutated.
 pub fn buffer_commit_candidate(
     conversation: &mut ConversationQueues,
-    mls: &mut MlsService,
+    mls: &MlsService,
     candidate_msg: CommitCandidate,
 ) -> Result<ProcessResult, ConversationError> {
     let conversation_id = conversation.name().to_owned();
@@ -163,10 +160,10 @@ pub fn buffer_commit_candidate(
 /// Re-buffer any commit candidates stashed before their proposal was locally
 /// approved. Call after a consensus outcome populates the approved queue: a
 /// candidate that lost the race against its own approval is now buffered into
-/// the freeze round and applied normally. No-op when nothing is stashed.
+/// the freeze round and applied normally.
 pub fn replay_early_candidates(
     conversation: &mut ConversationQueues,
-    mls: &mut MlsService,
+    mls: &MlsService,
 ) -> Result<(), ConversationError> {
     let epoch = mls.current_epoch()?;
     for candidate in conversation.take_early_candidates(epoch) {
@@ -181,7 +178,7 @@ pub fn finalize_freeze_round<Pr>(
     provider: &Pr,
     conversation: &mut ConversationQueues,
     mls: &mut MlsService,
-    steward: &StewardListService,
+    steward_list: &StewardListService,
     in_recovery: bool,
     allow_subset_candidates: bool,
     self_member_id: &[u8],
@@ -191,114 +188,35 @@ where
     <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
 {
     let current_epoch = mls.current_epoch()?;
-    let Some(candidates) = conversation.take_round_candidates(current_epoch) else {
-        return discard_and_finish(provider, mls);
-    };
-
-    if candidates.is_empty() {
-        return discard_and_finish(provider, mls);
-    }
+    let candidates = conversation
+        .take_round_candidates(current_epoch)
+        .unwrap_or_default();
 
     let ctx = RoundContext::snapshot(
         conversation,
         mls,
-        steward,
+        steward_list,
         current_epoch,
         in_recovery,
         self_member_id,
     )?;
     let sorted = rank_applicable_candidates(candidates, &ctx, allow_subset_candidates);
 
+    // Nothing applicable — empty round, stale epoch, or every candidate filtered
+    // out. Drop any local pending commit and report a no-op.
     if sorted.is_empty() {
-        return discard_and_finish(provider, mls);
+        mls.discard_own_commit(provider)?;
+        return Ok(FreezeFinalizeResult::default());
     }
 
     apply_in_priority_order(
         provider,
         conversation,
         mls,
-        steward,
+        steward_list,
         sorted,
         &ctx,
         self_member_id,
-    )
-}
-
-/// No candidate applied: drop any local pending commit (otherwise the next
-/// MLS encrypt trips on "pending proposal exists") and report a no-op.
-fn discard_and_finish<Pr>(
-    provider: &Pr,
-    mls: &mut MlsService,
-) -> Result<FreezeFinalizeResult, ConversationError>
-where
-    Pr: OpenMlsProvider,
-    <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
-{
-    mls.discard_own_commit(provider)?;
-    Ok(FreezeFinalizeResult::default())
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// ROUND SETUP
-// ═════════════════════════════════════════════════════════════════════════════
-
-/// Pre-merge round state used during candidate apply.
-pub(super) struct RoundContext {
-    /// Number of MLS-producing approvals (Add/Remove). Used to filter
-    /// candidates whose proposal count doesn't match the voted set.
-    pub(super) mls_count: usize,
-    /// Flips the local apply's terminal result to `LeaveConversation`
-    /// when our removal is in the batch.
-    pub(super) self_remove_pending: bool,
-    pub(super) current_epoch: u64,
-    /// RFC §Layer 3 Anti-Deadlock: any member MAY commit when set;
-    /// otherwise the commit sender must be on the steward list.
-    pub(super) in_recovery: bool,
-    /// Pre-merge eligibility-filtered steward expected at
-    /// `current_epoch`. Used to penalise an absent steward when a
-    /// backup commits in their place.
-    pub(super) epoch_steward_id: Option<Vec<u8>>,
-}
-
-impl RoundContext {
-    fn snapshot(
-        conversation: &ConversationQueues,
-        mls: &mut MlsService,
-        steward: &StewardListService,
-        current_epoch: u64,
-        in_recovery: bool,
-        self_member_id: &[u8],
-    ) -> Result<Self, ConversationError> {
-        let mls_count = conversation
-            .approved_proposals()
-            .values()
-            .filter(|req| produces_mls_action(req))
-            .count();
-        let self_remove_pending = conversation.has_approved_removal(self_member_id);
-
-        let members = mls.members()?;
-        let eligible = conversation.steward_eligibility(&members);
-        let epoch_steward_id = steward
-            .epoch_steward(current_epoch, &eligible)
-            .map(|s| s.to_vec());
-
-        Ok(Self {
-            mls_count,
-            self_remove_pending,
-            current_epoch,
-            in_recovery,
-            epoch_steward_id,
-        })
-    }
-}
-
-/// True iff `req` is a membership change that produces an MLS proposal
-/// (vs governance kinds like emergency criteria or steward election,
-/// which are consensus-only).
-pub(super) fn produces_mls_action(req: &ConversationUpdateRequest) -> bool {
-    matches!(
-        req.payload.as_ref(),
-        Some(Payload::MemberInvite(_) | Payload::RemoveMember(_))
     )
 }
 

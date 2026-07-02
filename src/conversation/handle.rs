@@ -401,7 +401,7 @@ where
     /// approved. Call after applying a consensus outcome. No-op when nothing
     /// is stashed.
     pub(crate) fn replay_early_candidates(&mut self) -> Result<(), ConversationError> {
-        replay_early_candidates(&mut self.queues, &mut self.services.mls)
+        replay_early_candidates(&mut self.queues, &self.services.mls)
     }
 
     /// Decode an inbound app-subtopic payload into a [`ProcessResult`].

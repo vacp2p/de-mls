@@ -45,4 +45,12 @@ impl ConversationUpdateRequest {
             payload: Some(Payload::StewardElection(election)),
         }
     }
+
+    /// True iff `req` is a membership change that produces an MLS proposal
+    pub fn produces_mls_action(&self) -> bool {
+        matches!(
+            self.payload.as_ref(),
+            Some(Payload::MemberInvite(_) | Payload::RemoveMember(_))
+        )
+    }
 }
