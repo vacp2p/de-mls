@@ -195,7 +195,7 @@ where
 /// No candidate applied: drop any local pending commit (otherwise the next MLS
 /// operation trips on a lingering pending commit) and report a no-op carrying
 /// any penalties accrued while trying candidates.
-pub(super) fn discard_and_finish<Pr>(
+pub fn discard_and_finish<Pr>(
     provider: &Pr,
     mls: &mut MlsService,
     score_ops: Vec<ScoreOp>,

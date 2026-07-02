@@ -4,12 +4,14 @@
 //! - `buffer` — the per-epoch candidate buffer (`CommitRoundBuffer`) and its types.
 //! - `round` — public surface (buffer/replay/finalize) and priority selection.
 //! - `context` — the pre-merge `RoundContext` snapshot that apply reads from.
-//! - `apply` — per-candidate apply, staging, validation, post-commit bookkeeping.
+//! - `apply` — the best-first apply loop and its local/remote apply paths.
+//! - `validate` — commit validation service: stage, authorize, action-match.
 
 mod apply;
 mod buffer;
 mod context;
 mod round;
+mod validate;
 
 pub use buffer::{BufferedCommitCandidate, CommitBufferOutcome, CommitRoundBuffer};
 pub use round::{
