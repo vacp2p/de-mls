@@ -115,17 +115,18 @@ where
             return Ok(DispatchOutcome::Done);
         }
 
+        let (received, expected) = self.commit_candidate_count();
+
         // Early selection: skip remaining freeze time if all expected
         // stewards have submitted candidates.
         let all_candidates_in = self
             .services
             .steward_list
             .current_list()
-            .is_some_and(|list| self.queues.commit_round.candidate_count() >= list.len());
+            .is_some_and(|list| received >= list.len());
 
         if !all_candidates_in && !self.is_freeze_window_elapsed() {
             // Still freezing — surface candidate progress when it changes.
-            let (received, expected) = self.commit_candidate_count();
             if self.timing.last_commit_round_progress != Some((received, expected)) {
                 self.timing.last_commit_round_progress = Some((received, expected));
                 self.emit_event(ConversationEvent::CommitRoundProgress { received, expected });
