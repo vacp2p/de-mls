@@ -1,13 +1,15 @@
-//! Commit validation service (RFC §"Commit validation service"): stage a remote
-//! candidate, authorize its committer against the steward list, and check its
-//! MLS actions against the voted-approved set. Drives `apply_incoming_candidate`.
+//! Commit validation service (RFC §"Commit validation service"): validate each
+//! candidate — stage it, authorize its committer against the steward list, and
+//! check its MLS actions against the voted-approved set — and rank the
+//! candidates by RFC priority to pick the winner. Ranking drives
+//! `finalize_commit_round`; per-candidate validation drives `apply_incoming_candidate`.
 
 use std::error::Error as StdError;
 
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 
 use crate::{
-    ConversationError, ConversationQueues, StewardListService,
+    BufferedCommitCandidate, ConversationError, ConversationQueues, StewardListService,
     commit_round::context::RoundContext,
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
     protos::de_mls::messages::v1::{
@@ -184,10 +186,67 @@ pub fn check_commit_sender_authorized(
     ))
 }
 
+// ─────────────────────────── Selection ───────────────────────────
+
+/// Filter candidates whose action count matches the voted set, then sort
+/// survivors by the RFC priority comparator (best-first).
+pub fn rank_applicable_candidates(
+    candidates: Vec<BufferedCommitCandidate>,
+    ctx: &RoundContext,
+    allow_subset: bool,
+) -> Vec<BufferedCommitCandidate> {
+    let mut sorted: Vec<_> = candidates
+        .into_iter()
+        .filter(|c| {
+            let n = c.candidate_msg.mls_proposals.len();
+            if allow_subset {
+                n <= ctx.mls_count
+            } else {
+                n == ctx.mls_count
+            }
+        })
+        .collect();
+    sorted.sort_by(|a, b| compare_candidate_priority(a, b, ctx.epoch_steward_id.as_deref()));
+    sorted
+}
+
+/// RFC §"Commit validation service" selection priority, in order:
+///   1. largest proposal count,
+///   2. epoch steward before anyone else,
+///   3. lexicographically smallest `steward_member_id`,
+///   4. lowest `commit_hash`.
+fn compare_candidate_priority(
+    a: &BufferedCommitCandidate,
+    b: &BufferedCommitCandidate,
+    epoch_steward_id: Option<&[u8]>,
+) -> std::cmp::Ordering {
+    // Tier: 0 for the epoch steward, 1 for everyone else.
+    let tier = |c: &BufferedCommitCandidate| -> u8 {
+        match epoch_steward_id {
+            Some(es) if c.candidate_msg.steward_member_id == es => 0,
+            _ => 1,
+        }
+    };
+
+    // In priority order: largest proposal count (`b` before `a` for descending),
+    // then epoch steward, then smallest `steward_member_id`, then lowest hash.
+    b.candidate_msg
+        .mls_proposals
+        .len()
+        .cmp(&a.candidate_msg.mls_proposals.len())
+        .then_with(|| tier(a).cmp(&tier(b)))
+        .then_with(|| {
+            a.candidate_msg
+                .steward_member_id
+                .cmp(&b.candidate_msg.steward_member_id)
+        })
+        .then_with(|| a.commit_hash.cmp(&b.commit_hash))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::StewardListConfig;
+    use crate::{CommitHash, StewardListConfig, compute_commit_hash};
 
     fn ctx_at(epoch: u64, in_recovery: bool) -> RoundContext {
         RoundContext {
@@ -241,5 +300,145 @@ mod tests {
             check_commit_sender_authorized(&queues, &sl, &[9u8; 20], &ctx).is_none(),
             "recovery mode authorizes any member"
         );
+    }
+
+    fn sort_by_priority(
+        candidates: &mut [BufferedCommitCandidate],
+        epoch_steward_id: Option<&[u8]>,
+    ) {
+        candidates.sort_by(|a, b| compare_candidate_priority(a, b, epoch_steward_id));
+    }
+
+    fn hash(byte: u8) -> CommitHash {
+        compute_commit_hash(&[byte; 32])
+    }
+
+    fn make_candidate(
+        steward_member_id: Vec<u8>,
+        actions_count: usize,
+        commit_hash: CommitHash,
+    ) -> BufferedCommitCandidate {
+        BufferedCommitCandidate {
+            candidate_msg: CommitCandidate {
+                conversation_id: b"test-conversation".to_vec(),
+                mls_proposals: vec![vec![0xFF; 10]; actions_count],
+                // commit_message is irrelevant to priority ordering (which
+                // keys off mls_proposals/steward_member_id/commit_hash).
+                commit_message: vec![0u8; 32],
+                steward_member_id,
+            },
+            commit_hash,
+            is_local_candidate: false,
+            welcome_bytes: None,
+            joiner_identities: Vec::new(),
+        }
+    }
+
+    /// Primary criterion: longer proposal sequence wins, even over the epoch steward.
+    #[test]
+    fn more_actions_beats_epoch_steward() {
+        let epoch_id = vec![0x01];
+        let other_id = vec![0x03];
+
+        let mut candidates = vec![
+            make_candidate(epoch_id.clone(), 3, hash(0xAA)),
+            make_candidate(other_id.clone(), 5, hash(0xBB)),
+        ];
+
+        sort_by_priority(&mut candidates, Some(&epoch_id));
+
+        assert_eq!(candidates[0].candidate_msg.steward_member_id, other_id);
+        assert_eq!(candidates[0].candidate_msg.mls_proposals.len(), 5);
+    }
+
+    /// Second criterion: equal action count → epoch steward wins on tier.
+    #[test]
+    fn epoch_steward_wins_tier_on_equal_action_count() {
+        let epoch_id = vec![0x01];
+        let other_id = vec![0x02];
+
+        let mut candidates = vec![
+            make_candidate(other_id.clone(), 3, hash(0xAA)),
+            make_candidate(epoch_id.clone(), 3, hash(0xBB)),
+        ];
+
+        sort_by_priority(&mut candidates, Some(&epoch_id));
+
+        assert_eq!(candidates[0].candidate_msg.steward_member_id, epoch_id);
+    }
+
+    /// Third criterion: equal tier → lexicographically smallest member_id wins.
+    #[test]
+    fn lexicographic_member_id_tiebreak_when_tier_equal() {
+        let epoch_id = vec![0x01];
+        let other_a = vec![0x05];
+        let other_b = vec![0x03];
+
+        let mut candidates = vec![
+            make_candidate(other_a.clone(), 3, hash(0xAA)),
+            make_candidate(other_b.clone(), 3, hash(0xBB)),
+        ];
+
+        sort_by_priority(&mut candidates, Some(&epoch_id));
+
+        assert_eq!(candidates[0].candidate_msg.steward_member_id, other_b);
+    }
+
+    /// Final tiebreak: same member_id, same action count → lowest commit hash wins.
+    #[test]
+    fn commit_hash_as_final_tiebreak() {
+        let id = vec![0x05];
+
+        let mut candidates = vec![
+            make_candidate(id.clone(), 3, hash(0xCC)),
+            make_candidate(id.clone(), 3, hash(0xAA)),
+        ];
+
+        sort_by_priority(&mut candidates, Some(&[0x01]));
+
+        let (h_aa, h_cc) = (hash(0xAA), hash(0xCC));
+        let expected_winner = h_aa.min(h_cc);
+
+        assert_eq!(candidates[0].commit_hash, expected_winner);
+    }
+
+    /// No steward list → tier is always 1, so the tier check is a no-op and
+    /// we fall through to member_id comparison.
+    #[test]
+    fn no_steward_list_flattens_tier_and_falls_through_to_member_id() {
+        let id_a = vec![0x05];
+        let id_b = vec![0x03];
+
+        let mut candidates = vec![
+            make_candidate(id_a.clone(), 3, hash(0xAA)),
+            make_candidate(id_b.clone(), 3, hash(0xBB)),
+        ];
+
+        sort_by_priority(&mut candidates, None);
+
+        assert_eq!(candidates[0].candidate_msg.steward_member_id, id_b);
+    }
+
+    /// Integration: three candidates mixing all criteria in one ordering.
+    #[test]
+    fn full_priority_order_actions_first_then_tier_then_member_id() {
+        // other_b: 5 actions (wins on primary)
+        // epoch:   3 actions, epoch-steward tier
+        // other_a: 3 actions, non-epoch
+        let epoch_id = vec![0x01];
+        let other_a = vec![0x03];
+        let other_b = vec![0x04];
+
+        let mut candidates = vec![
+            make_candidate(other_b.clone(), 5, hash(0x11)),
+            make_candidate(other_a.clone(), 3, hash(0x22)),
+            make_candidate(epoch_id.clone(), 3, hash(0x44)),
+        ];
+
+        sort_by_priority(&mut candidates, Some(&epoch_id));
+
+        assert_eq!(candidates[0].candidate_msg.steward_member_id, other_b);
+        assert_eq!(candidates[1].candidate_msg.steward_member_id, epoch_id);
+        assert_eq!(candidates[2].candidate_msg.steward_member_id, other_a);
     }
 }
