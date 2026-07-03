@@ -90,4 +90,17 @@ pub enum ConversationEvent {
     /// candidates have arrived. Re-emitted whenever the count changes, so it
     /// can back a progress indicator.
     CommitRoundProgress { received: usize, expected: usize },
+
+    /// Layer-3 recovery opened: the steward list is deadlocked and the steward
+    /// gate is relaxed so any member MAY commit. The integrator decides the
+    /// policy — call [`crate::Conversation::commit_in_recovery`] to mint now
+    /// (a "commit" button), or leave it to the auto-fallback that mints on
+    /// every online node after `recovery_auto_commit_delay`.
+    RecoveryModeOpened,
+
+    /// Layer-3 recovery gave up after `recovery_max_rounds` manual+auto rounds
+    /// produced no commit. The conversation leaves recovery for `Working`; the
+    /// integrator decides what an unrecoverable group does (alert, tear down).
+    /// Never emitted when `recovery_max_rounds` is `0` (retry forever).
+    RecoveryExhausted,
 }

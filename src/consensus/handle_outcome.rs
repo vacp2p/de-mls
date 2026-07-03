@@ -101,11 +101,18 @@ where
                 self.handle_election_rejected(provider, signer)?;
             }
             ConsensusApplyResult::RecoveryModeOpened => {
+                // Open the collection window and notify the integrator; who mints
+                // is its policy (manual `commit_in_recovery`, or the auto-fallback
+                // in `advance_freezing`). No internal mint here.
                 self.enter_recovery_mode();
                 self.start_freezing_and_emit();
+                self.emit_event(ConversationEvent::RecoveryModeOpened);
             }
             ConsensusApplyResult::UrgentRemoval { target } => {
-                self.start_freezing_and_emit();
+                // A steward-gated removal: enter freezing and mint it now.
+                if let Some(event) = self.start_freezing() {
+                    self.on_freeze_entered(provider, signer, event)?;
+                }
                 self.refresh_stewards_after_removal(provider, &target, signer)?;
             }
             ConsensusApplyResult::QueuedRemoval { target } => {

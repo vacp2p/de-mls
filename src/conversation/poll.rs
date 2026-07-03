@@ -115,17 +115,40 @@ where
             return Ok(DispatchOutcome::Done);
         }
 
+        let in_recovery = self.is_in_recovery_mode();
+        // Layer-3 auto-fallback: once the manual grace passes, every online node
+        // mints so a commit lands even if no one pressed the button.
+        if in_recovery {
+            self.maybe_auto_commit_recovery(provider, signer);
+        }
+
         let (received, expected) = self.commit_candidate_count();
 
-        // Early selection: skip remaining freeze time if all expected
-        // stewards have submitted candidates.
-        let all_candidates_in = self
-            .services
-            .steward_list
-            .current_list()
-            .is_some_and(|list| received >= list.len());
+        // Early selection: skip remaining freeze time if all expected stewards
+        // have submitted. Not in recovery — there's no fixed roster to count
+        // against (any member may commit), so we wait out the window.
+        let all_candidates_in = !in_recovery
+            && self
+                .services
+                .steward_list
+                .current_list()
+                .is_some_and(|list| received >= list.len());
 
-        if !all_candidates_in && !self.is_freeze_window_elapsed() {
+        // Recovery reuses the shorter `recovery_inactivity_duration` as its
+        // collection settle (after the manual grace / auto-mint), rather than
+        // the full `freeze_duration`.
+        let window_elapsed = if in_recovery {
+            let window = self
+                .config
+                .recovery_auto_commit_delay
+                .unwrap_or(Duration::ZERO)
+                + self.config.recovery_inactivity_duration;
+            self.timing.phase_timer.elapsed_since_anchor(window)
+        } else {
+            self.is_freeze_window_elapsed()
+        };
+
+        if !all_candidates_in && !window_elapsed {
             // Still freezing — surface candidate progress when it changes.
             if self.timing.last_commit_round_progress != Some((received, expected)) {
                 self.timing.last_commit_round_progress = Some((received, expected));
@@ -140,7 +163,10 @@ where
         self.emit_event(ConversationEvent::PhaseChange(selection_event));
 
         let conversation_id = self.conversation_id.clone();
-        let allow_subset = self.services.steward_list.config().allow_subset_candidates;
+        // Recovery accepts subset candidates: any member may commit whatever
+        // subset of the approved set they hold, and selection picks the best.
+        let allow_subset =
+            in_recovery || self.services.steward_list.config().allow_subset_candidates;
         let self_member_id = Arc::clone(&self.self_member_id);
         let mut finalize_result = match self.finalize_commit_round(
             provider,
@@ -180,6 +206,10 @@ where
 
         match finalize_result.outcome {
             CommitRoundOutcome::Applied { result, welcome } => {
+                // RFC Layer 3: the first valid commit ends recovery.
+                if in_recovery {
+                    self.exit_recovery_mode();
+                }
                 if let Some(mut welcome) = welcome {
                     // Bundle ConversationSync (steward list + timing +
                     // scores) into the welcome event so the integrator
@@ -216,6 +246,24 @@ where
                 Ok(outcome)
             }
             CommitRoundOutcome::NoCandidate => {
+                // Recovery: no commit landed this round (manual-only with no
+                // press, or everyone offline). Do NOT fall back to re-election;
+                // Layer 3 is already past it. Retry the manual+auto cycle until
+                // the integrator's stop-line policy (`recovery_max_rounds`) says
+                // to give up — `0` retries forever.
+                if in_recovery {
+                    self.recovery_rounds += 1;
+                    let max = self.config.recovery_max_rounds;
+                    if max != 0 && self.recovery_rounds >= max {
+                        self.exit_recovery_mode();
+                        let resumed = self.start_working();
+                        self.emit_event(ConversationEvent::RecoveryExhausted);
+                        self.emit_event(ConversationEvent::PhaseChange(resumed));
+                        return Ok(DispatchOutcome::Done);
+                    }
+                    self.timing.phase_timer.start();
+                    return Ok(DispatchOutcome::Done);
+                }
                 // `accuse_target` is `Some` only when we had approved proposals
                 // go unanswered *and* can attribute the miss to a live steward
                 // other than ourselves. Self-penalties are skipped — the
@@ -280,6 +328,36 @@ where
 
                 Ok(DispatchOutcome::Done)
             }
+        }
+    }
+
+    /// Layer-3 auto-fallback: once `recovery_auto_commit_delay` has elapsed with
+    /// no local candidate (nobody pressed "commit"), mint our own so a commit can
+    /// land. No-op when the policy is manual-only (`None`), before the grace, or
+    /// once we've already minted. Best-effort — build errors are logged, not
+    /// surfaced, so `poll` keeps driving.
+    fn maybe_auto_commit_recovery<Pr>(&mut self, provider: &Pr, signer: &impl Signer)
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let Some(delay) = self.config.recovery_auto_commit_delay else {
+            return;
+        };
+        if !self.timing.phase_timer.elapsed_since_anchor(delay)
+            || self.queues.commit_round.has_local_candidate()
+        {
+            return;
+        }
+        let self_member_id = Arc::clone(&self.self_member_id);
+        match self.build_local_candidate(provider, signer, &self_member_id) {
+            Ok(Some(payload)) => self.broadcast(payload),
+            Ok(None) => {}
+            Err(e) => error!(
+                conversation = %self.conversation_id,
+                error = %e,
+                "recovery auto-commit failed"
+            ),
         }
     }
 

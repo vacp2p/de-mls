@@ -58,6 +58,12 @@ impl CommitRoundBuffer {
         self.candidates.len()
     }
 
+    /// Whether the buffer already holds our own (locally-minted) candidate —
+    /// used by the recovery auto-fallback to avoid minting twice.
+    pub fn has_local_candidate(&self) -> bool {
+        self.candidates.iter().any(|c| c.is_local_candidate)
+    }
+
     /// Discard all buffered candidates.
     pub fn clear(&mut self) {
         self.candidates.clear();

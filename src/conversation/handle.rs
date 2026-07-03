@@ -130,6 +130,10 @@ pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoreStorage> {
     pub(crate) config: ConversationConfig,
     /// Authorization mode (RFC §Layer 3 Anti-Deadlock ECP).
     operating_mode: OperatingMode,
+    /// Manual+auto recovery rounds elapsed with no commit in the current
+    /// recovery episode. Reset on entry; compared against `recovery_max_rounds`
+    /// to decide the stop line. Meaningful only while in recovery.
+    pub(crate) recovery_rounds: u32,
     /// Time-driven state walked once per polling cycle.
     pub(crate) timing: Timing,
     /// Identity bytes of the local member, snapshotted from the `member_id`
@@ -174,6 +178,7 @@ where
             state_machine,
             config,
             operating_mode: OperatingMode::Normal,
+            recovery_rounds: 0,
             timing: Timing::new(),
             self_member_id,
             app_id,
@@ -190,6 +195,7 @@ where
 
     pub fn enter_recovery_mode(&mut self) {
         self.operating_mode = OperatingMode::Recovery;
+        self.recovery_rounds = 0;
     }
 
     pub fn exit_recovery_mode(&mut self) {
@@ -396,6 +402,36 @@ where
             self.broadcast(payload);
         }
         Ok(())
+    }
+
+    /// Manually produce a Layer-3 recovery commit — mint our own candidate and
+    /// queue its broadcast. Only valid in recovery mode, where the steward gate
+    /// is relaxed and any member MAY commit. Returns `true` if a candidate was
+    /// produced, `false` if there was nothing to commit.
+    ///
+    /// The integrator calls this on a member's behalf (a "commit" button) after
+    /// a [`crate::ConversationEvent::RecoveryModeOpened`]. If no member calls it
+    /// within `recovery_auto_commit_delay`, every online node auto-mints instead.
+    pub fn commit_in_recovery<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<bool, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if !self.is_in_recovery_mode() {
+            return Err(ConversationError::NotInRecovery);
+        }
+        let self_member_id = Arc::clone(&self.self_member_id);
+        match self.build_local_candidate(provider, signer, &self_member_id)? {
+            Some(payload) => {
+                self.broadcast(payload);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     /// Finalize the active commit round.
@@ -926,5 +962,61 @@ mod tests {
             panic!("expected UnexpectedNonMlsProposals, got {err:?}");
         };
         assert_eq!(proposal_ids, vec![50]);
+    }
+
+    #[test]
+    fn commit_in_recovery_errors_outside_recovery() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+        let err = conversation
+            .commit_in_recovery(&provider, &signer)
+            .expect_err("commit_in_recovery outside recovery must be rejected");
+        assert!(matches!(err, ConversationError::NotInRecovery));
+    }
+
+    #[test]
+    fn commit_in_recovery_relaxes_the_steward_gate() {
+        // A non-steward: outside recovery it can't mint (`NotASteward`). In
+        // recovery the gate is relaxed, so the build gets past it and only stops
+        // at the empty approved queue — proving any member may commit in recovery.
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+        conversation.enter_recovery_mode();
+        let err = conversation
+            .commit_in_recovery(&provider, &signer)
+            .expect_err("empty approved queue should stop the build");
+        assert!(
+            matches!(err, ConversationError::NoProposals),
+            "recovery must relax the steward gate, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn recovery_exhausts_after_max_rounds() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+        // Zero-length windows so a round resolves in one poll, with a 1-round
+        // stop line: the first commit-less round must exhaust recovery.
+        conversation.config.recovery_auto_commit_delay = Some(Duration::ZERO);
+        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.config.recovery_max_rounds = 1;
+        conversation.enter_recovery_mode();
+        conversation.start_freezing();
+        conversation.timing.phase_timer.start();
+
+        conversation.poll(&provider, &signer);
+
+        assert!(
+            !conversation.is_in_recovery_mode(),
+            "recovery must exit at the stop line"
+        );
+        assert_eq!(conversation.current_state(), ConversationState::Working);
+        assert!(
+            conversation
+                .drain_events()
+                .iter()
+                .any(|e| matches!(e, ConversationEvent::RecoveryExhausted)),
+            "RecoveryExhausted must be emitted"
+        );
     }
 }
