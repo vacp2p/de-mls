@@ -2,7 +2,8 @@
 //! commit-round candidate buffer, pending-update buffer, urgent-commit
 //! target, ECP dedup.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 
 use indexmap::{IndexMap, IndexSet};
 
@@ -32,10 +33,40 @@ pub struct PendingUpdate {
     pub first_seen_epoch: u64,
 }
 
-/// Recently-merged commit hashes kept for duplicate-candidate detection.
-/// Bounded so the dedup window can't grow without limit; well beyond the
-/// rebroadcast window.
-const MAX_COMMITTED_HASHES: usize = 10;
+/// A capacity-bounded, insertion-ordered set: dedups by value and evicts the
+/// oldest entry once full. Backs the commit / welcome dedup windows and the
+/// consensus-outcome cache.
+#[derive(Clone, Debug)]
+struct BoundedSet<T: Hash + Eq> {
+    items: IndexSet<T>,
+    capacity: usize,
+}
+
+impl<T: Hash + Eq> BoundedSet<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            items: IndexSet::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Whether `item` is currently in the set.
+    fn contains(&self, item: &T) -> bool {
+        self.items.contains(item)
+    }
+
+    /// Record `item`; `true` if it was new (evicting the oldest once over
+    /// capacity), `false` if already present.
+    fn insert(&mut self, item: T) -> bool {
+        if !self.items.insert(item) {
+            return false;
+        }
+        while self.items.len() > self.capacity {
+            self.items.shift_remove_index(0);
+        }
+        true
+    }
+}
 
 /// Per-conversation protocol state. Stewards batch commits; members vote.
 /// Construct with [`ConversationQueues::new`].
@@ -54,7 +85,7 @@ pub struct ConversationQueues {
     /// Members with pending score-based removal ECPs (dedup to prevent duplicates).
     pending_removal_targets: HashSet<Vec<u8>>,
     /// Recent commit hashes for dedup.
-    committed_batch_hashes: VecDeque<CommitHash>,
+    committed_batch_hashes: BoundedSet<CommitHash>,
     /// Commit-round candidate buffer for deterministic selection.
     pub(crate) commit_round: CommitRoundBuffer,
     /// Buffer of membership updates (Add/Remove) that every member records so a
@@ -64,7 +95,7 @@ pub struct ConversationQueues {
     /// Used by `handle_consensus_outcome` to drop library re-emissions and by
     /// `forward_incoming_vote` to distinguish benign late peer votes (session
     /// was trimmed after resolution) from votes for unknown proposal IDs.
-    resolved_proposals: ResolvedProposalCache,
+    resolved_proposals: BoundedSet<ProposalId>,
     /// When `Some(target)`, the next freeze cycle commits only the
     /// `RemoveMember(target)` entry; other approvals wait so they don't
     /// dilute the fast-removal intent.
@@ -79,25 +110,25 @@ pub struct ConversationQueues {
     member_join_epoch: HashMap<Vec<u8>, u64>,
     /// Hashes of recently-seen welcome broadcasts, so gossip duplicates
     /// emit a single `WelcomeReady` event.
-    welcome_broadcast_hashes: VecDeque<CommitHash>,
+    welcome_broadcast_hashes: BoundedSet<CommitHash>,
 }
 
 impl ConversationQueues {
-    pub fn new(conversation_id: &str) -> Self {
+    pub fn new(conversation_id: &str, dedup_window: usize) -> Self {
         Self {
             conversation_id: conversation_id.to_string(),
             approved_proposals: IndexMap::new(),
             voting_proposals: HashMap::new(),
             active_emergency_ids: HashSet::new(),
             pending_removal_targets: HashSet::new(),
-            committed_batch_hashes: VecDeque::new(),
+            committed_batch_hashes: BoundedSet::new(dedup_window),
             commit_round: CommitRoundBuffer::default(),
             pending_updates: HashMap::new(),
-            resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
+            resolved_proposals: BoundedSet::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
             early_candidates: Vec::new(),
             member_join_epoch: HashMap::new(),
-            welcome_broadcast_hashes: VecDeque::new(),
+            welcome_broadcast_hashes: BoundedSet::new(dedup_window),
         }
     }
 
@@ -325,31 +356,18 @@ impl ConversationQueues {
     ///
     /// Note: commit round buffer dedup is handled separately by `CommitRoundBuffer::add`.
     pub(crate) fn has_committed_hash(&self, commit_hash: &CommitHash) -> bool {
-        self.committed_batch_hashes
-            .iter()
-            .any(|ch| ch == commit_hash)
+        self.committed_batch_hashes.contains(commit_hash)
     }
 
     /// Record a committed batch's hash for future dedup.
     pub(crate) fn insert_committed_hash(&mut self, commit_hash: CommitHash) {
-        if self.committed_batch_hashes.len() >= MAX_COMMITTED_HASHES {
-            self.committed_batch_hashes.pop_front();
-        }
-        self.committed_batch_hashes.push_back(commit_hash);
+        self.committed_batch_hashes.insert(commit_hash);
     }
 
     /// Record a welcome broadcast's hash. Returns `true` when the hash is
-    /// new (process it) and `false` for a duplicate (drop it). Bounded the
-    /// same way as the committed-hash window.
+    /// new (process it) and `false` for a duplicate (drop it).
     pub(crate) fn record_welcome_broadcast(&mut self, hash: CommitHash) -> bool {
-        if self.welcome_broadcast_hashes.iter().any(|h| *h == hash) {
-            return false;
-        }
-        if self.welcome_broadcast_hashes.len() >= MAX_COMMITTED_HASHES {
-            self.welcome_broadcast_hashes.pop_front();
-        }
-        self.welcome_broadcast_hashes.push_back(hash);
-        true
+        self.welcome_broadcast_hashes.insert(hash)
     }
 
     // ──────────────────────── Early (pre-approval) Candidates ────────────────────────
@@ -516,11 +534,11 @@ impl ConversationQueues {
     // ─────────────────────────── Resolved-Outcome Cache ───────────────────────────
 
     pub(crate) fn is_consensus_outcome_applied(&self, proposal_id: ProposalId) -> bool {
-        self.resolved_proposals.contains(proposal_id)
+        self.resolved_proposals.contains(&proposal_id)
     }
 
     pub(crate) fn mark_consensus_outcome_applied(&mut self, proposal_id: ProposalId) {
-        self.resolved_proposals.record(proposal_id);
+        self.resolved_proposals.insert(proposal_id);
     }
 }
 
@@ -532,48 +550,13 @@ fn removes_member(req: &ConversationUpdateRequest, member_id: &[u8]) -> bool {
     )
 }
 
-const RESOLVED_PROPOSAL_CACHE_CAPACITY: usize = 256;
-
-/// Bounded FIFO of proposal IDs for which a local consensus outcome has been
-/// observed (`ConsensusReached` or timeout-path resolution). Oldest entries
-/// are evicted once `capacity` is reached.
-///
-/// Serves two callers: (a) duplicate-drop guard in `handle_consensus_outcome`
-/// against consensus-library re-emissions, and (b) late-packet classifier in
-/// `forward_incoming_vote` — a `SessionNotFound` for an id in this cache is
-/// a benign late vote (session was trimmed after we resolved it), while the
-/// same error for an id we never saw is suspicious and warrants a warn-log.
-///
-/// `CAPACITY` is sized well above the consensus library's
+/// Capacity of the resolved-outcome dedup set (`resolved_proposals`): proposal
+/// IDs with a locally observed consensus outcome, kept for the duplicate-drop
+/// guard in `handle_consensus_outcome` and the late-vote classifier in
+/// `forward_incoming_vote`. Sized well above the consensus library's
 /// `max_sessions_per_scope` (default 10) so a late vote arriving within any
 /// plausible peer-lag window still finds its id cached.
-#[derive(Clone, Debug)]
-struct ResolvedProposalCache {
-    ids: IndexSet<ProposalId>,
-    capacity: usize,
-}
-
-impl ResolvedProposalCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            ids: IndexSet::with_capacity(capacity),
-            capacity,
-        }
-    }
-
-    fn contains(&self, id: ProposalId) -> bool {
-        self.ids.contains(&id)
-    }
-
-    fn record(&mut self, id: ProposalId) {
-        if !self.ids.insert(id) {
-            return;
-        }
-        while self.ids.len() > self.capacity {
-            self.ids.shift_remove_index(0);
-        }
-    }
-}
+const RESOLVED_PROPOSAL_CACHE_CAPACITY: usize = 256;
 
 /// Test-only stubs shared across `core/`'s unit-test modules.
 #[cfg(test)]
@@ -596,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_prune_clears_self_leave_entry_when_member_gone() {
-        let mut conversation = ConversationQueues::new("test-conversation");
+        let mut conversation = ConversationQueues::new("test-conversation", 10);
 
         let leaver = member(2);
         insert_self_leave(&mut conversation, &leaver);
@@ -613,43 +596,43 @@ mod tests {
 
     #[test]
     fn resolved_cache_records_and_evicts_fifo() {
-        let mut cache = ResolvedProposalCache::new(3);
-        cache.record(1);
-        cache.record(2);
-        cache.record(3);
-        assert!(cache.contains(1));
-        assert!(cache.contains(2));
-        assert!(cache.contains(3));
+        let mut cache = BoundedSet::new(3);
+        cache.insert(1);
+        cache.insert(2);
+        cache.insert(3);
+        assert!(cache.contains(&1));
+        assert!(cache.contains(&2));
+        assert!(cache.contains(&3));
 
-        cache.record(4);
-        assert!(!cache.contains(1), "oldest entry must be evicted");
-        assert!(cache.contains(2));
-        assert!(cache.contains(3));
-        assert!(cache.contains(4));
+        cache.insert(4);
+        assert!(!cache.contains(&1), "oldest entry must be evicted");
+        assert!(cache.contains(&2));
+        assert!(cache.contains(&3));
+        assert!(cache.contains(&4));
     }
 
     #[test]
     fn resolved_cache_dedupes_and_does_not_bump_position() {
-        let mut cache = ResolvedProposalCache::new(3);
-        cache.record(1);
-        cache.record(2);
-        cache.record(1); // no-op: 1 stays in its original slot
-        cache.record(3);
-        assert!(cache.contains(1));
-        assert!(cache.contains(2));
-        assert!(cache.contains(3));
+        let mut cache = BoundedSet::new(3);
+        cache.insert(1);
+        cache.insert(2);
+        cache.insert(1); // no-op: 1 stays in its original slot
+        cache.insert(3);
+        assert!(cache.contains(&1));
+        assert!(cache.contains(&2));
+        assert!(cache.contains(&3));
 
         // Fourth distinct id evicts the oldest (1), not a later entry.
-        cache.record(4);
-        assert!(!cache.contains(1));
-        assert!(cache.contains(2));
-        assert!(cache.contains(3));
-        assert!(cache.contains(4));
+        cache.insert(4);
+        assert!(!cache.contains(&1));
+        assert!(cache.contains(&2));
+        assert!(cache.contains(&3));
+        assert!(cache.contains(&4));
     }
 
     #[test]
     fn mark_consensus_outcome_persists_in_resolved_cache() {
-        let mut conversation = ConversationQueues::new("g");
+        let mut conversation = ConversationQueues::new("g", 10);
         assert!(!conversation.is_consensus_outcome_applied(42));
         conversation.mark_consensus_outcome_applied(42);
         assert!(conversation.is_consensus_outcome_applied(42));
@@ -668,7 +651,7 @@ mod tests {
     /// source; Add proposals are dropped.
     #[test]
     fn test_reject_all_approved_preserves_all_remove_member() {
-        let mut conversation = ConversationQueues::new("test-conversation");
+        let mut conversation = ConversationQueues::new("test-conversation", 10);
 
         let ban_id: ProposalId = 0x1111_2222;
         let ecp_id: ProposalId = 0x3333_4444;
@@ -693,7 +676,7 @@ mod tests {
     /// `approved_order` is FIFO regardless of proposal-id ordering.
     #[test]
     fn test_approved_proposals_preserve_fifo_across_mutations() {
-        let mut conversation = ConversationQueues::new("g");
+        let mut conversation = ConversationQueues::new("g", 10);
 
         insert_remove_member(&mut conversation, &member(2), 500);
         insert_remove_member(&mut conversation, &member(3), 100);
@@ -716,7 +699,7 @@ mod tests {
 
     #[test]
     fn test_urgent_commit_target_set_take_clears() {
-        let mut conversation = ConversationQueues::new("g");
+        let mut conversation = ConversationQueues::new("g", 10);
         assert!(conversation.urgent_commit_target().is_none());
 
         let target = member(7);
@@ -730,7 +713,7 @@ mod tests {
 
     #[test]
     fn test_drop_approved_removals_for_target() {
-        let mut conversation = ConversationQueues::new("g");
+        let mut conversation = ConversationQueues::new("g", 10);
         let victim = member(7);
         let bystander = member(9);
 
@@ -758,7 +741,7 @@ mod tests {
     /// `first_seen_epoch < cutoff` are dropped.
     #[test]
     fn test_expire_pending_updates_drops_entries_older_than_max_age() {
-        let mut conversation = ConversationQueues::new("g");
+        let mut conversation = ConversationQueues::new("g", 10);
         let stale = member(7);
         let fresh = member(9);
 
@@ -778,7 +761,7 @@ mod tests {
     /// boundary case a tightened sync hits when shrinking the window.
     #[test]
     fn test_expire_pending_updates_max_age_zero_keeps_only_current_epoch() {
-        let mut conversation = ConversationQueues::new("g");
+        let mut conversation = ConversationQueues::new("g", 10);
         let prior = member(7);
         let current = member(9);
 
@@ -797,7 +780,7 @@ mod tests {
     /// must not survive into the next round.
     #[test]
     fn clear_voting_proposals_empties_owner_queue() {
-        let mut conversation = ConversationQueues::new("reject-voting");
+        let mut conversation = ConversationQueues::new("reject-voting", 10);
         conversation.insert_voting_proposal(1, ConversationUpdateRequest { payload: None });
         conversation.insert_voting_proposal(2, ConversationUpdateRequest { payload: None });
         assert!(conversation.is_owner_of_proposal(1));
@@ -813,7 +796,7 @@ mod tests {
     /// covering the idempotent re-observe path.
     #[test]
     fn pending_removal_target_observe_resolve_cycle() {
-        let mut conversation = ConversationQueues::new("dedup");
+        let mut conversation = ConversationQueues::new("dedup", 10);
         let target = member(10);
 
         assert!(!conversation.has_pending_removal(&target));
@@ -841,7 +824,7 @@ mod tests {
         use crate::apply_consensus_result;
         use crate::protos::de_mls::messages::v1::ViolationEvidence;
 
-        let mut conversation = ConversationQueues::new("removal-no-duplicate");
+        let mut conversation = ConversationQueues::new("removal-no-duplicate", 10);
         let creator = member(1);
         let target = member(7);
 

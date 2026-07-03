@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn election_yes_owner_returns_outcome_and_clears_queue() {
         let config = StewardListConfig::new(2, 5).unwrap();
-        let mut conversation = ConversationQueues::new("test-conversation");
+        let mut conversation = ConversationQueues::new("test-conversation", 10);
         let mems = members(&[1, 2, 3, 4, 5]);
         let sn = mems.len().min(config.sn_max);
         let list = StewardList::generate(10, b"test-conversation", &mems, sn, config, 0).unwrap();
@@ -320,7 +320,7 @@ mod tests {
     /// queue empty.
     #[test]
     fn election_no_returns_election_rejected() {
-        let mut conversation = ConversationQueues::new("test-conversation");
+        let mut conversation = ConversationQueues::new("test-conversation", 10);
         let request = election_request(vec![member(1), member(2)], 10);
 
         let proposal_id = 43;
@@ -337,7 +337,7 @@ mod tests {
     /// (non-owner path), and doesn't touch any proposal queues.
     #[test]
     fn election_yes_nonowner_returns_outcome_without_queue_side_effects() {
-        let mut conversation = ConversationQueues::new("test-conversation");
+        let mut conversation = ConversationQueues::new("test-conversation", 10);
         let request = election_request(vec![member(1), member(2), member(3)], 5);
 
         let proposal_id = 44;
@@ -360,7 +360,7 @@ mod tests {
     /// when an entry for the same target is already in `approved_proposals`.
     #[test]
     fn removal_deduped_when_target_already_pending() {
-        let mut conversation = ConversationQueues::new("test-conversation");
+        let mut conversation = ConversationQueues::new("test-conversation", 10);
         let target = member(7);
 
         // First removal — non-owner path inserts straight into approved.
@@ -393,7 +393,7 @@ mod tests {
     /// queue does not retain an outcome we deliberately discarded.
     #[test]
     fn removal_dedup_clears_owner_voting_entry() {
-        let mut conversation = ConversationQueues::new("test-conversation");
+        let mut conversation = ConversationQueues::new("test-conversation", 10);
         let target = member(7);
 
         // Pre-existing approved removal from an unrelated path.
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn ecp_score_below_threshold_yes_returns_urgent_removal() {
-        let mut conversation = ConversationQueues::new("urgent-yes");
+        let mut conversation = ConversationQueues::new("urgent-yes", 10);
         let target = member(7);
 
         let request = score_below_threshold_request(target.clone(), member(1));
@@ -455,7 +455,7 @@ mod tests {
 
     #[test]
     fn ecp_score_below_threshold_no_does_not_mark_urgent() {
-        let mut conversation = ConversationQueues::new("urgent-no");
+        let mut conversation = ConversationQueues::new("urgent-no", 10);
         let request = score_below_threshold_request(member(7), member(1));
 
         let result = apply_consensus_result(&mut conversation, 101, false, &request).unwrap();
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn ecp_deadlock_yes_returns_recovery_mode_opened() {
-        let mut conversation = ConversationQueues::new("deadlock-yes");
+        let mut conversation = ConversationQueues::new("deadlock-yes", 10);
 
         let request = deadlock_request(member(1));
         let result = apply_consensus_result(&mut conversation, 200, true, &request).unwrap();
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn ecp_deadlock_no_returns_no_action() {
-        let mut conversation = ConversationQueues::new("deadlock-no");
+        let mut conversation = ConversationQueues::new("deadlock-no", 10);
 
         let request = deadlock_request(member(1));
         let result = apply_consensus_result(&mut conversation, 201, false, &request).unwrap();
@@ -502,7 +502,7 @@ mod tests {
     /// enqueues into `approved_proposals` and produces no score ops.
     #[test]
     fn regular_remove_member_enqueues_without_score_ops() {
-        let mut conversation = ConversationQueues::new("regular-yes");
+        let mut conversation = ConversationQueues::new("regular-yes", 10);
         let target = member(7);
 
         let request = remove_request(target.clone());
@@ -521,7 +521,7 @@ mod tests {
     /// threshold ECPs transform into a removal.
     #[test]
     fn regular_emergency_yes_does_not_queue_remove_member() {
-        let mut conversation = ConversationQueues::new("no-transform");
+        let mut conversation = ConversationQueues::new("no-transform", 10);
         let creator = member(1);
         let target = member(7);
 

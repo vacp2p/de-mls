@@ -134,7 +134,7 @@ where
         member_id: &[u8],
     ) -> Result<Self, ConversationError> {
         let self_member_id_bytes = member_id.to_vec();
-        let queues = ConversationQueues::new(conversation_id);
+        let queues = ConversationQueues::new(conversation_id, config.dedup_window);
 
         // The conversation id is the deterministic-sort salt every member must
         // share; the library owns it so creator and joiner agree on every

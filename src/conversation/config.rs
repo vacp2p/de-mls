@@ -44,6 +44,10 @@ pub const DEFAULT_MAX_CONSENSUS_SESSIONS: usize = 10;
 /// runaway growth when freeze recovery preserves work across failed cycles.
 pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
 
+/// Default number of recent commit / welcome hashes kept for duplicate
+/// detection (see [`ConversationConfig::dedup_window`]).
+pub const DEFAULT_DEDUP_WINDOW: usize = 10;
+
 /// Per-conversation timing and policy config, fixed at conversation creation.
 /// Peer scoring keeps its own config on the [`PeerScoringService`](crate::PeerScoringService)
 /// the integrator builds; the steward-list bounds live here (the list is
@@ -94,6 +98,10 @@ pub struct ConversationConfig {
     /// Max MLS proposals the steward packs into one commit batch. See
     /// [`DEFAULT_COMMIT_BATCH_MAX`].
     pub commit_batch_max: usize,
+    /// How many recent commit / welcome hashes each dedup window retains
+    /// (duplicate-candidate and duplicate-welcome-broadcast detection). See
+    /// [`DEFAULT_DEDUP_WINDOW`].
+    pub dedup_window: usize,
     /// Steward-list size bounds (`sn_min` / `sn_max`). The roster itself is
     /// library-owned; this is the only steward knob the integrator sets.
     pub steward_list: StewardListConfig,
@@ -116,6 +124,7 @@ impl Default for ConversationConfig {
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
             max_consensus_sessions: DEFAULT_MAX_CONSENSUS_SESSIONS,
             commit_batch_max: DEFAULT_COMMIT_BATCH_MAX,
+            dedup_window: DEFAULT_DEDUP_WINDOW,
             steward_list: StewardListConfig::default(),
         }
     }

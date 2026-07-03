@@ -367,7 +367,7 @@ mod tests {
         };
 
         let epoch_before = mls.current_epoch().unwrap();
-        let mut conversation = ConversationQueues::new("test-conversation");
+        let mut conversation = ConversationQueues::new("test-conversation", 10);
         let ctx = RoundContext {
             mls_count: 1,
             self_remove_pending: false,

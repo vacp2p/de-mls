@@ -277,7 +277,7 @@ mod tests {
     fn exhausted_list_still_gates_on_membership() {
         let (sl, alice, _bob) = list_over_two_epochs();
         let carol = vec![3u8; 20]; // not on the list
-        let queues = ConversationQueues::new("g");
+        let queues = ConversationQueues::new("g", 10);
         let ctx = ctx_at(2, false);
 
         assert!(
@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn recovery_mode_authorizes_any_sender() {
         let (sl, _alice, _bob) = list_over_two_epochs();
-        let queues = ConversationQueues::new("g");
+        let queues = ConversationQueues::new("g", 10);
         let ctx = ctx_at(2, true);
         assert!(
             check_commit_sender_authorized(&queues, &sl, &[9u8; 20], &ctx).is_none(),

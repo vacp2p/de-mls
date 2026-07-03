@@ -730,7 +730,7 @@ mod tests {
         let (consensus, consensus_rx) = make_test_consensus_service();
         Conversation::new(
             "g".to_string(),
-            ConversationQueues::new("g"),
+            ConversationQueues::new("g", 10),
             ConversationServices {
                 mls,
                 scoring: PeerScoringService::new(
