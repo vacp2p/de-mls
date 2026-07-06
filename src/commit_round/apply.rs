@@ -158,8 +158,11 @@ where
 {
     mls.merge_own_commit(provider)?;
 
+    // The merge is the commit point: it advanced the epoch by exactly one, so
+    // derive it rather than reading MLS again. A post-merge read that could fail
+    // would turn an already-applied commit into a finalize error.
     let committed_batch =
-        finalize_committed_batch(conversation, chosen.commit_hash, mls.current_epoch()?);
+        finalize_committed_batch(conversation, chosen.commit_hash, ctx.current_epoch + 1);
 
     // Build the welcome artifact only after merge.
     let joiner_identities = chosen.joiner_identities;
@@ -249,8 +252,10 @@ where
     // and survives this discard (see `discard_own_then_merge_remote_*` test).
     mls.discard_own_commit(provider)?;
     mls.merge_staged_commit(provider)?;
+    // The merge is the commit point (epoch advanced by one); derive it rather
+    // than reading MLS again, so an already-applied commit can't become an error.
     let committed_batch =
-        finalize_committed_batch(conversation, chosen.commit_hash, mls.current_epoch()?);
+        finalize_committed_batch(conversation, chosen.commit_hash, ctx.current_epoch + 1);
 
     Ok(CandidateOutcome::Terminal {
         outcome: CommitRoundOutcome::Applied {

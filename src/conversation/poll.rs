@@ -17,7 +17,7 @@ use prost::Message;
 use tracing::{error, info, warn};
 
 use crate::{
-    CommitRoundOutcome, CommitRoundResult, ConsensusPlugin, Conversation, ConversationError,
+    CommitRoundOutcome, ConsensusPlugin, Conversation, ConversationError,
     ConversationEvent, ConversationState, DispatchOutcome, PeerScoreStorage, ScoreEvent, ScoreOp,
     protos::de_mls::messages::v1::{AppMessage, MemberWelcome},
 };
@@ -175,8 +175,18 @@ where
         ) {
             Ok(result) => result,
             Err(e) => {
+                // A finalize failure is our own local error (a storage/MLS
+                // read), not a steward failing to commit — so don't fall into
+                // the NoCandidate path below, which would penalize the epoch
+                // steward and force re-election. Surface it and return to a
+                // safe state; the round retries on the next inactivity tick, or
+                // recovery re-opens its window.
                 error!(conversation = %conversation_id, error = %e, "commit-round finalize failed");
-                CommitRoundResult::default()
+                self.emit_event(ConversationEvent::Error {
+                    operation: "commit_round_finalize".to_owned(),
+                    message: e.to_string(),
+                });
+                return Ok(self.recover_from_finalize_error());
             }
         };
         // Penalties for candidates we dropped while ranking. We saw the
@@ -332,6 +342,23 @@ where
                 Ok(DispatchOutcome::Done)
             }
         }
+    }
+
+    /// Leave the commit round safely after a finalize failure: no commit landed
+    /// and no one is at fault, so return to a terminal state without penalizing a
+    /// steward or forcing re-election. In recovery, re-open the collection window
+    /// to retry (not counted against `recovery_max_rounds`); otherwise resume
+    /// Working and let the inactivity timer re-drive the round.
+    fn recover_from_finalize_error(&mut self) -> DispatchOutcome {
+        if self.is_in_recovery_mode() {
+            if let Some(reopened) = self.reopen_recovery_window() {
+                self.emit_event(ConversationEvent::PhaseChange(reopened));
+            }
+        } else {
+            let resumed = self.start_working();
+            self.emit_event(ConversationEvent::PhaseChange(resumed));
+        }
+        DispatchOutcome::Done
     }
 
     /// Layer-3 auto-fallback: once `recovery_auto_commit_delay` has elapsed with
