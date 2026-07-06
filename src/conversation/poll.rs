@@ -19,7 +19,7 @@ use tracing::{error, info, warn};
 use crate::{
     CommitRoundOutcome, CommitRoundResult, ConsensusPlugin, Conversation, ConversationError,
     ConversationEvent, ConversationState, DispatchOutcome, PeerScoreStorage, ScoreEvent, ScoreOp,
-    protos::de_mls::messages::v1::AppMessage,
+    protos::de_mls::messages::v1::{AppMessage, MemberWelcome},
 };
 
 /// Summary returned by [`Conversation::poll`] after one polling pass.
@@ -179,16 +179,30 @@ where
                 CommitRoundResult::default()
             }
         };
-        // Apply locally-observed score events. These come from dropped
-        // candidates in the phase-3 loop (RFC §Peer Scoring: direct local
-        // observation, no ECP needed). The removal sweep below picks up any
-        // member these ops pushed below threshold.
-        let applied_score_ops = !finalize_result.score_ops.is_empty();
-        if applied_score_ops {
-            self.services
-                .scoring
-                .apply_ops(&finalize_result.score_ops)?;
-        }
+        // Penalties for candidates we dropped while ranking. We saw the
+        // misbehavior directly, so no consensus round is needed to score it
+        // (RFC §Peer Scoring). If a penalty drops someone to the removal
+        // threshold, the sweep below (steward-only) files a removal proposal
+        // against them.
+        //
+        // On failure the penalties are lost, so surface it — but keep going,
+        // or the state machine never reaches its terminal transition.
+        // `score_ops_applied` gates the sweep on whether they actually landed.
+        let score_ops_applied = if finalize_result.score_ops.is_empty() {
+            false
+        } else {
+            match self.services.scoring.apply_ops(&finalize_result.score_ops) {
+                Ok(()) => true,
+                Err(e) => {
+                    error!(conversation = %conversation_id, error = %e, "applying commit-round score ops failed");
+                    self.emit_event(ConversationEvent::Error {
+                        operation: "apply_commit_round_score_ops".to_owned(),
+                        message: e.to_string(),
+                    });
+                    false
+                }
+            }
+        };
 
         if !finalize_result.committed_batch.is_empty() {
             self.emit_event(ConversationEvent::CommitApplied(std::mem::take(
@@ -198,7 +212,7 @@ where
 
         // `check_and_initiate_score_removals` re-scans `members_below_threshold`
         // and calls `initiate_proposal` for any uncovered target.
-        if applied_score_ops
+        if score_ops_applied
             && let Err(e) = self.check_and_initiate_score_removals(provider, signer)
         {
             error!(conversation = %conversation_id, error = %e, "score-removal check failed (commit-round finalize)");
@@ -210,32 +224,16 @@ where
                 if in_recovery {
                     self.exit_recovery_mode();
                 }
-                if let Some(mut welcome) = welcome {
-                    // Bundle ConversationSync (steward list + timing +
-                    // scores) into the welcome event so the integrator
-                    // delivers both atomically. The joiner replays the
-                    // sync payload through `handle_inbound` after MLS
-                    // attaches.
-                    //
-                    // Reconcile the list to the just-merged epoch first, so a
-                    // small group's sync carries the regenerated, joiner-
-                    // inclusive list rather than the pre-commit one. A large
-                    // group leaves the list for the post-commit election.
-                    welcome.conversation_sync_bytes = {
-                        let _ = self.reconcile_steward_list()?;
-                        self.build_conversation_sync_payload(provider, signer)?
-                            .unwrap_or_default()
-                    };
-                    // Broadcast the welcome to the group so every member can deliver it to the
-                    // joiners, then surface it locally as freshly minted.
-                    let broadcast_payload = AppMessage::from(welcome.clone()).encode_to_vec();
-                    self.emit_event(ConversationEvent::WelcomeReady {
-                        welcome,
-                        minted_locally: true,
-                    });
-                    self.broadcast(broadcast_payload);
+                if let Some(welcome) = welcome {
+                    self.deliver_welcome(provider, signer, welcome);
                 }
 
+                // Always drive the terminal transition: the commit merged, so
+                // the conversation must reach Working even if welcome delivery
+                // or dispatch hit a snag. `dispatch_inbound_result` routes the
+                // applied result to `on_conversation_updated`, which is what
+                // flips us back to Working — log rather than propagate, so a
+                // merged commit can't strand us in Selection.
                 let outcome = match self.dispatch_inbound_result(provider, result, signer) {
                     Ok(o) => o,
                     Err(e) => {
@@ -364,6 +362,59 @@ where
                 "recovery auto-commit failed"
             ),
         }
+    }
+
+    /// Hand off the joiner welcome after a commit merged: attach the
+    /// `ConversationSync` to the MLS `welcome_bytes`, broadcast it for relay,
+    /// and surface it locally as freshly minted.
+    ///
+    /// Never propagates — the commit already merged, so this can't abort
+    /// finalization. If the sync can't be built, surface a
+    /// [`ConversationEvent::Error`] and ship `welcome_bytes` anyway; the joiner
+    /// notices the missing sync and can ask for it.
+    fn deliver_welcome<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+        mut welcome: MemberWelcome,
+    ) where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        match self.reconcile_and_build_sync(provider, signer) {
+            Ok(sync_bytes) => welcome.conversation_sync_bytes = sync_bytes,
+            Err(e) => {
+                error!(conversation = %self.conversation_id, error = %e, "welcome ConversationSync build failed");
+                self.emit_event(ConversationEvent::Error {
+                    operation: "welcome_conversation_sync".to_owned(),
+                    message: e.to_string(),
+                });
+            }
+        }
+        let broadcast_payload = AppMessage::from(welcome.clone()).encode_to_vec();
+        self.emit_event(ConversationEvent::WelcomeReady {
+            welcome,
+            minted_locally: true,
+        });
+        self.broadcast(broadcast_payload);
+    }
+
+    /// Reconcile the steward list to the just-merged epoch, then build the
+    /// joiner's `ConversationSync` bytes — reconciling first so the sync carries
+    /// the joiner-inclusive list. Empty bytes when there's no list yet.
+    fn reconcile_and_build_sync<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<Vec<u8>, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        self.reconcile_steward_list()?;
+        Ok(self
+            .build_conversation_sync_payload(provider, signer)?
+            .unwrap_or_default())
     }
 
     /// Drive the backup-steward proposal takeover. The epoch steward sponsors
