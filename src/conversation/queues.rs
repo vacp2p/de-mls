@@ -44,6 +44,9 @@ struct BoundedSet<T: Hash + Eq> {
 
 impl<T: Hash + Eq> BoundedSet<T> {
     fn new(capacity: usize) -> Self {
+        // Clamp to at least 1: capacity 0 would evict every insert, silently
+        // disabling dedup.
+        let capacity = capacity.max(1);
         Self {
             items: IndexSet::with_capacity(capacity),
             capacity,
@@ -628,6 +631,14 @@ mod tests {
         assert!(cache.contains(&2));
         assert!(cache.contains(&3));
         assert!(cache.contains(&4));
+    }
+
+    #[test]
+    fn bounded_set_clamps_zero_capacity_so_dedup_still_works() {
+        let mut cache = BoundedSet::new(0);
+        assert!(cache.insert(1), "first insert is new");
+        assert!(cache.contains(&1), "capacity 0 must clamp to 1, not disable dedup");
+        assert!(!cache.insert(1), "duplicate must be rejected");
     }
 
     #[test]
