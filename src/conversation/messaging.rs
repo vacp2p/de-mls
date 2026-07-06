@@ -77,7 +77,9 @@ where
     /// Ask a steward to re-send the `ConversationSync` after a
     /// [`crate::ConversationEvent::ConversationSyncMissing`];
     /// [`crate::ConversationEvent::ConversationSyncApplied`] signals when to
-    /// stop. MLS-encrypted, so only a steward can answer.
+    /// stop. MLS-encrypted, so only a steward can answer. Don't re-request
+    /// faster than `recovery_inactivity_duration` — that's the window a backup
+    /// steward waits before covering for a silent epoch steward.
     pub fn request_conversation_sync<Pr>(
         &mut self,
         provider: &Pr,

@@ -100,6 +100,12 @@ pub(crate) struct Timing {
     /// chance and stayed silent. Cleared when the buffer is drained or nothing
     /// is left to propose.
     pub(crate) buffered_propose_anchor: Option<Instant>,
+    /// Anchor for the backup-steward sync re-send takeover: set when a backup
+    /// first sees an unanswered `ConversationSyncRequest`. A backup re-sends the
+    /// sync once this is older than the recovery window — the epoch steward
+    /// stayed silent. Cleared when a `ConversationSync` is observed or the
+    /// takeover no longer applies.
+    pub(crate) sync_resend_anchor: Option<Instant>,
 }
 
 impl Timing {
@@ -112,6 +118,7 @@ impl Timing {
             pending_consensus_timeouts: HashMap::new(),
             last_commit_round_progress: None,
             buffered_propose_anchor: None,
+            sync_resend_anchor: None,
         }
     }
 }
@@ -1331,5 +1338,41 @@ mod tests {
             1,
             "one sync request is broadcast"
         );
+    }
+
+    /// The epoch steward answers reactively, so it never arms the backup-takeover
+    /// anchor — any stale anchor is cleared.
+    #[test]
+    fn epoch_steward_request_clears_takeover_anchor() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_steward(b"test-member-id"));
+        conversation.timing.sync_resend_anchor = Some(Instant::now());
+
+        conversation
+            .on_conversation_sync_request(&provider, b"joiner", &signer)
+            .expect("answer request");
+
+        assert!(
+            conversation.timing.sync_resend_anchor.is_none(),
+            "epoch steward answers now, leaving no pending takeover"
+        );
+        assert_eq!(conversation.drain_outbound().len(), 1);
+    }
+
+    /// A non-steward can't answer, so it never arms the takeover.
+    #[test]
+    fn non_steward_request_does_not_arm_takeover() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+
+        conversation
+            .on_conversation_sync_request(&provider, b"joiner", &signer)
+            .expect("ignore request");
+
+        assert!(
+            conversation.timing.sync_resend_anchor.is_none(),
+            "a non-steward never arms the takeover"
+        );
+        assert!(conversation.drain_outbound().is_empty());
     }
 }

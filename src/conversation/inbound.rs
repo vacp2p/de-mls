@@ -15,6 +15,7 @@
 //!   the consensus scope.
 
 use std::error::Error as StdError;
+use std::time::Instant;
 
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
@@ -504,6 +505,9 @@ where
     /// (not the full MLS set — the list may have been generated before we
     /// existed), then applies list + protocol flags + timing + peer scores.
     fn on_conversation_sync(&mut self, sync: ConversationSync) -> Result<(), ConversationError> {
+        // A sync is on the wire — the request round is answered, so disarm any
+        // pending backup takeover before the list-present guard returns.
+        self.timing.sync_resend_anchor = None;
         if self.services.steward_list.current_list().is_some() {
             return Ok(());
         }
@@ -538,10 +542,10 @@ where
         Ok(())
     }
 
-    /// Answer a sync re-send request: only the epoch steward responds, and the
-    /// list-present guard in `on_conversation_sync` means only the degraded
-    /// requester adopts the broadcast. Plain members ignore it (backup takeover
-    /// is future work).
+    /// Answer a sync re-send request. The epoch steward responds now; a backup
+    /// arms `sync_resend_anchor` and takes over from `poll` only if the epoch
+    /// steward stays silent. The list-present guard in `on_conversation_sync`
+    /// means only the degraded requester adopts the broadcast.
     pub(crate) fn on_conversation_sync_request<Pr>(
         &mut self,
         provider: &Pr,
@@ -552,15 +556,20 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        if !self.is_epoch_steward()? {
-            return Ok(());
+        if self.is_epoch_steward()? {
+            self.timing.sync_resend_anchor = None;
+            tracing::debug!(
+                conversation = %self.conversation_id,
+                requester = ?requester,
+                "epoch steward re-sending conversation sync"
+            );
+            return self.share_conversation_sync(provider, signer);
         }
-        tracing::debug!(
-            conversation = %self.conversation_id,
-            requester = ?requester,
-            "epoch steward re-sending conversation sync"
-        );
-        self.share_conversation_sync(provider, signer)
+        // A backup arms the takeover timer; a plain member can't answer.
+        if self.is_steward() && self.timing.sync_resend_anchor.is_none() {
+            self.timing.sync_resend_anchor = Some(Instant::now());
+        }
+        Ok(())
     }
 
     fn apply_conversation_sync_to_entry(

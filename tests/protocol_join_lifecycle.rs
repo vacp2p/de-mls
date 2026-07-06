@@ -3,8 +3,11 @@
 
 mod common;
 
+use std::thread::sleep;
+use std::time::Duration;
+
 use common::harness::{TestHarness, fast_config};
-use de_mls::{ConversationEvent, StewardListConfig};
+use de_mls::{ConversationConfig, ConversationEvent, StewardListConfig};
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -85,5 +88,63 @@ fn bootstrap_joiner_reports_sync_applied() {
             .iter()
             .any(|e| matches!(e, ConversationEvent::ConversationSyncMissing)),
         "a healthy join is not degraded"
+    );
+}
+
+/// A backup steward covers for a silent epoch steward: it re-sends the sync only
+/// after the recovery window, not before.
+#[test]
+fn backup_steward_resends_sync_when_epoch_steward_silent() {
+    // sn_max = 5 → the full settled roster is the steward list. Evicting one
+    // member advances an epoch so the remaining joiners settle into stewards,
+    // leaving an epoch steward and a backup.
+    let cfg = ConversationConfig {
+        recovery_inactivity_duration: Duration::from_millis(100),
+        ..fast_config()
+    };
+    let mut h = TestHarness::<3>::bootstrap(
+        [ALICE, BOB, CHARLIE],
+        "sync-takeover",
+        cfg.clone(),
+        StewardListConfig::new(1, 5).unwrap(),
+    );
+    let target = 2usize;
+    let target_id = h.member(target).member_id_bytes().to_vec();
+    let driver = (0..3).find(|&i| i != target).unwrap();
+    h.member_mut(driver).remove_member(&target_id);
+    h.process_until("target evicted", |h| h.member(driver).member_count() == 2);
+
+    let epoch_steward = (0..3)
+        .filter(|&i| i != target)
+        .find(|&i| h.member(i).is_epoch_steward())
+        .expect("an epoch steward exists");
+    let backup = (0..3)
+        .find(|&i| i != target && i != epoch_steward)
+        .expect("a backup steward exists");
+
+    // A request reaches the backup only; the epoch steward never answers. The
+    // request's origin is irrelevant here — the test drives the backup takeover.
+    h.member_mut(epoch_steward).take_outbound();
+    h.member_mut(epoch_steward).request_conversation_sync();
+    let request = h.member_mut(epoch_steward).take_outbound();
+    for pkt in &request {
+        h.member_mut(backup).deliver_raw(&pkt.sender, &pkt.payload);
+    }
+
+    // Within the window the backup holds off — the epoch steward owns the answer.
+    h.member_mut(backup).take_outbound();
+    h.member_mut(backup).poll();
+    assert!(
+        h.member_mut(backup).take_outbound().is_empty(),
+        "backup waits out the recovery window before covering"
+    );
+
+    // Past the window with no answer seen, the backup re-sends the sync.
+    sleep(cfg.voting_inactivity_window() + Duration::from_millis(50));
+    h.member_mut(backup).poll();
+    assert_eq!(
+        h.member_mut(backup).take_outbound().len(),
+        1,
+        "backup re-sends the sync once the epoch steward stays silent"
     );
 }

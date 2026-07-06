@@ -79,6 +79,14 @@ where
             );
         }
 
+        if let Err(e) = self.drive_sync_resend(provider, signer) {
+            warn!(
+                conversation = %self.conversation_id,
+                error = %e,
+                "sync-resend drive error in poll"
+            );
+        }
+
         if let Err(e) = self.start_freeze_on_inactivity(provider, signer) {
             warn!(
                 conversation = %self.conversation_id,
@@ -482,6 +490,40 @@ where
             "backup steward proposing buffered updates: epoch steward silent past recovery window"
         );
         self.drain_buffered_updates(provider, signer)
+    }
+
+    /// Backup-steward sync re-send takeover. The epoch steward answers a
+    /// `ConversationSyncRequest` reactively; a backup arms `sync_resend_anchor`
+    /// and re-sends here only if no `ConversationSync` was observed within the
+    /// recovery window — so an offline epoch steward can't strand a bootstrap-
+    /// less joiner. Only a backup steward drives it; the anchor clears otherwise.
+    fn drive_sync_resend<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let Some(anchor) = self.timing.sync_resend_anchor else {
+            return Ok(());
+        };
+        // Only a backup takes over: the epoch steward already answered, and a
+        // plain member can't. Either way the anchor no longer applies.
+        if self.is_epoch_steward()? || !self.is_steward() {
+            self.timing.sync_resend_anchor = None;
+            return Ok(());
+        }
+        if Instant::now() < anchor + self.config.voting_inactivity_window() {
+            return Ok(());
+        }
+        self.timing.sync_resend_anchor = None;
+        info!(
+            conversation = %self.conversation_id,
+            "backup steward re-sending conversation sync: epoch steward silent past recovery window"
+        );
+        self.share_conversation_sync(provider, signer)
     }
 
     /// Steward-inactivity freeze entry: once the inactivity timer fires with
