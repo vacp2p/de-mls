@@ -103,4 +103,10 @@ pub enum ConversationEvent {
     /// integrator decides what an unrecoverable group does (alert, tear down).
     /// Never emitted when `recovery_max_rounds` is `0` (retry forever).
     RecoveryExhausted,
+
+    /// The local member joined but its welcome carried no `ConversationSync`, so
+    /// it has no steward list, scores, or protocol config — a degraded join. The
+    /// integrator drives `request_conversation_sync` (with its own retry cadence)
+    /// until a steward re-sends the sync.
+    ConversationSyncMissing,
 }

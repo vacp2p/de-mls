@@ -201,6 +201,9 @@ where
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
         if sync_bytes.is_empty() {
+            // Joined without a bootstrap: no steward list, scores, or config.
+            // Surface the degraded state so the integrator re-requests a sync.
+            self.emit_event(ConversationEvent::ConversationSyncMissing);
             return Ok(());
         }
         let result = self.decode_inbound(provider, sync_bytes)?;
