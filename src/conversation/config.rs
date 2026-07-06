@@ -113,10 +113,9 @@ pub struct ConversationConfig {
     /// [`DEFAULT_DEDUP_WINDOW`].
     pub dedup_window: usize,
     /// Layer-3 recovery policy: how long to wait for a manual `commit_in_recovery`
-    /// before every online node auto-mints a candidate. `None` = manual-only
-    /// (never auto); `Some(ZERO)` = auto immediately; `Some(d)` = manual grace
-    /// then auto. The recovery collection window is this plus
-    /// `recovery_inactivity_duration`. See [`DEFAULT_RECOVERY_AUTO_COMMIT_DELAY`].
+    /// before every online node auto-mints. `None` = manual-only (never auto);
+    /// `Some(ZERO)` = immediate; `Some(d)` = grace then auto. See
+    /// [`DEFAULT_RECOVERY_AUTO_COMMIT_DELAY`].
     pub recovery_auto_commit_delay: Option<Duration>,
     /// Layer-3 recovery stop-line: how many manual+auto rounds to attempt before
     /// giving up and emitting [`crate::ConversationEvent::RecoveryExhausted`].

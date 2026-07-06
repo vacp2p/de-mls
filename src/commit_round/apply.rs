@@ -27,8 +27,9 @@ use crate::{
 /// Outcome of applying one candidate. `Terminal` ends the round; `Drop`
 /// skips to the next, recording its penalty when the violation carries one.
 ///
-/// `committer` is the MLS-verified sender, never the wire claim — so a forged
-/// `steward_member_id` cannot redirect the `SuccessfulCommit` reward.
+/// On the remote path `committer` is the MLS-verified sender, not the forgeable
+/// wire `steward_member_id`, so a forged id can't redirect the `SuccessfulCommit`
+/// reward; our own candidate uses our own id.
 enum CandidateOutcome {
     Terminal {
         outcome: CommitRoundOutcome,

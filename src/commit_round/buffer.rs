@@ -93,7 +93,7 @@ pub struct BufferedCommitCandidate {
 
 /// Outcome of [`CommitRoundBuffer::add`]. An enum rather than `Result<(), _>`
 /// because the non-success cases are well-defined protocol states (retransmit,
-/// late offer, spoofed fork) that callers handle differently.
+/// spoofed fork) that callers handle differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommitBufferOutcome {
     /// Candidate stored in the buffer for this epoch.
