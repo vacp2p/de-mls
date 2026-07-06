@@ -637,7 +637,10 @@ mod tests {
     fn bounded_set_clamps_zero_capacity_so_dedup_still_works() {
         let mut cache = BoundedSet::new(0);
         assert!(cache.insert(1), "first insert is new");
-        assert!(cache.contains(&1), "capacity 0 must clamp to 1, not disable dedup");
+        assert!(
+            cache.contains(&1),
+            "capacity 0 must clamp to 1, not disable dedup"
+        );
         assert!(!cache.insert(1), "duplicate must be rejected");
     }
 
