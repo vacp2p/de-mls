@@ -393,34 +393,28 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let mls_members = self.mls().members().unwrap_or_default();
-        self.sync_scoring_members(&mls_members)?;
-        self.prune_pending_updates_after_commit()?;
-
-        // Transition to Working BEFORE steward checks (election needs Working
-        // state). Reset reelection_round: this commit advanced the epoch,
-        // so whatever retry cycle we were in belongs to the previous epoch.
+        // The commit merged, so advance to Working FIRST: the bookkeeping below
+        // is best-effort and must not be able to strand the state machine in
+        // Selection. reset_retry too — this commit ended any retry cycle.
         self.services.steward_list.reset_retry();
         let state = self.current_state();
-        let working_event = if matches!(
+        if matches!(
             state,
             ConversationState::Working
                 | ConversationState::Freezing
                 | ConversationState::Selection
                 | ConversationState::Reelection
         ) {
-            Some(self.start_working())
-        } else {
-            None
-        };
+            let event = self.start_working();
+            self.emit_event(ConversationEvent::PhaseChange(event));
+        }
 
+        let mls_members = self.mls().members().unwrap_or_default();
+        self.sync_scoring_members(&mls_members)?;
+        self.prune_pending_updates_after_commit()?;
         self.steward_list_housekeeping(provider, signer)?;
         self.process_buffered_updates(provider, signer)?;
         self.maybe_close_recovery_window(provider, signer);
-
-        if let Some(event) = working_event {
-            self.emit_event(ConversationEvent::PhaseChange(event));
-        }
         Ok(())
     }
 
