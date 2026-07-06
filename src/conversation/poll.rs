@@ -17,8 +17,8 @@ use prost::Message;
 use tracing::{error, info, warn};
 
 use crate::{
-    CommitRoundOutcome, ConsensusPlugin, Conversation, ConversationError,
-    ConversationEvent, ConversationState, DispatchOutcome, PeerScoreStorage, ScoreEvent, ScoreOp,
+    CommitRoundOutcome, ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
+    ConversationState, DispatchOutcome, PeerScoreStorage, ScoreEvent, ScoreOp,
     protos::de_mls::messages::v1::{AppMessage, MemberWelcome},
 };
 
@@ -265,22 +265,7 @@ where
                         self.emit_event(ConversationEvent::PhaseChange(resumed));
                         return Ok(DispatchOutcome::Done);
                     }
-                    self.recovery_rounds += 1;
-                    let max = self.config.recovery_max_rounds;
-                    if max != 0 && self.recovery_rounds >= max {
-                        self.exit_recovery_mode();
-                        let resumed = self.start_working();
-                        self.emit_event(ConversationEvent::RecoveryExhausted);
-                        self.emit_event(ConversationEvent::PhaseChange(resumed));
-                        return Ok(DispatchOutcome::Done);
-                    }
-                    // Re-open the collection window (Selection → Freezing) so the
-                    // next poll re-enters `advance_freezing` and the manual/auto
-                    // cycle retries — without this the round wedges in Selection.
-                    if let Some(reopened) = self.reopen_recovery_window() {
-                        self.emit_event(ConversationEvent::PhaseChange(reopened));
-                    }
-                    return Ok(DispatchOutcome::Done);
+                    return Ok(self.retry_or_exhaust_recovery());
                 }
                 // `accuse_target` is `Some` only when we had approved proposals
                 // go unanswered *and* can attribute the miss to a live steward
@@ -350,16 +335,31 @@ where
     }
 
     /// Leave the commit round safely after a finalize failure — no commit landed
-    /// and no one is at fault. In recovery, re-open the window to retry (not
-    /// counted against `recovery_max_rounds`); otherwise resume Working.
+    /// and no one is at fault. In recovery, count the round and retry-or-exhaust
+    /// (same stop-line as a commit-less round); otherwise resume Working.
     fn recover_from_finalize_error(&mut self) -> DispatchOutcome {
         if self.is_in_recovery_mode() {
-            if let Some(reopened) = self.reopen_recovery_window() {
-                self.emit_event(ConversationEvent::PhaseChange(reopened));
-            }
+            self.retry_or_exhaust_recovery()
         } else {
             let resumed = self.start_working();
             self.emit_event(ConversationEvent::PhaseChange(resumed));
+            DispatchOutcome::Done
+        }
+    }
+
+    /// Advance a commit-less recovery round: count it against the stop-line,
+    /// exhausting to Working (with `RecoveryExhausted`) at `recovery_max_rounds`,
+    /// otherwise re-opening the collection window (Selection → Freezing) to retry.
+    fn retry_or_exhaust_recovery(&mut self) -> DispatchOutcome {
+        self.recovery_rounds += 1;
+        let max = self.config.recovery_max_rounds;
+        if max != 0 && self.recovery_rounds >= max {
+            self.exit_recovery_mode();
+            let resumed = self.start_working();
+            self.emit_event(ConversationEvent::RecoveryExhausted);
+            self.emit_event(ConversationEvent::PhaseChange(resumed));
+        } else if let Some(reopened) = self.reopen_recovery_window() {
+            self.emit_event(ConversationEvent::PhaseChange(reopened));
         }
         DispatchOutcome::Done
     }
@@ -394,8 +394,8 @@ where
     /// Hand off the joiner welcome after a commit merged: attach the
     /// `ConversationSync`, broadcast for relay, and surface it locally. Never
     /// propagates — the commit merged, so a sync-build failure surfaces a
-    /// [`ConversationEvent::Error`] and ships `welcome_bytes` anyway (the joiner
-    /// re-requests the sync).
+    /// [`ConversationEvent::Error`] and ships `welcome_bytes` with empty sync
+    /// (the joiner attaches to MLS without it).
     fn deliver_welcome<Pr>(
         &mut self,
         provider: &Pr,
