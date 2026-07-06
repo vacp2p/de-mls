@@ -89,3 +89,49 @@ fn recovery_auto_mint_converges_on_one_commit() {
         );
     }
 }
+
+#[test]
+fn manual_only_recovery_does_not_auto_commit() {
+    // Manual-only policy: recovery opens but no member calls commit_in_recovery,
+    // so the stuck removal must not auto-commit on its own.
+    let cfg = ConversationConfig {
+        recovery_auto_commit_delay: None,
+        recovery_inactivity_duration: Duration::from_millis(50),
+        ..fast_config()
+    };
+    let mut h = TestHarness::<3>::bootstrap(
+        [ALICE, BOB, CHARLIE],
+        "rn",
+        cfg,
+        StewardListConfig::new(1, 1).unwrap(),
+    );
+    for _ in 0..5 {
+        h.process(Duration::from_millis(40));
+    }
+
+    let steward = (0..3)
+        .find(|&i| h.member(i).convo().is_epoch_steward().unwrap())
+        .expect("a sole epoch steward exists");
+    let online: Vec<usize> = (0..3).filter(|&i| i != steward).collect();
+    let steward_id = h.member(steward).member_id_bytes().to_vec();
+    h.mute(steward);
+
+    h.member_mut(online[0]).remove_member(&steward_id);
+    h.member_mut(online[0]).request_recovery();
+
+    // Let recovery open and several windows pass — with no auto-mint the
+    // removal cannot land.
+    for _ in 0..12 {
+        h.process(Duration::from_millis(40));
+    }
+
+    assert_eq!(
+        h.member(online[0]).member_count(),
+        3,
+        "manual-only recovery must not auto-commit the removal"
+    );
+    assert!(
+        h.member(online[0]).convo().is_in_recovery_mode(),
+        "recovery stays open, waiting for a manual commit"
+    );
+}
