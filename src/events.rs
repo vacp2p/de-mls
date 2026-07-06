@@ -93,9 +93,9 @@ pub enum ConversationEvent {
 
     /// Layer-3 recovery opened: the steward list is deadlocked and the steward
     /// gate is relaxed so any member MAY commit. The integrator decides the
-    /// policy — call [`crate::Conversation::commit_in_recovery`] to mint now
-    /// (a "commit" button), or leave it to the auto-fallback that mints on
-    /// every online node after `recovery_auto_commit_delay`.
+    /// policy — call [`crate::Conversation::commit_in_recovery`] to mint now,
+    /// or leave it to the auto-fallback that mints on every online node after
+    /// `recovery_auto_commit_delay`.
     RecoveryModeOpened,
 
     /// Layer-3 recovery gave up after `recovery_max_rounds` manual+auto rounds

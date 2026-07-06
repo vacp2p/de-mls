@@ -381,27 +381,44 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let self_member_id = Arc::clone(&self.self_member_id);
-        let outbound = if self.services.steward_list.is_steward(&self_member_id) {
-            match self.build_local_candidate(provider, signer, &self_member_id) {
-                Ok(payload) => payload,
-                Err(e) => {
-                    tracing::error!(
-                        conversation = %self.conversation_id,
-                        error = %e,
-                        "own commit candidate build failed"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        self.emit_event(ConversationEvent::PhaseChange(event));
-        if let Some(payload) = outbound {
-            self.broadcast(payload);
+        // Only stewards mint on freeze entry (non-stewards just enter the
+        // round); the recovery-relaxed gate lives in `build_local_candidate`.
+        if self.services.steward_list.is_steward(&self.self_member_id)
+            && let Err(e) = self.mint_and_broadcast_candidate(provider, signer)
+        {
+            tracing::error!(
+                conversation = %self.conversation_id,
+                error = %e,
+                "own commit candidate build failed"
+            );
         }
+        self.emit_event(ConversationEvent::PhaseChange(event));
         Ok(())
+    }
+
+    /// Mint this member's commit candidate from the approved batch and queue it
+    /// for broadcast. `Ok(true)` if a candidate was produced, `Ok(false)` if
+    /// there was nothing to commit (e.g. the batch is only our own removal).
+    /// Shared by the freeze-entry mint, the manual recovery commit, and the
+    /// recovery auto-fallback — the eligibility gate (stewards, or any member in
+    /// recovery) lives in [`Self::build_local_candidate`].
+    pub(crate) fn mint_and_broadcast_candidate<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<bool, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let self_member_id = Arc::clone(&self.self_member_id);
+        match self.build_local_candidate(provider, signer, &self_member_id)? {
+            Some(payload) => {
+                self.broadcast(payload);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     /// Manually produce a Layer-3 recovery commit — mint our own candidate and
@@ -409,9 +426,10 @@ where
     /// is relaxed and any member MAY commit. Returns `true` if a candidate was
     /// produced, `false` if there was nothing to commit.
     ///
-    /// The integrator calls this on a member's behalf (a "commit" button) after
-    /// a [`crate::ConversationEvent::RecoveryModeOpened`]. If no member calls it
-    /// within `recovery_auto_commit_delay`, every online node auto-mints instead.
+    /// The integrator drives this after a
+    /// [`crate::ConversationEvent::RecoveryModeOpened`] — from a user action or
+    /// its own recovery policy. If no member calls it within
+    /// `recovery_auto_commit_delay`, every online node auto-mints instead.
     pub fn commit_in_recovery<Pr>(
         &mut self,
         provider: &Pr,
@@ -424,14 +442,7 @@ where
         if !self.is_in_recovery_mode() {
             return Err(ConversationError::NotInRecovery);
         }
-        let self_member_id = Arc::clone(&self.self_member_id);
-        match self.build_local_candidate(provider, signer, &self_member_id)? {
-            Some(payload) => {
-                self.broadcast(payload);
-                Ok(true)
-            }
-            None => Ok(false),
-        }
+        self.mint_and_broadcast_candidate(provider, signer)
     }
 
     /// Finalize the active commit round.

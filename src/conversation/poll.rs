@@ -117,7 +117,7 @@ where
 
         let in_recovery = self.is_in_recovery_mode();
         // Layer-3 auto-fallback: once the manual grace passes, every online node
-        // mints so a commit lands even if no one pressed the button.
+        // mints so a commit lands even if no member explicitly commits.
         if in_recovery {
             self.maybe_auto_commit_recovery(provider, signer);
         }
@@ -335,9 +335,9 @@ where
     }
 
     /// Layer-3 auto-fallback: once `recovery_auto_commit_delay` has elapsed with
-    /// no local candidate (nobody pressed "commit"), mint our own so a commit can
-    /// land. No-op when the policy is manual-only (`None`), before the grace, or
-    /// once we've already minted. Best-effort — build errors are logged, not
+    /// no local candidate (no member has committed yet), mint our own so a commit
+    /// can land. No-op when the policy is manual-only (`None`), before the grace,
+    /// or once we've already minted. Best-effort — build errors are logged, not
     /// surfaced, so `poll` keeps driving.
     fn maybe_auto_commit_recovery<Pr>(&mut self, provider: &Pr, signer: &impl Signer)
     where
@@ -352,15 +352,12 @@ where
         {
             return;
         }
-        let self_member_id = Arc::clone(&self.self_member_id);
-        match self.build_local_candidate(provider, signer, &self_member_id) {
-            Ok(Some(payload)) => self.broadcast(payload),
-            Ok(None) => {}
-            Err(e) => error!(
+        if let Err(e) = self.mint_and_broadcast_candidate(provider, signer) {
+            error!(
                 conversation = %self.conversation_id,
                 error = %e,
                 "recovery auto-commit failed"
-            ),
+            );
         }
     }
 
