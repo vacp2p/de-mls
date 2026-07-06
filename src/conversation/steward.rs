@@ -544,10 +544,19 @@ where
         Ok(())
     }
 
-    /// Layer 3 escalation: file a `Deadlock` ECP after re-election retries
-    /// exhaust. Only the deterministic responsible proposer submits;
-    /// others no-op. On YES the ECP opens `recovery_mode`.
-    pub(crate) fn initiate_deadlock_ecp<Pr>(
+    /// Raise the Layer-3 deadlock signal: file a `Deadlock` ECP from this
+    /// member. Call it when a group is visibly stuck — no steward is producing
+    /// commits — instead of waiting for re-election to exhaust on its own. The
+    /// automatic escalation (once retries exhaust) calls the same method, gated
+    /// to the deterministic proposer so it doesn't file one ECP per member.
+    ///
+    /// This only *proposes* recovery: the ECP still needs ⌈2n/3⌉ consensus, so a
+    /// single member can't force it — the group votes on whether it is truly
+    /// deadlocked. On YES it enters recovery mode
+    /// ([`crate::ConversationEvent::RecoveryModeOpened`]), relaxing the steward
+    /// gate so any member may commit via [`Conversation::commit_in_recovery`] or
+    /// the auto-fallback. No-op while already in recovery.
+    pub fn request_recovery<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
@@ -556,47 +565,39 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let (is_authorized, self_id, epoch, conversation_id) = {
-            let mls = self.mls();
-            let mls_members = mls.members()?;
-            let epoch = mls.current_epoch()?;
-            let self_id: &[u8] = &self.self_member_id;
-            // Deadlock proposer = election proposer with the stricter
-            // predicate (MLS-present and not queued for removal).
-            let mls_set: std::collections::HashSet<&[u8]> =
-                mls_members.iter().map(Vec::as_slice).collect();
-            let conversation_ref = &self.queues;
-            let authorized = self
-                .services
-                .steward_list
-                .election_proposer(|c: &[u8]| {
-                    mls_set.contains(c) && !conversation_ref.has_approved_removal(c)
-                })
-                .is_some_and(|proposer| proposer == self_id);
-            (
-                authorized,
-                Arc::clone(&self.self_member_id),
-                epoch,
-                self.conversation_id.clone(),
-            )
-        };
-
-        if !is_authorized {
+        if self.is_in_recovery_mode() {
             return Ok(());
         }
-
+        let (self_id, epoch) = {
+            let mls = self.mls();
+            (Arc::clone(&self.self_member_id), mls.current_epoch()?)
+        };
         let request = ViolationEvidence::deadlock(epoch)
             .with_creator(self_id.to_vec())
             .into_update_request()?;
-
-        info!(
-            conversation = %conversation_id,
-            epoch, "initiating Deadlock ECP"
-        );
-
-        // Bundle YES — the proposer's observation that the deadlock is
-        // real is their vote.
+        info!(conversation = %self.conversation_id, epoch, "initiating Deadlock ECP");
+        // Bundled YES: filing it is this member's own vote that the deadlock is real.
         self.initiate_proposal(provider, request, CreatorVote::Yes, signer)?;
         Ok(())
+    }
+
+    /// Whether this member is the deterministic proposer that should auto-file
+    /// the `Deadlock` ECP when re-election exhausts — the election proposer,
+    /// restricted to a candidate that is MLS-present and not queued for removal.
+    /// Gates the automatic escalation so it doesn't file one ECP per member.
+    pub(crate) fn is_deadlock_proposer(&self) -> Result<bool, ConversationError> {
+        let mls = self.mls();
+        let mls_members = mls.members()?;
+        let self_id: &[u8] = &self.self_member_id;
+        let mls_set: std::collections::HashSet<&[u8]> =
+            mls_members.iter().map(Vec::as_slice).collect();
+        let conversation_ref = &self.queues;
+        Ok(self
+            .services
+            .steward_list
+            .election_proposer(|c: &[u8]| {
+                mls_set.contains(c) && !conversation_ref.has_approved_removal(c)
+            })
+            .is_some_and(|proposer| proposer == self_id))
     }
 }

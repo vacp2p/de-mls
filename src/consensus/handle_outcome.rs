@@ -247,7 +247,11 @@ where
                 conversation = %self.conversation_id,
                 round, max, "election retries exhausted; escalating to Layer 3"
             );
-            if let Err(e) = self.initiate_deadlock_ecp(provider, signer) {
+            // Only the deterministic proposer auto-files, so simultaneous
+            // exhaustion across members doesn't produce one ECP each.
+            if self.is_deadlock_proposer()?
+                && let Err(e) = self.request_recovery(provider, signer)
+            {
                 error!(conversation = %self.conversation_id, error = %e, "Deadlock ECP filing failed");
                 self.emit_event(ConversationEvent::Error {
                     operation: "Reelection stuck".to_string(),
