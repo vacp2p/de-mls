@@ -32,8 +32,9 @@ pub enum ConsensusApplyResult {
     /// `target`.
     RejectedMembership { target: Vec<u8> },
     /// A Layer-3 `Deadlock` proposal passed. Switch to `Recovery`
-    /// ([`crate::OperatingMode`], any member may commit) and commit now rather
-    /// than waiting out the inactivity timer. Cleared by the next election.
+    /// ([`crate::OperatingMode`], any member may commit) and open the collection
+    /// window; the commit comes from integrator policy (`commit_in_recovery` or
+    /// the auto-fallback). Cleared by the first valid commit.
     RecoveryModeOpened,
     /// A below-threshold removal passed. The urgent-commit target is already
     /// set, so commit it now rather than waiting out the inactivity timer, and

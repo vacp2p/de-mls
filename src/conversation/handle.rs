@@ -421,15 +421,11 @@ where
         }
     }
 
-    /// Manually produce a Layer-3 recovery commit — mint our own candidate and
-    /// queue its broadcast. Only valid in recovery mode, where the steward gate
-    /// is relaxed and any member MAY commit. Returns `true` if a candidate was
-    /// produced, `false` if there was nothing to commit.
-    ///
-    /// The integrator drives this after a
-    /// [`crate::ConversationEvent::RecoveryModeOpened`] — from a user action or
-    /// its own recovery policy. If no member calls it within
-    /// `recovery_auto_commit_delay`, every online node auto-mints instead.
+    /// Manually produce a Layer-3 recovery commit: mint our candidate and queue
+    /// its broadcast (only valid in recovery, where the steward gate is relaxed).
+    /// `true` if a candidate was produced, `false` if there was nothing to commit.
+    /// If no member calls this within `recovery_auto_commit_delay`, every online
+    /// node auto-mints instead.
     pub fn commit_in_recovery<Pr>(
         &mut self,
         provider: &Pr,

@@ -139,8 +139,7 @@ where
         }
     }
 
-    /// Enter `Freezing` now, bypassing the inactivity timer — for outcomes
-    /// that need a commit immediately rather than on the next timeout.
+    /// Enter `Freezing` now, bypassing the inactivity timer, and announce it.
     fn start_freezing_and_emit(&mut self) {
         let transition = self.start_freezing();
         self.emit_phase_change(transition);

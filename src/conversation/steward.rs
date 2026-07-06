@@ -544,18 +544,11 @@ where
         Ok(())
     }
 
-    /// Raise the Layer-3 deadlock signal: file a `Deadlock` ECP from this
-    /// member. Call it when a group is visibly stuck — no steward is producing
-    /// commits — instead of waiting for re-election to exhaust on its own. The
-    /// automatic escalation (once retries exhaust) calls the same method, gated
-    /// to the deterministic proposer so it doesn't file one ECP per member.
-    ///
-    /// This only *proposes* recovery: the ECP still needs ⌈2n/3⌉ consensus, so a
-    /// single member can't force it — the group votes on whether it is truly
-    /// deadlocked. On YES it enters recovery mode
-    /// ([`crate::ConversationEvent::RecoveryModeOpened`]), relaxing the steward
-    /// gate so any member may commit via [`Conversation::commit_in_recovery`] or
-    /// the auto-fallback. No-op while already in recovery.
+    /// Raise the Layer-3 deadlock signal: file a `Deadlock` ECP to open recovery
+    /// when the group is stuck with no steward committing. It only *proposes* —
+    /// the ECP needs ⌈2n/3⌉ consensus, so one member can't force it. On YES the
+    /// group enters recovery ([`crate::ConversationEvent::RecoveryModeOpened`]),
+    /// relaxing the steward gate. No-op while already in recovery.
     pub fn request_recovery<Pr>(
         &mut self,
         provider: &Pr,

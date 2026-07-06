@@ -175,12 +175,9 @@ where
         ) {
             Ok(result) => result,
             Err(e) => {
-                // A finalize failure is our own local error (a storage/MLS
-                // read), not a steward failing to commit — so don't fall into
-                // the NoCandidate path below, which would penalize the epoch
-                // steward and force re-election. Surface it and return to a
-                // safe state; the round retries on the next inactivity tick, or
-                // recovery re-opens its window.
+                // A finalize failure is our own local error, not the steward
+                // failing to commit; the NoCandidate path below would wrongly
+                // penalize the steward and re-elect. Surface it and retry safely.
                 error!(conversation = %conversation_id, error = %e, "commit-round finalize failed");
                 self.emit_event(ConversationEvent::Error {
                     operation: "commit_round_finalize".to_owned(),
@@ -239,11 +236,9 @@ where
                 }
 
                 // Always drive the terminal transition: the commit merged, so
-                // the conversation must reach Working even if welcome delivery
-                // or dispatch hit a snag. `dispatch_inbound_result` routes the
-                // applied result to `on_conversation_updated`, which is what
-                // flips us back to Working — log rather than propagate, so a
-                // merged commit can't strand us in Selection.
+                // reach Working even if welcome/dispatch hit a snag.
+                // `dispatch_inbound_result` owns it (via `on_conversation_updated`);
+                // log rather than propagate so a merged commit can't wedge Selection.
                 let outcome = match self.dispatch_inbound_result(provider, result, signer) {
                     Ok(o) => o,
                     Err(e) => {
@@ -354,11 +349,9 @@ where
         }
     }
 
-    /// Leave the commit round safely after a finalize failure: no commit landed
-    /// and no one is at fault, so return to a terminal state without penalizing a
-    /// steward or forcing re-election. In recovery, re-open the collection window
-    /// to retry (not counted against `recovery_max_rounds`); otherwise resume
-    /// Working and let the inactivity timer re-drive the round.
+    /// Leave the commit round safely after a finalize failure — no commit landed
+    /// and no one is at fault. In recovery, re-open the window to retry (not
+    /// counted against `recovery_max_rounds`); otherwise resume Working.
     fn recover_from_finalize_error(&mut self) -> DispatchOutcome {
         if self.is_in_recovery_mode() {
             if let Some(reopened) = self.reopen_recovery_window() {
@@ -399,13 +392,10 @@ where
     }
 
     /// Hand off the joiner welcome after a commit merged: attach the
-    /// `ConversationSync` to the MLS `welcome_bytes`, broadcast it for relay,
-    /// and surface it locally as freshly minted.
-    ///
-    /// Never propagates — the commit already merged, so this can't abort
-    /// finalization. If the sync can't be built, surface a
-    /// [`ConversationEvent::Error`] and ship `welcome_bytes` anyway; the joiner
-    /// notices the missing sync and can ask for it.
+    /// `ConversationSync`, broadcast for relay, and surface it locally. Never
+    /// propagates — the commit merged, so a sync-build failure surfaces a
+    /// [`ConversationEvent::Error`] and ships `welcome_bytes` anyway (the joiner
+    /// re-requests the sync).
     fn deliver_welcome<Pr>(
         &mut self,
         provider: &Pr,
