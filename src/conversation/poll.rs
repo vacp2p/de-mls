@@ -261,7 +261,12 @@ where
                         self.emit_event(ConversationEvent::PhaseChange(resumed));
                         return Ok(DispatchOutcome::Done);
                     }
-                    self.timing.phase_timer.start();
+                    // Re-open the collection window (Selection → Freezing) so the
+                    // next poll re-enters `advance_freezing` and the manual/auto
+                    // cycle retries — without this the round wedges in Selection.
+                    if let Some(reopened) = self.reopen_recovery_window() {
+                        self.emit_event(ConversationEvent::PhaseChange(reopened));
+                    }
                     return Ok(DispatchOutcome::Done);
                 }
                 // `accuse_target` is `Some` only when we had approved proposals

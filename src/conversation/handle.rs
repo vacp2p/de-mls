@@ -680,6 +680,20 @@ where
         ConversationState::Reelection
     }
 
+    /// Re-open the Layer-3 recovery collection window: `Selection` → `Freezing`
+    /// with the phase timer re-anchored, so the next poll re-enters
+    /// `advance_freezing` and the manual/auto commit cycle retries. Returns
+    /// `Some(Freezing)` on transition; `None` from any other state.
+    pub(crate) fn reopen_recovery_window(&mut self) -> Option<ConversationState> {
+        if self.state_machine.reopen_freezing() {
+            self.timing.phase_timer.start();
+            info!(state = "Freezing", "state transition (recovery retry)");
+            Some(ConversationState::Freezing)
+        } else {
+            None
+        }
+    }
+
     /// `true` once the freeze window elapsed while in `Freezing`.
     pub(crate) fn is_freeze_window_elapsed(&self) -> bool {
         self.current_state() == ConversationState::Freezing
@@ -989,6 +1003,81 @@ mod tests {
             matches!(err, ConversationError::NoProposals),
             "recovery must relax the steward gate, got {err:?}"
         );
+    }
+
+    #[test]
+    fn recovery_retries_across_rounds_until_stop_line() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+        // Zero-length windows so each poll resolves one commit-less round.
+        conversation.config.recovery_auto_commit_delay = Some(Duration::ZERO);
+        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.config.recovery_max_rounds = 3;
+        conversation.enter_recovery_mode();
+        conversation.start_freezing();
+        conversation.timing.phase_timer.start();
+
+        // Rounds 1 and 2 land no commit but must re-open the collection window
+        // (Freezing) rather than wedging in Selection.
+        for round in 1..=2 {
+            conversation.poll(&provider, &signer);
+            assert!(
+                conversation.is_in_recovery_mode(),
+                "round {round}: recovery must stay open below the stop line"
+            );
+            assert_eq!(
+                conversation.current_state(),
+                ConversationState::Freezing,
+                "round {round}: recovery must re-open Freezing, not wedge in Selection"
+            );
+        }
+
+        // Round 3 hits recovery_max_rounds → exhausts back to Working.
+        conversation.poll(&provider, &signer);
+        assert!(
+            !conversation.is_in_recovery_mode(),
+            "recovery must exit at the stop line"
+        );
+        assert_eq!(conversation.current_state(), ConversationState::Working);
+        assert!(
+            conversation
+                .drain_events()
+                .iter()
+                .any(|e| matches!(e, ConversationEvent::RecoveryExhausted)),
+            "RecoveryExhausted must fire at the stop line"
+        );
+    }
+
+    #[test]
+    fn recovery_retries_forever_when_max_rounds_zero() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+        conversation.config.recovery_auto_commit_delay = Some(Duration::ZERO);
+        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.config.recovery_max_rounds = 0; // retry forever (default)
+        conversation.enter_recovery_mode();
+        conversation.start_freezing();
+        conversation.timing.phase_timer.start();
+
+        for round in 1..=5 {
+            conversation.poll(&provider, &signer);
+            assert!(
+                conversation.is_in_recovery_mode(),
+                "round {round}: recovery must stay open when max_rounds is 0"
+            );
+            assert_eq!(
+                conversation.current_state(),
+                ConversationState::Freezing,
+                "round {round}: recovery must re-open Freezing, not wedge in Selection"
+            );
+            assert!(
+                !conversation
+                    .drain_events()
+                    .iter()
+                    .any(|e| matches!(e, ConversationEvent::RecoveryExhausted)),
+                "round {round}: RecoveryExhausted must never fire when max_rounds is 0"
+            );
+        }
     }
 
     #[test]
