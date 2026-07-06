@@ -15,7 +15,7 @@
 //!   the consensus scope.
 
 use std::error::Error as StdError;
-use std::sync::Arc;
+use std::time::Instant;
 
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
@@ -27,8 +27,8 @@ use tracing::{error, info, warn};
 use crate::{
     ConsensusPlugin, ConversationEvent, PeerScoreStorage, ProcessResult, ProposalKind,
     ScoreSnapshot, StewardList, StewardListConfig,
+    commit_round::{compute_commit_hash, receive_commit_candidate},
     conversation::{ConversationQueues, member_set},
-    freeze::{buffer_commit_candidate, compute_commit_hash},
     mls_crypto::{DecryptedMessage, MlsService},
     process_result::NoopReason,
     protos::de_mls::messages::v1::{
@@ -80,7 +80,7 @@ where
     if let Ok(app_message) = AppMessage::decode(payload) {
         match app_message.payload {
             Some(app_message::Payload::CommitCandidate(candidate)) => {
-                return buffer_commit_candidate(conversation, mls, candidate);
+                return receive_commit_candidate(conversation, mls, candidate);
             }
             Some(app_message::Payload::MemberWelcome(welcome)) => {
                 if welcome.welcome_bytes.is_empty() {
@@ -134,6 +134,11 @@ where
                 "fast-path proposal rejected: sender is not the self-removal target"
             );
             return Ok(ProcessResult::Noop(NoopReason::FastPathRejected));
+        }
+        // A sync re-send request: the MLS-authenticated sender is the
+        // requester, so capture it here rather than trust a wire field.
+        Some(app_message::Payload::ConversationSyncRequest(_)) => {
+            return Ok(ProcessResult::ConversationSyncRequested { requester: sender });
         }
         // Drop BanRequests whose target isn't in the conversation — saves a
         // useless consensus round.
@@ -202,6 +207,9 @@ where
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
         if sync_bytes.is_empty() {
+            // Joined without a bootstrap: no steward list, scores, or config.
+            // Surface the degraded state so the integrator re-requests a sync.
+            self.emit_event(ConversationEvent::ConversationSyncMissing);
             return Ok(());
         }
         let result = self.decode_inbound(provider, sync_bytes)?;
@@ -252,6 +260,10 @@ where
             }
             ProcessResult::ConversationSyncReceived(sync) => {
                 self.on_conversation_sync(*sync)?;
+                Ok(DispatchOutcome::Done)
+            }
+            ProcessResult::ConversationSyncRequested { requester } => {
+                self.on_conversation_sync_request(provider, &requester, signer)?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::WelcomeBroadcastReceived(welcome) => {
@@ -384,7 +396,7 @@ where
     /// A commit merged. Sync scoring + pending-update buffers, transition to
     /// Working, and run steward housekeeping (list reconcile, election
     /// kick-off, buffered-update drain). The commit author's `SuccessfulCommit`
-    /// reward is emitted by `finalize_freeze_round`, not here.
+    /// reward is emitted by `finalize_commit_round`, not here.
     fn on_conversation_updated<Pr>(
         &mut self,
         provider: &Pr,
@@ -394,34 +406,28 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let mls_members = self.mls().members().unwrap_or_default();
-        self.sync_scoring_members(&mls_members)?;
-        self.prune_pending_updates_after_commit()?;
-
-        // Transition to Working BEFORE steward checks (election needs Working
-        // state). Reset reelection_round: this commit advanced the epoch,
-        // so whatever retry cycle we were in belongs to the previous epoch.
+        // The commit merged, so advance to Working FIRST: the bookkeeping below
+        // is best-effort and must not be able to strand the state machine in
+        // Selection. reset_retry too — this commit ended any retry cycle.
         self.services.steward_list.reset_retry();
         let state = self.current_state();
-        let working_event = if matches!(
+        if matches!(
             state,
             ConversationState::Working
                 | ConversationState::Freezing
                 | ConversationState::Selection
                 | ConversationState::Reelection
         ) {
-            Some(self.start_working())
-        } else {
-            None
-        };
+            let event = self.start_working();
+            self.emit_event(ConversationEvent::PhaseChange(event));
+        }
 
+        let mls_members = self.mls().members().unwrap_or_default();
+        self.sync_scoring_members(&mls_members)?;
+        self.prune_pending_updates_after_commit()?;
         self.steward_list_housekeeping(provider, signer)?;
         self.process_buffered_updates(provider, signer)?;
         self.maybe_close_recovery_window(provider, signer);
-
-        if let Some(event) = working_event {
-            self.emit_event(ConversationEvent::PhaseChange(event));
-        }
         Ok(())
     }
 
@@ -489,30 +495,8 @@ where
         let Some(event) = self.start_freezing() else {
             return Ok(());
         };
-        let epoch = self.mls().current_epoch()?;
-        self.queues.start_freeze_round(epoch);
 
-        let self_member_id = Arc::clone(&self.self_member_id);
-        let outbound = if self.services.steward_list.is_steward(&self_member_id) {
-            match self.create_commit_candidate(provider, signer, &self_member_id) {
-                Ok(payload) => payload,
-                Err(e) => {
-                    error!(
-                        conversation = %self.conversation_id,
-                        error = %e,
-                        "own commit candidate build failed"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        self.emit_event(ConversationEvent::PhaseChange(event));
-        if let Some(payload) = outbound {
-            self.broadcast(payload);
-        }
+        self.on_freeze_entered(provider, signer, event)?;
         Ok(())
     }
 
@@ -521,6 +505,9 @@ where
     /// (not the full MLS set — the list may have been generated before we
     /// existed), then applies list + protocol flags + timing + peer scores.
     fn on_conversation_sync(&mut self, sync: ConversationSync) -> Result<(), ConversationError> {
+        // A sync is on the wire — the request round is answered, so disarm any
+        // pending backup takeover before the list-present guard returns.
+        self.timing.sync_resend_anchor = None;
         if self.services.steward_list.current_list().is_some() {
             return Ok(());
         }
@@ -542,6 +529,7 @@ where
 
         let sn = sync.steward_members.len();
         self.apply_conversation_sync_to_entry(&sync)?;
+        self.emit_event(ConversationEvent::ConversationSyncApplied);
 
         info!(
             conversation = %conversation_id,
@@ -551,6 +539,36 @@ where
             timing = sync.timing.is_some(),
             "conversation sync applied"
         );
+        Ok(())
+    }
+
+    /// Answer a sync re-send request. The epoch steward responds now; a backup
+    /// arms `sync_resend_anchor` and takes over from `poll` only if the epoch
+    /// steward stays silent. The list-present guard in `on_conversation_sync`
+    /// means only the degraded requester adopts the broadcast.
+    pub(crate) fn on_conversation_sync_request<Pr>(
+        &mut self,
+        provider: &Pr,
+        requester: &[u8],
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if self.is_epoch_steward()? {
+            self.timing.sync_resend_anchor = None;
+            tracing::debug!(
+                conversation = %self.conversation_id,
+                requester = ?requester,
+                "epoch steward re-sending conversation sync"
+            );
+            return self.share_conversation_sync(provider, signer);
+        }
+        // A backup arms the takeover timer; a plain member can't answer.
+        if self.is_steward() && self.timing.sync_resend_anchor.is_none() {
+            self.timing.sync_resend_anchor = Some(Instant::now());
+        }
         Ok(())
     }
 

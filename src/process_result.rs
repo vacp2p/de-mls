@@ -7,9 +7,9 @@ use crate::{
     ConversationError, ScoreEvent, ScoreOp,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, ConversationSync,
-        ConversationUpdateRequest, EmergencyCriteriaProposal, EventMembershipChange, MemberWelcome,
-        Outcome, ProposalAdded, UserVote, ViolationEvidence, ViolationType, VotePayload,
-        app_message, conversation_update_request,
+        ConversationSyncRequest, ConversationUpdateRequest, EmergencyCriteriaProposal,
+        EventMembershipChange, MemberWelcome, Outcome, ProposalAdded, UserVote, ViolationEvidence,
+        ViolationType, VotePayload, app_message, conversation_update_request,
     },
 };
 
@@ -35,11 +35,15 @@ pub enum ProcessResult {
     /// MLS state advanced (batch commit applied).
     ConversationUpdated,
 
-    /// Remote commit candidate was buffered in the active freeze round.
+    /// Remote commit candidate was buffered in the active commit round.
     CommitCandidateReceived { steward_id: Vec<u8> },
 
     /// Conversation-sync message from the steward.
     ConversationSyncReceived(Box<ConversationSync>),
+
+    /// A member joined without a bootstrap and asks a steward to re-send the
+    /// `ConversationSync`. `requester` is the MLS-authenticated sender.
+    ConversationSyncRequested { requester: Vec<u8> },
 
     /// Welcome broadcast from the committing steward: every member learns
     /// the welcome so the application decides who delivers it to the
@@ -75,7 +79,7 @@ pub enum NoopReason {
     WireKindMismatch,
     /// Identical commit hash is already buffered for this round.
     DuplicateBufferedHash,
-    /// Freeze-round buffer is full (one candidate per member already held).
+    /// Commit-round buffer is full (one candidate per member already held).
     CandidateBufferFull,
     /// Candidate arrived before its proposal was locally approved (consensus
     /// outcome still in flight). Stashed for replay once approval lands.
@@ -226,6 +230,7 @@ impl_payload_from!(
     ProposalAdded       => app_message::Payload::ProposalAdded,
     MemberWelcome       => app_message::Payload::MemberWelcome,
     EventMembershipChange => app_message::Payload::MembershipChange,
+    ConversationSyncRequest => app_message::Payload::ConversationSyncRequest,
 );
 
 impl From<ConsensusEvent> for Outcome {

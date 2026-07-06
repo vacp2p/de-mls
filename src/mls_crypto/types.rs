@@ -20,9 +20,9 @@ pub enum MlsProposalOutput {
     Remove(Vec<u8>),
 }
 
-/// Coarse kind of an MLS wire message: the two control kinds the freeze
-/// pipeline gates on, plus `Other` for everything else (application messages,
-/// welcomes, unrecognized frames).
+/// The kind of an MLS wire message, as far as the commit-round pipeline cares.
+/// `Proposal` and `Commit` are the control kinds it gates on; `Other` covers
+/// everything else (application messages, welcomes, unrecognized frames).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MlsMessageKind {
     Proposal,

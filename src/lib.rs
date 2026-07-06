@@ -8,7 +8,8 @@
 //! - **[`conversation`]** - The [`Conversation`] handle plus its
 //!   per-conversation state, state machine, and inbound dispatch
 //! - **[`consensus`]** - Consensus plug-in contract, outcome application, and voting
-//! - **[`peer_scoring`]** / **[`steward_list`]** / **[`freeze`]** - Protocol plug-ins
+//! - **[`peer_scoring`]** / **[`steward_list`]** - Protocol plug-ins
+//! - **[`commit_round`]** - Commit-round candidate collection, selection, and apply
 //! - **[`mls_crypto`]** - MLS cryptographic operations (OpenMLS wrapper)
 //! - **[`protos`]** - Protobuf message definitions
 //!
@@ -60,8 +61,8 @@ pub mod peer_scoring;
 /// Steward-list plug-in: deterministic roster and rotation queries.
 pub mod steward_list;
 
-/// Freeze round candidate processing, selection, and commit application.
-pub mod freeze;
+/// Commit round candidate processing, selection, and commit application.
+pub mod commit_round;
 
 /// Conversation-event types produced for the integrator.
 pub mod events;
@@ -80,10 +81,10 @@ pub mod error;
 
 // Crate-root re-exports so flat-name imports resolve without the owning
 // module path.
+pub use commit_round::*;
 pub use conversation::*;
 pub use error::*;
 pub use events::*;
-pub use freeze::*;
 pub use peer_scoring::*;
 pub use process_result::*;
 pub use proposal_kind::*;

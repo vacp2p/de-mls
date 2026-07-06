@@ -10,7 +10,7 @@ pub enum ConversationState {
     /// Members have stopped accepting new proposals; commit candidates
     /// are buffered for deterministic selection.
     Freezing,
-    /// Selection phase: the freeze-round candidate has been picked and
+    /// Selection phase: the commit-round candidate has been picked and
     /// is being merged.
     Selection,
     /// Recovery: a steward election is in flight after a missed commit.
@@ -87,6 +87,19 @@ impl ConversationStateMachine {
 
     pub fn start_reelection(&mut self) {
         self.state = ConversationState::Reelection;
+    }
+
+    /// Re-enter `Freezing` from `Selection`, re-opening a Layer-3 recovery
+    /// collection window after a round produced no commit. Legal only from
+    /// `Selection` (the recovery retry path); a no-op from any other state.
+    /// Returns `true` on transition.
+    pub fn reopen_freezing(&mut self) -> bool {
+        if self.state == ConversationState::Selection {
+            self.state = ConversationState::Freezing;
+            true
+        } else {
+            false
+        }
     }
 }
 

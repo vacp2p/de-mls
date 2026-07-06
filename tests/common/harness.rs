@@ -289,6 +289,22 @@ impl Member {
         self.convo.as_ref().is_some_and(|c| c.is_steward())
     }
 
+    pub fn is_epoch_steward(&self) -> bool {
+        self.convo
+            .as_ref()
+            .and_then(|c| c.is_epoch_steward().ok())
+            .unwrap_or(false)
+    }
+
+    /// Ask a steward to re-send the `ConversationSync` (degraded-join recovery).
+    pub fn request_conversation_sync(&mut self) {
+        self.convo
+            .as_mut()
+            .expect("member has joined")
+            .request_conversation_sync(&self.integ.provider, &self.integ.signer)
+            .expect("request conversation sync");
+    }
+
     /// `true` once this member holds a conversation in `Working` (joiners
     /// without a welcome yet are not working).
     pub fn is_working(&self) -> bool {
@@ -416,6 +432,15 @@ impl Member {
             .expect("member has joined")
             .remove_member(&self.integ.provider, &self.integ.signer, member_id)
             .expect("remove member");
+    }
+
+    /// File a `Deadlock` ECP to open Layer-3 recovery (the manual trigger).
+    pub fn request_recovery(&mut self) {
+        self.convo
+            .as_mut()
+            .expect("member has joined")
+            .request_recovery(&self.integ.provider, &self.integ.signer)
+            .expect("request recovery");
     }
 
     /// Cast a manual vote on `proposal_id` (cancels any pending auto-vote).

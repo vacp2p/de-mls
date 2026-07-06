@@ -58,7 +58,7 @@ pub enum ConversationEvent {
     /// membership now reflects them.
     CommitApplied(Vec<ConversationUpdateRequest>),
 
-    /// The conversation moved into a new lifecycle phase, such as a freeze
+    /// The conversation moved into a new lifecycle phase, such as a commit
     /// round or steward selection — a window into where it sits in its
     /// commit-and-recovery cycle.
     PhaseChange(ConversationState),
@@ -86,8 +86,32 @@ pub enum ConversationEvent {
         timestamp: u64,
     },
 
-    /// During a freeze round, the tally of steward commit candidates moved:
-    /// `received` of `expected` are now in. It ticks as candidates arrive,
-    /// enough to drive a progress indicator.
-    FreezeProgress { received: usize, expected: usize },
+    /// Progress of a commit round: `received` of `expected` steward commit
+    /// candidates have arrived. Re-emitted whenever the count changes, so it
+    /// can back a progress indicator.
+    CommitRoundProgress { received: usize, expected: usize },
+
+    /// Layer-3 recovery opened: the steward list is deadlocked and the steward
+    /// gate is relaxed so any member MAY commit. The integrator decides the
+    /// policy — call [`crate::Conversation::commit_in_recovery`] to mint now,
+    /// or leave it to the auto-fallback that mints on every online node after
+    /// `recovery_auto_commit_delay`.
+    RecoveryModeOpened,
+
+    /// Layer-3 recovery gave up after `recovery_max_rounds` manual+auto rounds
+    /// produced no commit. The conversation leaves recovery for `Working`; the
+    /// integrator decides what an unrecoverable group does (alert, tear down).
+    /// Never emitted when `recovery_max_rounds` is `0` (retry forever).
+    RecoveryExhausted,
+
+    /// The local member joined but its welcome carried no `ConversationSync`, so
+    /// it has no steward list, scores, or protocol config — a degraded join. The
+    /// integrator drives [`crate::Conversation::request_conversation_sync`] (with
+    /// its own retry cadence) until a steward re-sends the sync.
+    ConversationSyncMissing,
+
+    /// A `ConversationSync` was adopted and the local member is now bootstrapped.
+    /// Ends any degraded state a [`Self::ConversationSyncMissing`] opened, so the
+    /// integrator stops requesting.
+    ConversationSyncApplied,
 }

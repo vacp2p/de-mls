@@ -87,7 +87,7 @@ where
 
         // A peer steward can reach consensus and broadcast its commit
         // candidate before our own outcome lands. Now that the approved
-        // queue is populated, replay any stashed candidate so the freeze
+        // queue is populated, replay any stashed candidate so the commit
         // round starts with it instead of empty (which would force a
         // needless reelection).
         self.replay_early_candidates()?;
@@ -101,11 +101,18 @@ where
                 self.handle_election_rejected(provider, signer)?;
             }
             ConsensusApplyResult::RecoveryModeOpened => {
+                // Open the collection window and notify the integrator; who mints
+                // is its policy (manual `commit_in_recovery`, or the auto-fallback
+                // in `advance_freezing`). No internal mint here.
                 self.enter_recovery_mode();
                 self.start_freezing_and_emit();
+                self.emit_event(ConversationEvent::RecoveryModeOpened);
             }
             ConsensusApplyResult::UrgentRemoval { target } => {
-                self.start_freezing_and_emit();
+                // A steward-gated removal: enter freezing and mint it now.
+                if let Some(event) = self.start_freezing() {
+                    self.on_freeze_entered(provider, signer, event)?;
+                }
                 self.refresh_stewards_after_removal(provider, &target, signer)?;
             }
             ConsensusApplyResult::QueuedRemoval { target } => {
@@ -132,8 +139,7 @@ where
         }
     }
 
-    /// Enter `Freezing` now, bypassing the inactivity timer — for outcomes
-    /// that need a commit immediately rather than on the next timeout.
+    /// Enter `Freezing` now, bypassing the inactivity timer, and announce it.
     fn start_freezing_and_emit(&mut self) {
         let transition = self.start_freezing();
         self.emit_phase_change(transition);
@@ -240,7 +246,11 @@ where
                 conversation = %self.conversation_id,
                 round, max, "election retries exhausted; escalating to Layer 3"
             );
-            if let Err(e) = self.initiate_deadlock_ecp(provider, signer) {
+            // Only the deterministic proposer auto-files, so simultaneous
+            // exhaustion across members doesn't produce one ECP each.
+            if self.is_deadlock_proposer()?
+                && let Err(e) = self.request_recovery(provider, signer)
+            {
                 error!(conversation = %self.conversation_id, error = %e, "Deadlock ECP filing failed");
                 self.emit_event(ConversationEvent::Error {
                     operation: "Reelection stuck".to_string(),

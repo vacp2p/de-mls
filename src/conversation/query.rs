@@ -46,10 +46,10 @@ where
         self.queues.pending_update_count()
     }
 
-    /// Freeze round progress: `(received, expected)`. Returns `(0, 0)` if not
+    /// Commit round progress: `(received, expected)`. Returns `(0, 0)` if not
     /// in freeze or no steward list is known.
-    pub fn freeze_candidate_count(&self) -> (usize, usize) {
-        let received = self.queues.freeze_candidate_count();
+    pub fn commit_candidate_count(&self) -> (usize, usize) {
+        let received = self.queues.commit_round.candidate_count();
         let expected = self
             .services
             .steward_list

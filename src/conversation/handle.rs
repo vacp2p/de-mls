@@ -18,13 +18,12 @@ use prost::Message;
 use tracing::info;
 
 use crate::{
-    BufferedCommitCandidate, ConsensusEngine, ConsensusPlugin, ConversationConfig,
-    ConversationError, ConversationEvent, ConversationQueues, ConversationState,
-    ConversationStateMachine, FreezeBufferOutcome, FreezeFinalizeResult, OperatingMode, Outbound,
-    PeerScoreStorage, PeerScoringService, PhaseTimer, ProcessResult, ProposalKind,
-    StewardListService, compute_commit_hash,
+    CommitRoundResult, ConsensusEngine, ConsensusPlugin, ConversationConfig, ConversationError,
+    ConversationEvent, ConversationQueues, ConversationState, ConversationStateMachine,
+    OperatingMode, Outbound, PeerScoreStorage, PeerScoringService, PhaseTimer, ProcessResult,
+    ProposalKind, StewardListService,
     consensus::outcome_bus::OutcomeReceiver,
-    decode_inbound_payload, finalize_freeze_round, member_set,
+    decode_inbound_payload, finalize_commit_round, member_set,
     mls_crypto::{CommitArtifacts, MlsCommitInput, MlsService},
     protos::de_mls::messages::v1::{
         AppMessage, CommitCandidate, conversation_update_request::Payload,
@@ -88,12 +87,12 @@ pub(crate) struct Timing {
     /// `tick_deadlines` which calls `consensus.handle_consensus_timeout`.
     /// Removed when the consensus session resolves naturally via `handle_consensus_outcome`.
     pub(crate) pending_consensus_timeouts: HashMap<u32, Instant>,
-    /// Last freeze-progress snapshot emitted as `ConversationEvent::FreezeProgress`.
+    /// Last commit-round progress snapshot emitted as `ConversationEvent::CommitRoundProgress`.
     /// `poll()` compares the current `(received, expected)` against this and
     /// emits a new event only when the count changes, avoiding repeated events
     /// on consecutive polling ticks that observe the same progress. Reset to
     /// `None` when the conversation leaves `Freezing`.
-    pub(crate) last_freeze_progress: Option<(usize, usize)>,
+    pub(crate) last_commit_round_progress: Option<(usize, usize)>,
     /// Anchor for the backup-steward proposal takeover: set when an
     /// unproposed buffered membership update first appears with no live
     /// proposal for it. A backup steward proposes the buffered update once
@@ -101,18 +100,25 @@ pub(crate) struct Timing {
     /// chance and stayed silent. Cleared when the buffer is drained or nothing
     /// is left to propose.
     pub(crate) buffered_propose_anchor: Option<Instant>,
+    /// Anchor for the backup-steward sync re-send takeover: set when a backup
+    /// first sees an unanswered `ConversationSyncRequest`. A backup re-sends the
+    /// sync once this is older than the recovery window — the epoch steward
+    /// stayed silent. Cleared when a `ConversationSync` is observed or the
+    /// takeover no longer applies.
+    pub(crate) sync_resend_anchor: Option<Instant>,
 }
 
 impl Timing {
     /// Fresh time-driven state: a cleared phase timer, no pending votes or
-    /// timeouts, and no recorded freeze progress.
+    /// timeouts, and no recorded commit-round progress.
     fn new() -> Self {
         Self {
             phase_timer: PhaseTimer::new(),
             pending_auto_votes: HashMap::new(),
             pending_consensus_timeouts: HashMap::new(),
-            last_freeze_progress: None,
+            last_commit_round_progress: None,
             buffered_propose_anchor: None,
+            sync_resend_anchor: None,
         }
     }
 }
@@ -131,6 +137,10 @@ pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoreStorage> {
     pub(crate) config: ConversationConfig,
     /// Authorization mode (RFC §Layer 3 Anti-Deadlock ECP).
     operating_mode: OperatingMode,
+    /// Manual+auto recovery rounds elapsed with no commit in the current
+    /// recovery episode. Reset on entry; compared against `recovery_max_rounds`
+    /// to decide the stop line. Meaningful only while in recovery.
+    pub(crate) recovery_rounds: u32,
     /// Time-driven state walked once per polling cycle.
     pub(crate) timing: Timing,
     /// Identity bytes of the local member, snapshotted from the `member_id`
@@ -175,6 +185,7 @@ where
             state_machine,
             config,
             operating_mode: OperatingMode::Normal,
+            recovery_rounds: 0,
             timing: Timing::new(),
             self_member_id,
             app_id,
@@ -191,6 +202,7 @@ where
 
     pub fn enter_recovery_mode(&mut self) {
         self.operating_mode = OperatingMode::Recovery;
+        self.recovery_rounds = 0;
     }
 
     pub fn exit_recovery_mode(&mut self) {
@@ -222,8 +234,10 @@ where
     // callsites don't destructure the conversation. Protocol logic lives in
     // sibling `core` modules; these are pure delegation.
 
-    /// Build a commit candidate.
-    pub(crate) fn create_commit_candidate<Pr>(
+    /// Build our own commit candidate from the approved proposals: mint the MLS
+    /// commit, buffer it locally, and return the wire bytes to broadcast. The
+    /// remote counterpart is `commit_round::receive_commit_candidate`.
+    pub(crate) fn build_local_candidate<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
@@ -335,32 +349,18 @@ where
             steward_member_id: self_member_id.to_vec(),
         };
 
-        // Welcome bytes are deferred until our merge so joiners can't
-        // advance epoch ahead of the steward.
-        let commit_hash = compute_commit_hash(&candidate.commit_message);
+        // Welcome bytes are buffered here but deferred until our merge, so
+        // joiners can't advance epoch ahead of the steward.
         let epoch = mls.current_epoch()?;
         let max_candidates = mls.members()?.len();
-        let outcome = self.queues.add_freeze_candidate(
-            BufferedCommitCandidate {
-                candidate_msg: candidate.clone(),
-                commit_hash,
-                is_local_candidate: true,
-                welcome_bytes: welcome,
-                joiner_identities,
-            },
+        self.queues.commit_round.add(
+            candidate.clone(),
+            true,
+            welcome,
+            joiner_identities,
             epoch,
             max_candidates,
         );
-        // Non-Buffered outcomes are legitimate runtime states (see
-        // `FreezeBufferOutcome`), not errors — log at debug.
-        if !matches!(outcome, FreezeBufferOutcome::Buffered) {
-            tracing::debug!(
-                conversation = self.queues.name(),
-                epoch,
-                ?outcome,
-                "local commit candidate not buffered",
-            );
-        }
 
         info!(
             conversation = self.queues.name(),
@@ -373,20 +373,95 @@ where
         Ok(Some(candidate_msg.encode_to_vec()))
     }
 
-    /// Finalize the active freeze round.
-    pub(crate) fn finalize_freeze_round<Pr>(
+    /// Finish entering `Freezing`: announce the phase change, and — if we're a
+    /// steward — mint our own commit candidate and broadcast it to open the
+    /// round. Non-stewards just announce and wait for a steward's candidate.
+    /// `event` is the transition returned by `start_freezing` /
+    /// `check_steward_inactivity`.
+    pub(crate) fn on_freeze_entered<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+        event: ConversationState,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        // Only stewards mint on freeze entry (non-stewards just enter the
+        // round); the recovery-relaxed gate lives in `build_local_candidate`.
+        if self.services.steward_list.is_steward(&self.self_member_id)
+            && let Err(e) = self.mint_and_broadcast_candidate(provider, signer)
+        {
+            tracing::error!(
+                conversation = %self.conversation_id,
+                error = %e,
+                "own commit candidate build failed"
+            );
+        }
+        self.emit_event(ConversationEvent::PhaseChange(event));
+        Ok(())
+    }
+
+    /// Mint this member's commit candidate from the approved batch and queue it
+    /// for broadcast. `Ok(true)` if a candidate was produced, `Ok(false)` if
+    /// there was nothing to commit (e.g. the batch is only our own removal).
+    /// Shared by the freeze-entry mint, the manual recovery commit, and the
+    /// recovery auto-fallback — the eligibility gate (stewards, or any member in
+    /// recovery) lives in [`Self::build_local_candidate`].
+    pub(crate) fn mint_and_broadcast_candidate<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<bool, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let self_member_id = Arc::clone(&self.self_member_id);
+        match self.build_local_candidate(provider, signer, &self_member_id)? {
+            Some(payload) => {
+                self.broadcast(payload);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Manually produce a Layer-3 recovery commit: mint our candidate and queue
+    /// its broadcast (only valid in recovery, where the steward gate is relaxed).
+    /// `true` if a candidate was produced, `false` if there was nothing to commit.
+    /// If no member calls this within `recovery_auto_commit_delay`, every online
+    /// node auto-mints instead.
+    pub fn commit_in_recovery<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<bool, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if !self.is_in_recovery_mode() {
+            return Err(ConversationError::NotInRecovery);
+        }
+        self.mint_and_broadcast_candidate(provider, signer)
+    }
+
+    /// Finalize the active commit round.
+    pub(crate) fn finalize_commit_round<Pr>(
         &mut self,
         provider: &Pr,
         allow_subset_candidates: bool,
         self_member_id: &[u8],
-    ) -> Result<FreezeFinalizeResult, ConversationError>
+    ) -> Result<CommitRoundResult, ConversationError>
     where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
         let in_recovery = self.operating_mode == OperatingMode::Recovery;
         let mls = &mut self.services.mls;
-        finalize_freeze_round(
+        finalize_commit_round(
             provider,
             &mut self.queues,
             mls,
@@ -401,7 +476,7 @@ where
     /// approved. Call after applying a consensus outcome. No-op when nothing
     /// is stashed.
     pub(crate) fn replay_early_candidates(&mut self) -> Result<(), ConversationError> {
-        replay_early_candidates(&mut self.queues, &mut self.services.mls)
+        replay_early_candidates(&mut self.queues, &self.services.mls)
     }
 
     /// Decode an inbound app-subtopic payload into a [`ProcessResult`].
@@ -619,8 +694,22 @@ where
         ConversationState::Reelection
     }
 
+    /// Re-open the Layer-3 recovery collection window: `Selection` → `Freezing`
+    /// with the phase timer re-anchored, so the next poll re-enters
+    /// `advance_freezing` and the manual/auto commit cycle retries. Returns
+    /// `Some(Freezing)` on transition; `None` from any other state.
+    pub(crate) fn reopen_recovery_window(&mut self) -> Option<ConversationState> {
+        if self.state_machine.reopen_freezing() {
+            self.timing.phase_timer.start();
+            info!(state = "Freezing", "state transition (recovery retry)");
+            Some(ConversationState::Freezing)
+        } else {
+            None
+        }
+    }
+
     /// `true` once the freeze window elapsed while in `Freezing`.
-    pub(crate) fn is_freeze_timed_out(&self) -> bool {
+    pub(crate) fn is_freeze_window_elapsed(&self) -> bool {
         self.current_state() == ConversationState::Freezing
             && self
                 .timing
@@ -701,15 +790,33 @@ mod tests {
         build_conversation(mls, steward_service_member())
     }
 
+    /// Seed one approved proposal so `has_proposals` is true, keeping a
+    /// commit-less recovery round on the retry path rather than the empty-exit.
+    fn seed_approved_work(conversation: &mut TestConversation) {
+        use crate::protos::de_mls::messages::v1::ViolationEvidence;
+        let req = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new())
+            .with_creator(vec![0x01])
+            .into_update_request()
+            .unwrap();
+        conversation.queues.insert_approved_proposal(1, req);
+    }
+
     fn build_conversation(mls: TestMls, steward_list: StewardListService) -> TestConversation {
+        build_conversation_scored::<InMemoryPeerScoreStorage>(mls, steward_list)
+    }
+
+    fn build_conversation_scored<Sc: PeerScoreStorage + Default>(
+        mls: TestMls,
+        steward_list: StewardListService,
+    ) -> Conversation<DefaultConsensusPlugin, Sc> {
         let (consensus, consensus_rx) = make_test_consensus_service();
         Conversation::new(
             "g".to_string(),
-            ConversationQueues::new("g"),
+            ConversationQueues::new("g", 10),
             ConversationServices {
                 mls,
                 scoring: PeerScoringService::new(
-                    InMemoryPeerScoreStorage::default(),
+                    Sc::default(),
                     HashMap::new(),
                     ScoringConfig::default(),
                 ),
@@ -722,6 +829,35 @@ mod tests {
             Arc::from(&b"test-member-id"[..]),
             Arc::from(&[0u8; 16][..]),
         )
+    }
+
+    /// A [`PeerScoreStorage`] whose every read/write fails — for asserting that
+    /// post-commit scoring errors don't wedge the state machine.
+    #[derive(Debug)]
+    struct ScoringFault;
+    impl std::fmt::Display for ScoringFault {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "scoring storage fault")
+        }
+    }
+    impl std::error::Error for ScoringFault {}
+
+    #[derive(Default)]
+    struct FailingScoreStorage;
+    impl PeerScoreStorage for FailingScoreStorage {
+        type Error = ScoringFault;
+        fn get(&self, _member_id: &[u8]) -> Result<Option<i64>, Self::Error> {
+            Err(ScoringFault)
+        }
+        fn set(&mut self, _member_id: &[u8], _score: i64) -> Result<(), Self::Error> {
+            Err(ScoringFault)
+        }
+        fn remove(&mut self, _member_id: &[u8]) -> Result<(), Self::Error> {
+            Err(ScoringFault)
+        }
+        fn all_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, Self::Error> {
+            Err(ScoringFault)
+        }
     }
 
     /// First tick with approved work auto-anchors the timer and returns `None`.
@@ -856,24 +992,24 @@ mod tests {
         conversation.unregister_consensus_timeout(999);
     }
 
-    // ── create_commit_candidate guards ──────────────────────────────────
+    // ── build_local_candidate guards ──────────────────────────────────
 
     #[test]
-    fn create_commit_candidate_errors_for_non_steward_outside_recovery() {
+    fn build_local_candidate_errors_for_non_steward_outside_recovery() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_member());
         let err = conversation
-            .create_commit_candidate(&provider, &signer, b"me")
+            .build_local_candidate(&provider, &signer, b"me")
             .expect_err("non-steward should be rejected");
         assert!(matches!(err, ConversationError::NotASteward));
     }
 
     #[test]
-    fn create_commit_candidate_errors_when_no_approved_proposals() {
+    fn build_local_candidate_errors_when_no_approved_proposals() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_steward(b"me"));
         let err = conversation
-            .create_commit_candidate(&provider, &signer, b"me")
+            .build_local_candidate(&provider, &signer, b"me")
             .expect_err("empty approved queue should be rejected");
         assert!(matches!(err, ConversationError::NoProposals));
     }
@@ -883,7 +1019,7 @@ mod tests {
     /// commit. The error carries the offending proposal ids so the
     /// orchestrator can drop them.
     #[test]
-    fn create_commit_candidate_errors_on_emergency_in_approved_queue() {
+    fn build_local_candidate_errors_on_emergency_in_approved_queue() {
         use crate::protos::de_mls::messages::v1::ViolationEvidence;
 
         let (mut conversation, provider, signer) =
@@ -895,11 +1031,348 @@ mod tests {
         conversation.queues.insert_approved_proposal(50, emergency);
 
         let err = conversation
-            .create_commit_candidate(&provider, &signer, b"me")
+            .build_local_candidate(&provider, &signer, b"me")
             .expect_err("emergency in approved queue should be rejected");
         let ConversationError::UnexpectedNonMlsProposals { proposal_ids } = err else {
             panic!("expected UnexpectedNonMlsProposals, got {err:?}");
         };
         assert_eq!(proposal_ids, vec![50]);
+    }
+
+    #[test]
+    fn commit_in_recovery_errors_outside_recovery() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+        let err = conversation
+            .commit_in_recovery(&provider, &signer)
+            .expect_err("commit_in_recovery outside recovery must be rejected");
+        assert!(matches!(err, ConversationError::NotInRecovery));
+    }
+
+    #[test]
+    fn commit_in_recovery_relaxes_the_steward_gate() {
+        // A non-steward: outside recovery it can't mint (`NotASteward`). In
+        // recovery the gate is relaxed, so the build gets past it and only stops
+        // at the empty approved queue — proving any member may commit in recovery.
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+        conversation.enter_recovery_mode();
+        let err = conversation
+            .commit_in_recovery(&provider, &signer)
+            .expect_err("empty approved queue should stop the build");
+        assert!(
+            matches!(err, ConversationError::NoProposals),
+            "recovery must relax the steward gate, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn merged_commit_reaches_working_even_if_scoring_storage_fails() {
+        let (mls, provider, signer) = make_creator_mls(b"test-member-id");
+        let mut conversation =
+            build_conversation_scored::<FailingScoreStorage>(mls, steward_service_member());
+        // Mid commit-round, as after a merge lands.
+        conversation.start_selection();
+
+        // A merged commit dispatches ConversationUpdated. The post-commit scoring
+        // sync fails here, but the transition must still land — no Selection wedge.
+        let _ = conversation.dispatch_inbound_result(
+            &provider,
+            ProcessResult::ConversationUpdated,
+            &signer,
+        );
+
+        assert_eq!(
+            conversation.current_state(),
+            ConversationState::Working,
+            "a merged commit reaches Working even when post-commit bookkeeping fails"
+        );
+    }
+
+    #[test]
+    fn recovery_auto_commit_waits_out_the_grace() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+        // A grace long enough that it won't elapse during the test.
+        conversation.config.recovery_auto_commit_delay = Some(Duration::from_secs(3600));
+        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.enter_recovery_mode();
+        conversation.start_freezing();
+        conversation.timing.phase_timer.start();
+        seed_approved_work(&mut conversation);
+
+        conversation.poll(&provider, &signer);
+
+        assert!(
+            !conversation.queues.commit_round.has_local_candidate(),
+            "no auto-mint before the grace elapses"
+        );
+        assert!(conversation.is_in_recovery_mode());
+    }
+
+    #[test]
+    fn is_deadlock_proposer_true_for_sole_steward() {
+        let conversation =
+            make_conversation_with_steward(steward_service_steward(b"test-member-id")).0;
+        assert!(
+            conversation.is_deadlock_proposer().unwrap(),
+            "the sole steward is the deterministic deadlock proposer"
+        );
+    }
+
+    #[test]
+    fn request_recovery_is_noop_while_in_recovery() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_steward(b"test-member-id"));
+        conversation.enter_recovery_mode();
+        conversation.request_recovery(&provider, &signer).unwrap();
+        assert!(
+            conversation.drain_outbound().is_empty(),
+            "no Deadlock ECP filed while already in recovery"
+        );
+    }
+
+    #[test]
+    fn recovery_with_empty_queue_exits_without_spinning() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+        conversation.config.recovery_auto_commit_delay = Some(Duration::ZERO);
+        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        // 0 would spin forever without the empty-queue exit.
+        conversation.config.recovery_max_rounds = 0;
+        conversation.enter_recovery_mode();
+        conversation.start_freezing();
+        conversation.timing.phase_timer.start();
+
+        // No approved proposals — nothing to recover.
+        conversation.poll(&provider, &signer);
+
+        assert!(
+            !conversation.is_in_recovery_mode(),
+            "recovery with an empty queue must exit, not spin"
+        );
+        assert_eq!(conversation.current_state(), ConversationState::Working);
+        assert!(
+            !conversation
+                .drain_events()
+                .iter()
+                .any(|e| matches!(e, ConversationEvent::RecoveryExhausted)),
+            "an empty-queue exit is not an exhaustion"
+        );
+    }
+
+    #[test]
+    fn recovery_retries_across_rounds_until_stop_line() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+        // Zero-length windows so each poll resolves one commit-less round.
+        // Manual-only (no auto-mint) with real pending work: rounds produce no
+        // commit and stay on the retry path.
+        conversation.config.recovery_auto_commit_delay = None;
+        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.config.recovery_max_rounds = 3;
+        conversation.enter_recovery_mode();
+        conversation.start_freezing();
+        conversation.timing.phase_timer.start();
+        seed_approved_work(&mut conversation);
+
+        // Rounds 1 and 2 land no commit but must re-open the collection window
+        // (Freezing) rather than wedging in Selection.
+        for round in 1..=2 {
+            conversation.poll(&provider, &signer);
+            assert!(
+                conversation.is_in_recovery_mode(),
+                "round {round}: recovery must stay open below the stop line"
+            );
+            assert_eq!(
+                conversation.current_state(),
+                ConversationState::Freezing,
+                "round {round}: recovery must re-open Freezing, not wedge in Selection"
+            );
+        }
+
+        // Round 3 hits recovery_max_rounds → exhausts back to Working.
+        conversation.poll(&provider, &signer);
+        assert!(
+            !conversation.is_in_recovery_mode(),
+            "recovery must exit at the stop line"
+        );
+        assert_eq!(conversation.current_state(), ConversationState::Working);
+        assert!(
+            conversation
+                .drain_events()
+                .iter()
+                .any(|e| matches!(e, ConversationEvent::RecoveryExhausted)),
+            "RecoveryExhausted must fire at the stop line"
+        );
+    }
+
+    #[test]
+    fn recovery_retries_forever_when_max_rounds_zero() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+        conversation.config.recovery_auto_commit_delay = None;
+        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.config.recovery_max_rounds = 0; // retry forever (default)
+        conversation.enter_recovery_mode();
+        conversation.start_freezing();
+        conversation.timing.phase_timer.start();
+        seed_approved_work(&mut conversation);
+
+        for round in 1..=5 {
+            conversation.poll(&provider, &signer);
+            assert!(
+                conversation.is_in_recovery_mode(),
+                "round {round}: recovery must stay open when max_rounds is 0"
+            );
+            assert_eq!(
+                conversation.current_state(),
+                ConversationState::Freezing,
+                "round {round}: recovery must re-open Freezing, not wedge in Selection"
+            );
+            assert!(
+                !conversation
+                    .drain_events()
+                    .iter()
+                    .any(|e| matches!(e, ConversationEvent::RecoveryExhausted)),
+                "round {round}: RecoveryExhausted must never fire when max_rounds is 0"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_exhausts_after_max_rounds() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+        // Manual-only with pending work and a 1-round stop line: the first
+        // commit-less round must exhaust recovery.
+        conversation.config.recovery_auto_commit_delay = None;
+        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.config.recovery_max_rounds = 1;
+        conversation.enter_recovery_mode();
+        conversation.start_freezing();
+        conversation.timing.phase_timer.start();
+        seed_approved_work(&mut conversation);
+
+        conversation.poll(&provider, &signer);
+
+        assert!(
+            !conversation.is_in_recovery_mode(),
+            "recovery must exit at the stop line"
+        );
+        assert_eq!(conversation.current_state(), ConversationState::Working);
+        assert!(
+            conversation
+                .drain_events()
+                .iter()
+                .any(|e| matches!(e, ConversationEvent::RecoveryExhausted)),
+            "RecoveryExhausted must be emitted"
+        );
+    }
+
+    // ── ConversationSync re-send ────────────────────────────────────────
+
+    /// The epoch steward answers a sync re-send request by broadcasting the
+    /// sync so a bootstrap-less joiner can adopt it.
+    #[test]
+    fn epoch_steward_answers_sync_request() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_steward(b"test-member-id"));
+
+        conversation
+            .on_conversation_sync_request(&provider, b"joiner", &signer)
+            .expect("answer request");
+
+        assert_eq!(
+            conversation.drain_outbound().len(),
+            1,
+            "epoch steward broadcasts one sync in response"
+        );
+    }
+
+    /// A member that isn't the epoch steward stays silent — a single answerer
+    /// keeps one sync on the wire per request.
+    #[test]
+    fn non_epoch_steward_ignores_sync_request() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+
+        conversation
+            .on_conversation_sync_request(&provider, b"joiner", &signer)
+            .expect("ignore request");
+
+        assert!(
+            conversation.drain_outbound().is_empty(),
+            "a non-steward must not answer"
+        );
+    }
+
+    /// Sharing is a no-op with no steward list to send yet.
+    #[test]
+    fn share_conversation_sync_is_noop_without_list() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+
+        conversation
+            .share_conversation_sync(&provider, &signer)
+            .expect("share sync");
+
+        assert!(
+            conversation.drain_outbound().is_empty(),
+            "no list means nothing to share"
+        );
+    }
+
+    /// Requesting a re-send puts one request on the wire for a steward to answer.
+    #[test]
+    fn request_conversation_sync_broadcasts_a_request() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+
+        conversation
+            .request_conversation_sync(&provider, &signer)
+            .expect("request sync");
+
+        assert_eq!(
+            conversation.drain_outbound().len(),
+            1,
+            "one sync request is broadcast"
+        );
+    }
+
+    /// The epoch steward answers reactively, so it never arms the backup-takeover
+    /// anchor — any stale anchor is cleared.
+    #[test]
+    fn epoch_steward_request_clears_takeover_anchor() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_steward(b"test-member-id"));
+        conversation.timing.sync_resend_anchor = Some(Instant::now());
+
+        conversation
+            .on_conversation_sync_request(&provider, b"joiner", &signer)
+            .expect("answer request");
+
+        assert!(
+            conversation.timing.sync_resend_anchor.is_none(),
+            "epoch steward answers now, leaving no pending takeover"
+        );
+        assert_eq!(conversation.drain_outbound().len(), 1);
+    }
+
+    /// A non-steward can't answer, so it never arms the takeover.
+    #[test]
+    fn non_steward_request_does_not_arm_takeover() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+
+        conversation
+            .on_conversation_sync_request(&provider, b"joiner", &signer)
+            .expect("ignore request");
+
+        assert!(
+            conversation.timing.sync_resend_anchor.is_none(),
+            "a non-steward never arms the takeover"
+        );
+        assert!(conversation.drain_outbound().is_empty());
     }
 }

@@ -40,6 +40,9 @@ pub enum ConversationError {
     #[error("Caller is not a steward")]
     NotASteward,
 
+    #[error("Not in Layer-3 recovery mode")]
+    NotInRecovery,
+
     #[error("No proposals available")]
     NoProposals,
 

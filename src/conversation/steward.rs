@@ -144,7 +144,7 @@ where
             .insert_pending_update(request.clone(), current_epoch);
 
         // Only the epoch steward proposes immediately. The buffer
-        // survives freeze rounds so a later steward can retry.
+        // survives commit rounds so a later steward can retry.
         let is_epoch_steward = {
             let eligible = self.queues.steward_eligibility(&members);
             self.services
@@ -290,12 +290,9 @@ where
         Ok(())
     }
 
-    /// Build an encrypted `ConversationSync` payload from the current
-    /// steward list + protocol config + peer scores + timing snapshot.
-    /// Returns `Ok(None)` when there's no steward list yet. The caller
-    /// owns delivery: broadcast it as an [`Outbound`](crate::Outbound)
-    /// or feed it into another channel. The post-commit join path bundles
-    /// the same payload into [`crate::ConversationEvent::WelcomeReady`].
+    /// Build the encrypted `ConversationSync` payload from the current steward
+    /// list, config, peer scores, and timing. Returns `Ok(None)` when there's
+    /// no list yet; the caller owns delivery.
     pub(crate) fn build_conversation_sync_payload<Pr>(
         &mut self,
         provider: &Pr,
@@ -361,6 +358,24 @@ where
         Ok(Some(
             self.mls_mut().build_message(provider, signer, &app_msg)?,
         ))
+    }
+
+    /// Broadcast the current `ConversationSync` so a bootstrap-less joiner can
+    /// adopt it — called by the epoch steward on a request, or by the integrator
+    /// directly. No-op when there's no list to share yet.
+    pub fn share_conversation_sync<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if let Some(payload) = self.build_conversation_sync_payload(provider, signer)? {
+            self.broadcast(payload);
+        }
+        Ok(())
     }
 
     /// Steward-only: file `ScoreBelowThreshold` ECPs for any member whose
@@ -544,10 +559,12 @@ where
         Ok(())
     }
 
-    /// Layer 3 escalation: file a `Deadlock` ECP after re-election retries
-    /// exhaust. Only the deterministic responsible proposer submits;
-    /// others no-op. On YES the ECP opens `recovery_mode`.
-    pub(crate) fn initiate_deadlock_ecp<Pr>(
+    /// Raise the Layer-3 deadlock signal: file a `Deadlock` ECP to open recovery
+    /// when the group is stuck with no steward committing. It only *proposes* —
+    /// the ECP needs ⌈2n/3⌉ consensus, so one member can't force it. On YES the
+    /// group enters recovery ([`crate::ConversationEvent::RecoveryModeOpened`]),
+    /// relaxing the steward gate. No-op while already in recovery.
+    pub fn request_recovery<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
@@ -556,47 +573,39 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let (is_authorized, self_id, epoch, conversation_id) = {
-            let mls = self.mls();
-            let mls_members = mls.members()?;
-            let epoch = mls.current_epoch()?;
-            let self_id: &[u8] = &self.self_member_id;
-            // Deadlock proposer = election proposer with the stricter
-            // predicate (MLS-present and not queued for removal).
-            let mls_set: std::collections::HashSet<&[u8]> =
-                mls_members.iter().map(Vec::as_slice).collect();
-            let conversation_ref = &self.queues;
-            let authorized = self
-                .services
-                .steward_list
-                .election_proposer(|c: &[u8]| {
-                    mls_set.contains(c) && !conversation_ref.has_approved_removal(c)
-                })
-                .is_some_and(|proposer| proposer == self_id);
-            (
-                authorized,
-                Arc::clone(&self.self_member_id),
-                epoch,
-                self.conversation_id.clone(),
-            )
-        };
-
-        if !is_authorized {
+        if self.is_in_recovery_mode() {
             return Ok(());
         }
-
+        let (self_id, epoch) = {
+            let mls = self.mls();
+            (Arc::clone(&self.self_member_id), mls.current_epoch()?)
+        };
         let request = ViolationEvidence::deadlock(epoch)
             .with_creator(self_id.to_vec())
             .into_update_request()?;
-
-        info!(
-            conversation = %conversation_id,
-            epoch, "initiating Deadlock ECP"
-        );
-
-        // Bundle YES — the proposer's observation that the deadlock is
-        // real is their vote.
+        info!(conversation = %self.conversation_id, epoch, "initiating Deadlock ECP");
+        // Bundled YES: filing it is this member's own vote that the deadlock is real.
         self.initiate_proposal(provider, request, CreatorVote::Yes, signer)?;
         Ok(())
+    }
+
+    /// Whether this member is the deterministic proposer that should auto-file
+    /// the `Deadlock` ECP when re-election exhausts — the election proposer,
+    /// restricted to a candidate that is MLS-present and not queued for removal.
+    /// Gates the automatic escalation so it doesn't file one ECP per member.
+    pub(crate) fn is_deadlock_proposer(&self) -> Result<bool, ConversationError> {
+        let mls = self.mls();
+        let mls_members = mls.members()?;
+        let self_id: &[u8] = &self.self_member_id;
+        let mls_set: std::collections::HashSet<&[u8]> =
+            mls_members.iter().map(Vec::as_slice).collect();
+        let conversation_ref = &self.queues;
+        Ok(self
+            .services
+            .steward_list
+            .election_proposer(|c: &[u8]| {
+                mls_set.contains(c) && !conversation_ref.has_approved_removal(c)
+            })
+            .is_some_and(|proposer| proposer == self_id))
     }
 }

@@ -24,9 +24,11 @@ mod util;
 
 pub use config::{
     ConversationConfig, DEFAULT_COMMIT_BATCH_MAX, DEFAULT_COMMIT_INACTIVITY_DURATION,
-    DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_ELECTION_VOTING_DELAY, DEFAULT_LIVENESS_CRITERIA_YES,
-    DEFAULT_MAX_CONSENSUS_SESSIONS, DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
-    DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_VOTING_DELAY,
+    DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_DEDUP_WINDOW, DEFAULT_ELECTION_VOTING_DELAY,
+    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_CONSENSUS_SESSIONS,
+    DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
+    DEFAULT_RECOVERY_AUTO_COMMIT_DELAY, DEFAULT_RECOVERY_INACTIVITY_DURATION,
+    DEFAULT_RECOVERY_MAX_ROUNDS, DEFAULT_VOTING_DELAY,
 };
 pub use display::{MemberRole, MessageType, message_types};
 pub(crate) use handle::ConversationServices;
@@ -34,6 +36,6 @@ pub use handle::{Conversation, LeaveOutcome};
 pub use inbound::{DispatchOutcome, decode_inbound_payload};
 pub use messaging::Outbound;
 pub use poll::PollOutcome;
-pub use queues::{BufferedCommitCandidate, ConversationQueues, FreezeBufferOutcome, ProposalId};
+pub use queues::{ConversationQueues, ProposalId};
 pub use state_machine::{ConversationState, ConversationStateMachine, OperatingMode};
 pub use util::{member_set, self_leave_proposal_id, target_member_id_of};

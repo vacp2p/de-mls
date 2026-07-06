@@ -17,9 +17,9 @@ use prost::Message;
 use tracing::{error, info, warn};
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
-    DispatchOutcome, FreezeFinalizeResult, FreezeOutcome, PeerScoreStorage, ScoreEvent, ScoreOp,
-    protos::de_mls::messages::v1::AppMessage,
+    CommitRoundOutcome, ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
+    ConversationState, DispatchOutcome, PeerScoreStorage, ScoreEvent, ScoreOp,
+    protos::de_mls::messages::v1::{AppMessage, MemberWelcome},
 };
 
 /// Summary returned by [`Conversation::poll`] after one polling pass.
@@ -61,13 +61,13 @@ where
 
         self.tick_deadlines(provider, signer);
 
-        match self.advance_freeze(provider, signer) {
+        match self.advance_freezing(provider, signer) {
             Ok(DispatchOutcome::LeaveRequested) => leave_requested = true,
             Ok(_) => {}
             Err(e) => warn!(
                 conversation = %self.conversation_id,
                 error = %e,
-                "advance_freeze error in poll"
+                "advance_freezing error in poll"
             ),
         }
 
@@ -76,6 +76,14 @@ where
                 conversation = %self.conversation_id,
                 error = %e,
                 "buffered-proposal drive error in poll"
+            );
+        }
+
+        if let Err(e) = self.drive_sync_resend(provider, signer) {
+            warn!(
+                conversation = %self.conversation_id,
+                error = %e,
+                "sync-resend drive error in poll"
             );
         }
 
@@ -94,13 +102,13 @@ where
     }
 
     /// Drive the freeze phase forward. While `Freezing`, emits
-    /// [`ConversationEvent::FreezeProgress`] as candidates arrive; once all
+    /// [`ConversationEvent::CommitRoundProgress`] as candidates arrive; once all
     /// expected candidates are in or the freeze window elapses, transitions
     /// to `Selection`, finalises the round, and dispatches the resulting
     /// [`crate::ProcessResult`]. Returns
     /// [`DispatchOutcome::LeaveRequested`] if the applied commit ejected the
     /// local member — `poll()` surfaces that as `leave_requested`.
-    fn advance_freeze<Pr>(
+    fn advance_freezing<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
@@ -111,54 +119,105 @@ where
     {
         let state = self.current_state();
         if state != ConversationState::Freezing {
-            self.timing.last_freeze_progress = None;
+            self.timing.last_commit_round_progress = None;
             return Ok(DispatchOutcome::Done);
         }
 
-        // Early selection: skip remaining freeze time if all expected
-        // stewards have submitted candidates.
-        let all_candidates_in = self
-            .services
-            .steward_list
-            .current_list()
-            .is_some_and(|list| self.queues.freeze_candidate_count() >= list.len());
+        let in_recovery = self.is_in_recovery_mode();
+        // Layer-3 auto-fallback: once the manual grace passes, every online node
+        // mints so a commit lands even if no member explicitly commits.
+        if in_recovery {
+            self.maybe_auto_commit_recovery(provider, signer);
+        }
 
-        if !all_candidates_in && !self.is_freeze_timed_out() {
+        let (received, expected) = self.commit_candidate_count();
+
+        // Early selection: skip remaining freeze time if all expected stewards
+        // have submitted. Not in recovery — there's no fixed roster to count
+        // against (any member may commit), so we wait out the window.
+        let all_candidates_in = !in_recovery
+            && self
+                .services
+                .steward_list
+                .current_list()
+                .is_some_and(|list| received >= list.len());
+
+        // Recovery reuses the shorter `recovery_inactivity_duration` as its
+        // collection settle (after the manual grace / auto-mint), rather than
+        // the full `freeze_duration`.
+        let window_elapsed = if in_recovery {
+            let window = self
+                .config
+                .recovery_auto_commit_delay
+                .unwrap_or(Duration::ZERO)
+                + self.config.recovery_inactivity_duration;
+            self.timing.phase_timer.elapsed_since_anchor(window)
+        } else {
+            self.is_freeze_window_elapsed()
+        };
+
+        if !all_candidates_in && !window_elapsed {
             // Still freezing — surface candidate progress when it changes.
-            let (received, expected) = self.freeze_candidate_count();
-            if self.timing.last_freeze_progress != Some((received, expected)) {
-                self.timing.last_freeze_progress = Some((received, expected));
-                self.emit_event(ConversationEvent::FreezeProgress { received, expected });
+            if self.timing.last_commit_round_progress != Some((received, expected)) {
+                self.timing.last_commit_round_progress = Some((received, expected));
+                self.emit_event(ConversationEvent::CommitRoundProgress { received, expected });
             }
             return Ok(DispatchOutcome::Done);
         }
-        self.timing.last_freeze_progress = None;
+        self.timing.last_commit_round_progress = None;
 
         let selection_event = self.start_selection();
         let has_proposals = self.queues.approved_proposals_count() > 0;
         self.emit_event(ConversationEvent::PhaseChange(selection_event));
 
         let conversation_id = self.conversation_id.clone();
-        let allow_subset = self.services.steward_list.config().allow_subset_candidates;
+        // Recovery accepts subset candidates: any member may commit whatever
+        // subset of the approved set they hold, and selection picks the best.
+        let allow_subset =
+            in_recovery || self.services.steward_list.config().allow_subset_candidates;
         let self_member_id = Arc::clone(&self.self_member_id);
-        let mut finalize_result =
-            match self.finalize_freeze_round(provider, allow_subset, &self_member_id) {
-                Ok(result) => result,
+        let mut finalize_result = match self.finalize_commit_round(
+            provider,
+            allow_subset,
+            &self_member_id,
+        ) {
+            Ok(result) => result,
+            Err(e) => {
+                // A finalize failure is our own local error, not the steward
+                // failing to commit; the NoCandidate path below would wrongly
+                // penalize the steward and re-elect. Surface it and retry safely.
+                error!(conversation = %conversation_id, error = %e, "commit-round finalize failed");
+                self.emit_event(ConversationEvent::Error {
+                    operation: "commit_round_finalize".to_owned(),
+                    message: e.to_string(),
+                });
+                return Ok(self.recover_from_finalize_error());
+            }
+        };
+        // Penalties for candidates we dropped while ranking. We saw the
+        // misbehavior directly, so no consensus round is needed to score it
+        // (RFC §Peer Scoring). If a penalty drops someone to the removal
+        // threshold, the sweep below (steward-only) files a removal proposal
+        // against them.
+        //
+        // On failure the penalties are lost, so surface it — but keep going,
+        // or the state machine never reaches its terminal transition.
+        // `score_ops_applied` gates the sweep on whether they actually landed.
+        let score_ops_applied = if finalize_result.score_ops.is_empty() {
+            false
+        } else {
+            match self.services.scoring.apply_ops(&finalize_result.score_ops) {
+                Ok(()) => true,
                 Err(e) => {
-                    error!(conversation = %conversation_id, error = %e, "freeze finalize failed");
-                    FreezeFinalizeResult::default()
+                    error!(conversation = %conversation_id, error = %e, "applying commit-round score ops failed");
+                    self.emit_event(ConversationEvent::Error {
+                        operation: "apply_commit_round_score_ops".to_owned(),
+                        message: e.to_string(),
+                    });
+                    false
                 }
-            };
-        // Apply locally-observed score events. These come from dropped
-        // candidates in the phase-3 loop (RFC §Peer Scoring: direct local
-        // observation, no ECP needed). The removal sweep below picks up any
-        // member these ops pushed below threshold.
-        let applied_score_ops = !finalize_result.score_ops.is_empty();
-        if applied_score_ops {
-            self.services
-                .scoring
-                .apply_ops(&finalize_result.score_ops)?;
-        }
+            }
+        };
 
         if !finalize_result.committed_batch.is_empty() {
             self.emit_event(ConversationEvent::CommitApplied(std::mem::take(
@@ -168,40 +227,26 @@ where
 
         // `check_and_initiate_score_removals` re-scans `members_below_threshold`
         // and calls `initiate_proposal` for any uncovered target.
-        if applied_score_ops
+        if score_ops_applied
             && let Err(e) = self.check_and_initiate_score_removals(provider, signer)
         {
-            error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze finalize)");
+            error!(conversation = %conversation_id, error = %e, "score-removal check failed (commit-round finalize)");
         }
 
         match finalize_result.outcome {
-            FreezeOutcome::Applied { result, welcome } => {
-                if let Some(mut welcome) = welcome {
-                    // Bundle ConversationSync (steward list + timing +
-                    // scores) into the welcome event so the integrator
-                    // delivers both atomically. The joiner replays the
-                    // sync payload through `handle_inbound` after MLS
-                    // attaches.
-                    //
-                    // Reconcile the list to the just-merged epoch first, so a
-                    // small group's sync carries the regenerated, joiner-
-                    // inclusive list rather than the pre-commit one. A large
-                    // group leaves the list for the post-commit election.
-                    welcome.conversation_sync_bytes = {
-                        let _ = self.reconcile_steward_list()?;
-                        self.build_conversation_sync_payload(provider, signer)?
-                            .unwrap_or_default()
-                    };
-                    // Broadcast the welcome to the group so every member can deliver it to the
-                    // joiners, then surface it locally as freshly minted.
-                    let broadcast_payload = AppMessage::from(welcome.clone()).encode_to_vec();
-                    self.emit_event(ConversationEvent::WelcomeReady {
-                        welcome,
-                        minted_locally: true,
-                    });
-                    self.broadcast(broadcast_payload);
+            CommitRoundOutcome::Applied { result, welcome } => {
+                // RFC Layer 3: the first valid commit ends recovery.
+                if in_recovery {
+                    self.exit_recovery_mode();
+                }
+                if let Some(welcome) = welcome {
+                    self.deliver_welcome(provider, signer, welcome);
                 }
 
+                // Always drive the terminal transition: the commit merged, so
+                // reach Working even if welcome/dispatch hit a snag.
+                // `dispatch_inbound_result` owns it (via `on_conversation_updated`);
+                // log rather than propagate so a merged commit can't wedge Selection.
                 let outcome = match self.dispatch_inbound_result(provider, result, signer) {
                     Ok(o) => o,
                     Err(e) => {
@@ -211,7 +256,25 @@ where
                 };
                 Ok(outcome)
             }
-            FreezeOutcome::NoCandidate => {
+            CommitRoundOutcome::NoCandidate => {
+                // Recovery: no commit landed this round (manual-only with no
+                // press, or everyone offline). Do NOT fall back to re-election;
+                // Layer 3 is already past it. Retry the manual+auto cycle until
+                // the integrator's stop-line policy (`recovery_max_rounds`) says
+                // to give up — `0` retries forever.
+                if in_recovery {
+                    // Nothing approved to commit: recovery lands stuck work, so
+                    // an empty queue has nothing to recover — exit instead of
+                    // spinning the retry loop forever.
+                    if !has_proposals {
+                        self.queues.commit_round.clear();
+                        self.exit_recovery_mode();
+                        let resumed = self.start_working();
+                        self.emit_event(ConversationEvent::PhaseChange(resumed));
+                        return Ok(DispatchOutcome::Done);
+                    }
+                    return Ok(self.retry_or_exhaust_recovery());
+                }
                 // `accuse_target` is `Some` only when we had approved proposals
                 // go unanswered *and* can attribute the miss to a live steward
                 // other than ourselves. Self-penalties are skipped — the
@@ -250,7 +313,7 @@ where
 
                     (event, accused)
                 } else {
-                    self.queues.clear_freeze_round();
+                    self.queues.commit_round.clear();
                     let event = self.start_working();
                     (event, false)
                 };
@@ -277,6 +340,100 @@ where
                 Ok(DispatchOutcome::Done)
             }
         }
+    }
+
+    /// Leave the commit round safely after a finalize failure — no commit landed
+    /// and no one is at fault. In recovery, count the round and retry-or-exhaust
+    /// (same stop-line as a commit-less round); otherwise resume Working.
+    fn recover_from_finalize_error(&mut self) -> DispatchOutcome {
+        if self.is_in_recovery_mode() {
+            self.retry_or_exhaust_recovery()
+        } else {
+            let resumed = self.start_working();
+            self.emit_event(ConversationEvent::PhaseChange(resumed));
+            DispatchOutcome::Done
+        }
+    }
+
+    /// Advance a commit-less recovery round: count it against the stop-line,
+    /// exhausting to Working (with `RecoveryExhausted`) at `recovery_max_rounds`,
+    /// otherwise re-opening the collection window (Selection → Freezing) to retry.
+    fn retry_or_exhaust_recovery(&mut self) -> DispatchOutcome {
+        self.recovery_rounds += 1;
+        let max = self.config.recovery_max_rounds;
+        if max != 0 && self.recovery_rounds >= max {
+            self.exit_recovery_mode();
+            let resumed = self.start_working();
+            self.emit_event(ConversationEvent::RecoveryExhausted);
+            self.emit_event(ConversationEvent::PhaseChange(resumed));
+        } else if let Some(reopened) = self.reopen_recovery_window() {
+            self.emit_event(ConversationEvent::PhaseChange(reopened));
+        }
+        DispatchOutcome::Done
+    }
+
+    /// Layer-3 auto-fallback: once `recovery_auto_commit_delay` has elapsed with
+    /// no local candidate (no member has committed yet), mint our own so a commit
+    /// can land. No-op when the policy is manual-only (`None`), before the grace,
+    /// or once we've already minted. Best-effort — build errors are logged, not
+    /// surfaced, so `poll` keeps driving.
+    fn maybe_auto_commit_recovery<Pr>(&mut self, provider: &Pr, signer: &impl Signer)
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let Some(delay) = self.config.recovery_auto_commit_delay else {
+            return;
+        };
+        if !self.timing.phase_timer.elapsed_since_anchor(delay)
+            || self.queues.commit_round.has_local_candidate()
+        {
+            return;
+        }
+        if let Err(e) = self.mint_and_broadcast_candidate(provider, signer) {
+            error!(
+                conversation = %self.conversation_id,
+                error = %e,
+                "recovery auto-commit failed"
+            );
+        }
+    }
+
+    /// Hand off the joiner welcome after a commit merged: attach the
+    /// `ConversationSync`, broadcast for relay, and surface it locally. Never
+    /// propagates — the commit merged, so a sync-build failure surfaces a
+    /// [`ConversationEvent::Error`] and ships `welcome_bytes` with empty sync
+    /// (the joiner attaches to MLS without it).
+    fn deliver_welcome<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+        mut welcome: MemberWelcome,
+    ) where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        // Reconcile to the just-merged epoch first so the sync carries the
+        // joiner-inclusive list, then build it.
+        let sync = self
+            .reconcile_steward_list()
+            .and_then(|_| self.build_conversation_sync_payload(provider, signer));
+        match sync {
+            Ok(sync_bytes) => welcome.conversation_sync_bytes = sync_bytes.unwrap_or_default(),
+            Err(e) => {
+                error!(conversation = %self.conversation_id, error = %e, "welcome ConversationSync build failed");
+                self.emit_event(ConversationEvent::Error {
+                    operation: "welcome_conversation_sync".to_owned(),
+                    message: e.to_string(),
+                });
+            }
+        }
+        let broadcast_payload = AppMessage::from(welcome.clone()).encode_to_vec();
+        self.emit_event(ConversationEvent::WelcomeReady {
+            welcome,
+            minted_locally: true,
+        });
+        self.broadcast(broadcast_payload);
     }
 
     /// Drive the backup-steward proposal takeover. The epoch steward sponsors
@@ -335,8 +492,42 @@ where
         self.drain_buffered_updates(provider, signer)
     }
 
+    /// Backup-steward sync re-send takeover. The epoch steward answers a
+    /// `ConversationSyncRequest` reactively; a backup arms `sync_resend_anchor`
+    /// and re-sends here only if no `ConversationSync` was observed within the
+    /// recovery window — so an offline epoch steward can't strand a bootstrap-
+    /// less joiner. Only a backup steward drives it; the anchor clears otherwise.
+    fn drive_sync_resend<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let Some(anchor) = self.timing.sync_resend_anchor else {
+            return Ok(());
+        };
+        // Only a backup takes over: the epoch steward already answered, and a
+        // plain member can't. Either way the anchor no longer applies.
+        if self.is_epoch_steward()? || !self.is_steward() {
+            self.timing.sync_resend_anchor = None;
+            return Ok(());
+        }
+        if Instant::now() < anchor + self.config.voting_inactivity_window() {
+            return Ok(());
+        }
+        self.timing.sync_resend_anchor = None;
+        info!(
+            conversation = %self.conversation_id,
+            "backup steward re-sending conversation sync: epoch steward silent past recovery window"
+        );
+        self.share_conversation_sync(provider, signer)
+    }
+
     /// Steward-inactivity freeze entry: once the inactivity timer fires with
-    /// approved work pending, start the freeze round and transition into
+    /// approved work pending, start the commit round and transition into
     /// `Freezing`. Stewards build their own commit candidate too;
     /// candidate-build failure is logged and the freeze transition proceeds
     /// (peers' candidates still get processed). No-ops outside `Working`
@@ -376,38 +567,13 @@ where
         let Some(event) = self.check_steward_inactivity(proposal_count, inactivity) else {
             return Ok(());
         };
-        let epoch = self.mls().current_epoch()?;
-        self.queues.start_freeze_round(epoch);
-
-        let self_member_id = Arc::clone(&self.self_member_id);
-        let outbound = if self.services.steward_list.is_steward(&self_member_id) {
-            match self.create_commit_candidate(provider, signer, &self_member_id) {
-                Ok(payload) => payload,
-                Err(e) => {
-                    error!(
-                        conversation = %self.conversation_id,
-                        error = %e,
-                        "commit candidate build failed"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
 
         info!(
             conversation = %self.conversation_id,
             approved = proposal_count,
             "steward inactivity transition"
         );
-
-        self.emit_event(ConversationEvent::PhaseChange(event));
-
-        if let Some(payload) = outbound {
-            self.broadcast(payload);
-        }
-
+        self.on_freeze_entered(provider, signer, event)?;
         Ok(())
     }
 }
