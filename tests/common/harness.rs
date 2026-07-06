@@ -418,6 +418,15 @@ impl Member {
             .expect("remove member");
     }
 
+    /// File a `Deadlock` ECP to open Layer-3 recovery (the manual trigger).
+    pub fn request_recovery(&mut self) {
+        self.convo
+            .as_mut()
+            .expect("member has joined")
+            .request_recovery(&self.integ.provider, &self.integ.signer)
+            .expect("request recovery");
+    }
+
     /// Cast a manual vote on `proposal_id` (cancels any pending auto-vote).
     pub fn vote(&mut self, proposal_id: u32, vote: bool) {
         self.convo
