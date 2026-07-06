@@ -787,6 +787,17 @@ mod tests {
         build_conversation(mls, steward_service_member())
     }
 
+    /// Seed one approved proposal so `has_proposals` is true, keeping a
+    /// commit-less recovery round on the retry path rather than the empty-exit.
+    fn seed_approved_work(conversation: &mut TestConversation) {
+        use crate::protos::de_mls::messages::v1::ViolationEvidence;
+        let req = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new())
+            .with_creator(vec![0x01])
+            .into_update_request()
+            .unwrap();
+        conversation.queues.insert_approved_proposal(1, req);
+    }
+
     fn build_conversation(mls: TestMls, steward_list: StewardListService) -> TestConversation {
         let (consensus, consensus_rx) = make_test_consensus_service();
         Conversation::new(
@@ -1017,16 +1028,48 @@ mod tests {
     }
 
     #[test]
+    fn recovery_with_empty_queue_exits_without_spinning() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+        conversation.config.recovery_auto_commit_delay = Some(Duration::ZERO);
+        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        // 0 would spin forever without the empty-queue exit.
+        conversation.config.recovery_max_rounds = 0;
+        conversation.enter_recovery_mode();
+        conversation.start_freezing();
+        conversation.timing.phase_timer.start();
+
+        // No approved proposals — nothing to recover.
+        conversation.poll(&provider, &signer);
+
+        assert!(
+            !conversation.is_in_recovery_mode(),
+            "recovery with an empty queue must exit, not spin"
+        );
+        assert_eq!(conversation.current_state(), ConversationState::Working);
+        assert!(
+            !conversation
+                .drain_events()
+                .iter()
+                .any(|e| matches!(e, ConversationEvent::RecoveryExhausted)),
+            "an empty-queue exit is not an exhaustion"
+        );
+    }
+
+    #[test]
     fn recovery_retries_across_rounds_until_stop_line() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_member());
         // Zero-length windows so each poll resolves one commit-less round.
-        conversation.config.recovery_auto_commit_delay = Some(Duration::ZERO);
+        // Manual-only (no auto-mint) with real pending work: rounds produce no
+        // commit and stay on the retry path.
+        conversation.config.recovery_auto_commit_delay = None;
         conversation.config.recovery_inactivity_duration = Duration::ZERO;
         conversation.config.recovery_max_rounds = 3;
         conversation.enter_recovery_mode();
         conversation.start_freezing();
         conversation.timing.phase_timer.start();
+        seed_approved_work(&mut conversation);
 
         // Rounds 1 and 2 land no commit but must re-open the collection window
         // (Freezing) rather than wedging in Selection.
@@ -1063,12 +1106,13 @@ mod tests {
     fn recovery_retries_forever_when_max_rounds_zero() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_member());
-        conversation.config.recovery_auto_commit_delay = Some(Duration::ZERO);
+        conversation.config.recovery_auto_commit_delay = None;
         conversation.config.recovery_inactivity_duration = Duration::ZERO;
         conversation.config.recovery_max_rounds = 0; // retry forever (default)
         conversation.enter_recovery_mode();
         conversation.start_freezing();
         conversation.timing.phase_timer.start();
+        seed_approved_work(&mut conversation);
 
         for round in 1..=5 {
             conversation.poll(&provider, &signer);
@@ -1095,14 +1139,15 @@ mod tests {
     fn recovery_exhausts_after_max_rounds() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_member());
-        // Zero-length windows so a round resolves in one poll, with a 1-round
-        // stop line: the first commit-less round must exhaust recovery.
-        conversation.config.recovery_auto_commit_delay = Some(Duration::ZERO);
+        // Manual-only with pending work and a 1-round stop line: the first
+        // commit-less round must exhaust recovery.
+        conversation.config.recovery_auto_commit_delay = None;
         conversation.config.recovery_inactivity_duration = Duration::ZERO;
         conversation.config.recovery_max_rounds = 1;
         conversation.enter_recovery_mode();
         conversation.start_freezing();
         conversation.timing.phase_timer.start();
+        seed_approved_work(&mut conversation);
 
         conversation.poll(&provider, &signer);
 

@@ -260,6 +260,16 @@ where
                 // the integrator's stop-line policy (`recovery_max_rounds`) says
                 // to give up — `0` retries forever.
                 if in_recovery {
+                    // Nothing approved to commit: recovery lands stuck work, so
+                    // an empty queue has nothing to recover — exit instead of
+                    // spinning the retry loop forever.
+                    if !has_proposals {
+                        self.queues.commit_round.clear();
+                        self.exit_recovery_mode();
+                        let resumed = self.start_working();
+                        self.emit_event(ConversationEvent::PhaseChange(resumed));
+                        return Ok(DispatchOutcome::Done);
+                    }
                     self.recovery_rounds += 1;
                     let max = self.config.recovery_max_rounds;
                     if max != 0 && self.recovery_rounds >= max {
