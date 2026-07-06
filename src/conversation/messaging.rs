@@ -12,7 +12,8 @@ use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
     PeerScoreStorage,
     protos::de_mls::messages::v1::{
-        AppMessage, ConversationMessage, ConversationUpdateRequest, MemberInvite,
+        AppMessage, ConversationMessage, ConversationSyncRequest, ConversationUpdateRequest,
+        MemberInvite,
     },
 };
 
@@ -68,6 +69,25 @@ where
             ..Default::default()
         }
         .into();
+        let payload = self.mls_mut().build_message(provider, signer, &app_msg)?;
+        self.broadcast(payload);
+        Ok(())
+    }
+
+    /// Ask a steward to re-send the `ConversationSync` after a
+    /// [`crate::ConversationEvent::ConversationSyncMissing`];
+    /// [`crate::ConversationEvent::ConversationSyncApplied`] signals when to
+    /// stop. MLS-encrypted, so only a steward can answer.
+    pub fn request_conversation_sync<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let app_msg: AppMessage = ConversationSyncRequest {}.into();
         let payload = self.mls_mut().build_message(provider, signer, &app_msg)?;
         self.broadcast(payload);
         Ok(())

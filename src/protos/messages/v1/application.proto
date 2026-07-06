@@ -21,6 +21,7 @@ message AppMessage {
     // not just the committing steward — can deliver it to the joiners.
     MemberWelcome member_welcome = 10;
     EventMembershipChange membership_change = 11;
+    ConversationSyncRequest conversation_sync_request = 12;
   }
 }
 
@@ -148,6 +149,11 @@ message ConversationSync {
   // steward drops it.
   uint32 pending_update_max_epochs = 12;
 }
+
+// A member that joined without a bootstrap asks a steward to re-send the
+// ConversationSync. Carries no fields: MLS decryption scopes it to this
+// conversation and the authenticated sender identifies the requester.
+message ConversationSyncRequest {}
 
 message PeerScore {
   bytes member_id = 1;

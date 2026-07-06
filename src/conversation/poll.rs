@@ -405,8 +405,13 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        match self.reconcile_and_build_sync(provider, signer) {
-            Ok(sync_bytes) => welcome.conversation_sync_bytes = sync_bytes,
+        // Reconcile to the just-merged epoch first so the sync carries the
+        // joiner-inclusive list, then build it.
+        let sync = self
+            .reconcile_steward_list()
+            .and_then(|_| self.build_conversation_sync_payload(provider, signer));
+        match sync {
+            Ok(sync_bytes) => welcome.conversation_sync_bytes = sync_bytes.unwrap_or_default(),
             Err(e) => {
                 error!(conversation = %self.conversation_id, error = %e, "welcome ConversationSync build failed");
                 self.emit_event(ConversationEvent::Error {
@@ -421,24 +426,6 @@ where
             minted_locally: true,
         });
         self.broadcast(broadcast_payload);
-    }
-
-    /// Reconcile the steward list to the just-merged epoch, then build the
-    /// joiner's `ConversationSync` bytes — reconciling first so the sync carries
-    /// the joiner-inclusive list. Empty bytes when there's no list yet.
-    fn reconcile_and_build_sync<Pr>(
-        &mut self,
-        provider: &Pr,
-        signer: &impl Signer,
-    ) -> Result<Vec<u8>, ConversationError>
-    where
-        Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
-    {
-        self.reconcile_steward_list()?;
-        Ok(self
-            .build_conversation_sync_payload(provider, signer)?
-            .unwrap_or_default())
     }
 
     /// Drive the backup-steward proposal takeover. The epoch steward sponsors

@@ -134,6 +134,11 @@ where
             );
             return Ok(ProcessResult::Noop(NoopReason::FastPathRejected));
         }
+        // A sync re-send request: the MLS-authenticated sender is the
+        // requester, so capture it here rather than trust a wire field.
+        Some(app_message::Payload::ConversationSyncRequest(_)) => {
+            return Ok(ProcessResult::ConversationSyncRequested { requester: sender });
+        }
         // Drop BanRequests whose target isn't in the conversation — saves a
         // useless consensus round.
         Some(app_message::Payload::BanRequest(ban)) if !mls.is_member(&ban.user_to_ban) => {
@@ -254,6 +259,10 @@ where
             }
             ProcessResult::ConversationSyncReceived(sync) => {
                 self.on_conversation_sync(*sync)?;
+                Ok(DispatchOutcome::Done)
+            }
+            ProcessResult::ConversationSyncRequested { requester } => {
+                self.on_conversation_sync_request(provider, &requester, signer)?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::WelcomeBroadcastReceived(welcome) => {
@@ -516,6 +525,7 @@ where
 
         let sn = sync.steward_members.len();
         self.apply_conversation_sync_to_entry(&sync)?;
+        self.emit_event(ConversationEvent::ConversationSyncApplied);
 
         info!(
             conversation = %conversation_id,
@@ -526,6 +536,31 @@ where
             "conversation sync applied"
         );
         Ok(())
+    }
+
+    /// Answer a sync re-send request: only the epoch steward responds, and the
+    /// list-present guard in `on_conversation_sync` means only the degraded
+    /// requester adopts the broadcast. Plain members ignore it (backup takeover
+    /// is future work).
+    pub(crate) fn on_conversation_sync_request<Pr>(
+        &mut self,
+        provider: &Pr,
+        requester: &[u8],
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if !self.is_epoch_steward()? {
+            return Ok(());
+        }
+        tracing::debug!(
+            conversation = %self.conversation_id,
+            requester = ?requester,
+            "epoch steward re-sending conversation sync"
+        );
+        self.share_conversation_sync(provider, signer)
     }
 
     fn apply_conversation_sync_to_entry(

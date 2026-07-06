@@ -106,7 +106,12 @@ pub enum ConversationEvent {
 
     /// The local member joined but its welcome carried no `ConversationSync`, so
     /// it has no steward list, scores, or protocol config — a degraded join. The
-    /// integrator drives `request_conversation_sync` (with its own retry cadence)
-    /// until a steward re-sends the sync.
+    /// integrator drives [`crate::Conversation::request_conversation_sync`] (with
+    /// its own retry cadence) until a steward re-sends the sync.
     ConversationSyncMissing,
+
+    /// A `ConversationSync` was adopted and the local member is now bootstrapped.
+    /// Ends any degraded state a [`Self::ConversationSyncMissing`] opened, so the
+    /// integrator stops requesting.
+    ConversationSyncApplied,
 }

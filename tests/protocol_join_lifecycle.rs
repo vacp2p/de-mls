@@ -4,7 +4,7 @@
 mod common;
 
 use common::harness::{TestHarness, fast_config};
-use de_mls::StewardListConfig;
+use de_mls::{ConversationEvent, StewardListConfig};
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -55,5 +55,35 @@ fn evicted_member_rejoins_at_a_later_epoch() {
             .iter()
             .any(|m| m == &target_id),
         "the steward sees the rejoined identity back in the member set"
+    );
+}
+
+/// A joiner adopts the steward list from its welcome sync and reports the
+/// healthy bootstrap — never the degraded `ConversationSyncMissing`.
+#[test]
+fn bootstrap_joiner_reports_sync_applied() {
+    let h = TestHarness::<2>::bootstrap(
+        [ALICE, BOB],
+        "sync-applied",
+        fast_config(),
+        StewardListConfig::new(1, 5).unwrap(),
+    );
+
+    // Index 0 creates the group and builds the list itself; index 1 joins and
+    // adopts the list from the welcome sync.
+    let joiner = h.member(1);
+    assert!(
+        joiner
+            .events()
+            .iter()
+            .any(|e| matches!(e, ConversationEvent::ConversationSyncApplied)),
+        "joiner reports the sync it adopted from the welcome"
+    );
+    assert!(
+        !joiner
+            .events()
+            .iter()
+            .any(|e| matches!(e, ConversationEvent::ConversationSyncMissing)),
+        "a healthy join is not degraded"
     );
 }

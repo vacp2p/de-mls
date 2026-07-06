@@ -1262,4 +1262,74 @@ mod tests {
             "RecoveryExhausted must be emitted"
         );
     }
+
+    // ── ConversationSync re-send ────────────────────────────────────────
+
+    /// The epoch steward answers a sync re-send request by broadcasting the
+    /// sync so a bootstrap-less joiner can adopt it.
+    #[test]
+    fn epoch_steward_answers_sync_request() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_steward(b"test-member-id"));
+
+        conversation
+            .on_conversation_sync_request(&provider, b"joiner", &signer)
+            .expect("answer request");
+
+        assert_eq!(
+            conversation.drain_outbound().len(),
+            1,
+            "epoch steward broadcasts one sync in response"
+        );
+    }
+
+    /// A member that isn't the epoch steward stays silent — a single answerer
+    /// keeps one sync on the wire per request.
+    #[test]
+    fn non_epoch_steward_ignores_sync_request() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+
+        conversation
+            .on_conversation_sync_request(&provider, b"joiner", &signer)
+            .expect("ignore request");
+
+        assert!(
+            conversation.drain_outbound().is_empty(),
+            "a non-steward must not answer"
+        );
+    }
+
+    /// Sharing is a no-op with no steward list to send yet.
+    #[test]
+    fn share_conversation_sync_is_noop_without_list() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+
+        conversation
+            .share_conversation_sync(&provider, &signer)
+            .expect("share sync");
+
+        assert!(
+            conversation.drain_outbound().is_empty(),
+            "no list means nothing to share"
+        );
+    }
+
+    /// Requesting a re-send puts one request on the wire for a steward to answer.
+    #[test]
+    fn request_conversation_sync_broadcasts_a_request() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+
+        conversation
+            .request_conversation_sync(&provider, &signer)
+            .expect("request sync");
+
+        assert_eq!(
+            conversation.drain_outbound().len(),
+            1,
+            "one sync request is broadcast"
+        );
+    }
 }

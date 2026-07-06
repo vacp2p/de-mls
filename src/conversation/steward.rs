@@ -290,12 +290,9 @@ where
         Ok(())
     }
 
-    /// Build an encrypted `ConversationSync` payload from the current
-    /// steward list + protocol config + peer scores + timing snapshot.
-    /// Returns `Ok(None)` when there's no steward list yet. The caller
-    /// owns delivery: broadcast it as an [`Outbound`](crate::Outbound)
-    /// or feed it into another channel. The post-commit join path bundles
-    /// the same payload into [`crate::ConversationEvent::WelcomeReady`].
+    /// Build the encrypted `ConversationSync` payload from the current steward
+    /// list, config, peer scores, and timing. Returns `Ok(None)` when there's
+    /// no list yet; the caller owns delivery.
     pub(crate) fn build_conversation_sync_payload<Pr>(
         &mut self,
         provider: &Pr,
@@ -361,6 +358,24 @@ where
         Ok(Some(
             self.mls_mut().build_message(provider, signer, &app_msg)?,
         ))
+    }
+
+    /// Broadcast the current `ConversationSync` so a bootstrap-less joiner can
+    /// adopt it — called by the epoch steward on a request, or by the integrator
+    /// directly. No-op when there's no list to share yet.
+    pub fn share_conversation_sync<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if let Some(payload) = self.build_conversation_sync_payload(provider, signer)? {
+            self.broadcast(payload);
+        }
+        Ok(())
     }
 
     /// Steward-only: file `ScoreBelowThreshold` ECPs for any member whose
