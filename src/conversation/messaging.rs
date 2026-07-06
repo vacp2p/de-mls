@@ -10,7 +10,7 @@ use tracing::info;
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
-    PeerScoreStorage,
+    PeerScoreStorage, WallClock,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, ConversationSyncRequest, ConversationUpdateRequest,
         MemberInvite,
@@ -32,10 +32,11 @@ pub struct Outbound {
     pub payload: Vec<u8>,
 }
 
-impl<C, Sc> Conversation<C, Sc>
+impl<C, Sc, T> Conversation<C, Sc, T>
 where
     C: ConsensusPlugin,
     Sc: PeerScoreStorage,
+    T: WallClock,
 {
     /// Buffer a chat message for broadcast. The conversation never sends — the
     /// message is enqueued and the integrator drains it via

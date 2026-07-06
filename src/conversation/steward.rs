@@ -11,7 +11,7 @@ use tracing::{error, info};
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
-    ElectionDecision, ElectionSkip, PeerScoreStorage, member_set,
+    ElectionDecision, ElectionSkip, PeerScoreStorage, WallClock, member_set,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
         StewardElectionProposal, TimingConfig, ViolationEvidence, conversation_update_request,
@@ -31,10 +31,11 @@ pub(crate) enum StewardListReconcile {
     NeedsElection,
 }
 
-impl<C, Sc> Conversation<C, Sc>
+impl<C, Sc, T> Conversation<C, Sc, T>
 where
     C: ConsensusPlugin,
     Sc: PeerScoreStorage,
+    T: WallClock,
 {
     // ── Public API ───────────────────────────────────────────────────
 

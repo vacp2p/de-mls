@@ -20,7 +20,6 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
-use std::thread::sleep;
 use std::time::Duration;
 
 use alloy::signers::local::PrivateKeySigner;
@@ -35,18 +34,19 @@ use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
 };
 use de_mls::{Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome};
-use de_mls::{ConversationEvent, ConversationState, ScoringConfig, StewardListConfig};
+use de_mls::{ConversationEvent, ConversationState, MockClock, ScoringConfig, StewardListConfig};
 
 use crate::common::test_mls_group_config;
 use crate::common::{
     MintedKeyPackage, make_scoring, mint_key_package, test_credential, wallet::WalletMemberId,
 };
 
-/// Per-conversation MLS service stack the harness runs.
-pub type TestConversation = Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage>;
+/// Per-conversation MLS service stack the harness runs, on virtual time.
+pub type TestConversation =
+    Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, MockClock>;
 
-/// Fast sub-second timing so a real-wall-clock polling loop converges in a
-/// handful of rounds. Mirror of the gateway suite's `fast_test_config`.
+/// Fast sub-second timing so the virtual-clock polling loop converges in a
+/// handful of rounds.
 pub fn fast_config() -> ConversationConfig {
     ConversationConfig {
         commit_inactivity_duration: Duration::from_millis(50),
@@ -73,6 +73,9 @@ struct Integrator {
     /// model). The creator seeds its group into it; a joiner mints its key
     /// package into it and later opens the welcome from it.
     provider: OpenMlsRustCrypto,
+    /// This member's virtual clock. The harness keeps this handle and moves
+    /// it forward each driving round; the conversation owns a clone.
+    clock: MockClock,
 }
 
 impl Integrator {
@@ -88,6 +91,7 @@ impl Integrator {
             scoring_config: ScoringConfig::default(),
             steward_list_config,
             provider: OpenMlsRustCrypto::default(),
+            clock: MockClock::new(),
         }
     }
 
@@ -155,6 +159,7 @@ impl Member {
             &integ.signer,
             &integ.consensus,
             scoring,
+            integ.clock.clone(),
             integ.app_id(),
             config.clone(),
         )
@@ -476,6 +481,13 @@ impl Member {
         self.drain_outbound()
     }
 
+    /// Move this member's virtual clock forward by `d` — for tests that
+    /// drive one member's `poll` directly instead of going through
+    /// [`TestHarness::process`].
+    pub fn advance_clock(&self, d: Duration) {
+        self.integ.clock.advance(d);
+    }
+
     /// Deliver a raw payload to this member as if it arrived from `sender`.
     /// No-op when the member hasn't joined.
     pub fn deliver_raw(&mut self, sender: &[u8], payload: &[u8]) {
@@ -599,6 +611,7 @@ impl Member {
             &welcome.conversation_sync_bytes,
             &self.integ.consensus,
             scoring,
+            self.integ.clock.clone(),
             self.integ.app_id(),
             self.pending_config.clone(),
         ) {
@@ -782,14 +795,17 @@ impl<const N: usize> TestHarness<N> {
         &self.members
     }
 
-    /// One driving round: sleep a step, poll every member, route welcomes,
-    /// then broadcast all buffered outbound. Welcomes are routed before app
-    /// traffic so a joiner's MLS is attached before same-round commit/election
-    /// packets arrive. Events are drained twice — before and after relay — so
-    /// phase/chat events emitted by this round's welcome acceptance and
-    /// delivery land in the log before the next predicate check.
+    /// One driving round: advance every member's virtual clock a step, poll
+    /// every member, route welcomes, then broadcast all buffered outbound.
+    /// Welcomes are routed before app traffic so a joiner's MLS is attached
+    /// before same-round commit/election packets arrive. Events are drained
+    /// twice — before and after relay — so phase/chat events emitted by this
+    /// round's welcome acceptance and delivery land in the log before the
+    /// next predicate check.
     pub fn process(&mut self, step: Duration) {
-        sleep(step);
+        for member in &self.members {
+            member.integ.clock.advance(step);
+        }
         for member in &mut self.members {
             let _ = member.poll();
         }
@@ -830,8 +846,9 @@ impl<const N: usize> TestHarness<N> {
         }
     }
 
-    /// Drive `process` in 50 ms steps until `predicate` holds, panicking after
-    /// a fixed timeout. `label` is logged for diagnosis.
+    /// Drive `process` in 50 ms virtual-time steps until `predicate` holds,
+    /// panicking after a fixed virtual-time budget. `label` is logged for
+    /// diagnosis.
     pub fn process_until(&mut self, label: &str, predicate: impl Fn(&Self) -> bool) {
         const TIMEOUT: Duration = Duration::from_secs(30);
         const STEP: Duration = Duration::from_millis(50);

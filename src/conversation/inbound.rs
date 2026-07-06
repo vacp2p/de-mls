@@ -15,7 +15,6 @@
 //!   the consensus scope.
 
 use std::error::Error as StdError;
-use std::time::Instant;
 
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
@@ -26,7 +25,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     ConsensusPlugin, ConversationEvent, PeerScoreStorage, ProcessResult, ProposalKind,
-    ScoreSnapshot, StewardList, StewardListConfig,
+    ScoreSnapshot, StewardList, StewardListConfig, WallClock,
     commit_round::{compute_commit_hash, receive_commit_candidate},
     conversation::{ConversationQueues, member_set},
     mls_crypto::{DecryptedMessage, MlsService},
@@ -168,10 +167,11 @@ pub enum DispatchOutcome {
     LeaveRequested,
 }
 
-impl<C, Sc> Conversation<C, Sc>
+impl<C, Sc, T> Conversation<C, Sc, T>
 where
     C: ConsensusPlugin,
     Sc: PeerScoreStorage,
+    T: WallClock,
 {
     /// Decrypt and dispatch an inbound conversation payload. Drops self-echoes.
     /// Runs the full dispatch chain internally. Returns
@@ -340,9 +340,11 @@ where
         let expected_voters = proposal.expected_voters_count;
 
         let scope = self.conversation_id.clone();
-        self.services
-            .consensus
-            .process_incoming_proposal(&scope, proposal)?;
+        self.services.consensus.process_incoming_proposal(
+            &scope,
+            proposal,
+            self.clock.now().as_secs(),
+        )?;
         // Skip the vote request + auto-vote for fast-path proposals: the
         // creator's bundled YES already resolved the consensus session, so peers have
         // nothing to vote on.
@@ -567,7 +569,7 @@ where
         }
         // A backup arms the takeover timer; a plain member can't answer.
         if self.is_steward() && self.timing.sync_resend_anchor.is_none() {
-            self.timing.sync_resend_anchor = Some(Instant::now());
+            self.timing.sync_resend_anchor = Some(self.clock.now());
         }
         Ok(())
     }

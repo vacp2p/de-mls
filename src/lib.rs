@@ -32,13 +32,14 @@
 //! ## Quick Example
 //!
 //! ```ignore
-//! use de_mls::Conversation;
+//! use de_mls::{Conversation, SystemClock};
 //!
 //! // Build a conversation from direct arguments: the OpenMLS provider,
-//! // credential + ciphersuite, the plug-in instances, and a consensus service.
+//! // credential + ciphersuite, the plug-in instances, a consensus service,
+//! // and the time source (SystemClock in production, MockClock in tests).
 //! let mut conversation = Conversation::create(
 //!     "de-mls-test", member_id, provider, credential, ciphersuite, &signer,
-//!     consensus, scoring, app_id, config,
+//!     consensus, scoring, SystemClock::new(), app_id, config,
 //! )?;
 //!
 //! // Send a chat message — buffered, never auto-sent.
@@ -76,6 +77,10 @@ pub mod proposal_kind;
 /// Wall-clock anchor combined with the conversation state machine.
 pub mod phase_timer;
 
+/// Caller-owned time source: [`WallClock`] trait, [`Timestamp`],
+/// [`SystemClock`], and the test-oriented [`MockClock`].
+pub mod wall_clock;
+
 /// Library error types.
 pub mod error;
 
@@ -96,6 +101,8 @@ pub(crate) use consensus::{ConsensusApplyResult, ConsensusEngine, apply_consensu
 pub use consensus::{ConsensusPlugin, CreatorVote};
 
 pub(crate) use phase_timer::PhaseTimer;
+
+pub use wall_clock::{MockClock, SystemClock, Timestamp, WallClock};
 
 /// MLS cryptographic operations: OpenMLS wrapper for encryption/decryption.
 pub mod mls_crypto;

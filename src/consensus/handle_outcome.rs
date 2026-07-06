@@ -11,16 +11,18 @@ use tracing::{error, info};
 
 use crate::{
     ConsensusApplyResult, ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
-    ConversationState, PeerScoreStorage, ScoreOp, apply_consensus_result, emergency_score_ops,
+    ConversationState, PeerScoreStorage, ScoreOp, WallClock, apply_consensus_result,
+    emergency_score_ops,
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
     },
 };
 
-impl<C, Sc> Conversation<C, Sc>
+impl<C, Sc, T> Conversation<C, Sc, T>
 where
     C: ConsensusPlugin,
     Sc: PeerScoreStorage,
+    T: WallClock,
 {
     /// Handle one resolved decision: tell the integrator, update the proposal
     /// queues via [`apply_consensus_result`], then run the follow-up it asks

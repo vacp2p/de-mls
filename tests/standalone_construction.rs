@@ -16,7 +16,7 @@ use openmls::credentials::CredentialWithKey;
 use openmls_basic_credential::SignatureKeyPair;
 
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
-use de_mls::{Conversation, ConversationState};
+use de_mls::{Conversation, ConversationState, MockClock};
 use de_mls::{ConversationEvent, ScoringConfig};
 
 use common::{
@@ -26,8 +26,8 @@ use common::{
 
 use crate::common::test_mls_group_config;
 
-/// Per-conversation stack the standalone tests build.
-type TestConversation = Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage>;
+/// Per-conversation stack the standalone tests build, on virtual time.
+type TestConversation = Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, MockClock>;
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -42,6 +42,8 @@ struct Integrator {
     consensus: DefaultConsensusPlugin,
     member_id: WalletMemberId,
     provider: TestProvider,
+    /// The virtual clock this integrator drives; conversations own clones.
+    clock: MockClock,
 }
 
 impl Integrator {
@@ -59,6 +61,7 @@ impl Integrator {
             consensus: DefaultConsensusPlugin::new(EthereumConsensusSigner::new(eth_signer)),
             member_id,
             provider: TestProvider::default(),
+            clock: MockClock::new(),
         }
     }
 
@@ -91,6 +94,7 @@ fn create_builds_a_working_steward_session_without_user() {
         &integrator.signer,
         &integrator.consensus,
         integrator.scoring(),
+        integrator.clock.clone(),
         integrator.app_id(),
         de_mls::ConversationConfig::default(),
     )
@@ -143,6 +147,7 @@ fn join_completes_in_one_call() {
         &alice.signer,
         &alice.consensus,
         alice.scoring(),
+        alice.clock.clone(),
         alice.app_id(),
         fast_config(),
     )
@@ -163,7 +168,7 @@ fn join_completes_in_one_call() {
     // Drive the creator until the welcome is minted.
     let mut welcome = None;
     for _ in 0..40 {
-        std::thread::sleep(Duration::from_millis(30));
+        alice.clock.advance(Duration::from_millis(30));
         creator.poll(&alice.provider, &alice.signer);
         for event in creator.drain_events() {
             if let ConversationEvent::WelcomeReady {
@@ -191,6 +196,7 @@ fn join_completes_in_one_call() {
         &welcome.conversation_sync_bytes,
         &bystander.consensus,
         bystander.scoring(),
+        bystander.clock.clone(),
         bystander.app_id(),
         fast_config(),
     )
@@ -211,6 +217,7 @@ fn join_completes_in_one_call() {
         &welcome.conversation_sync_bytes,
         &bob.consensus,
         bob.scoring(),
+        bob.clock.clone(),
         bob.app_id(),
         fast_config(),
     )

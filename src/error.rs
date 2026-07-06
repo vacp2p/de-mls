@@ -1,7 +1,5 @@
 //! Library error type: [`ConversationError`], raised by conversation operations.
 
-use std::time::SystemTimeError;
-
 use hashgraph_like_consensus::error::ConsensusError;
 
 use crate::mls_crypto::MlsError;
@@ -30,9 +28,6 @@ pub enum ConversationError {
 
     #[error("Message error: {0}")]
     Message(#[from] prost::DecodeError),
-
-    #[error("System time error: {0}")]
-    SystemTime(#[from] SystemTimeError),
 
     #[error("Score storage error: {0}")]
     ScoreStorage(Box<dyn std::error::Error + Send + Sync>),

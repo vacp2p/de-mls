@@ -9,7 +9,7 @@ use std::error::Error as StdError;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use openmls_traits::storage::StorageProvider;
@@ -21,7 +21,7 @@ use crate::{
     CommitRoundResult, ConsensusEngine, ConsensusPlugin, ConversationConfig, ConversationError,
     ConversationEvent, ConversationQueues, ConversationState, ConversationStateMachine,
     OperatingMode, Outbound, PeerScoreStorage, PeerScoringService, PhaseTimer, ProcessResult,
-    ProposalKind, StewardListService,
+    ProposalKind, StewardListService, SystemClock, Timestamp, WallClock,
     consensus::outcome_bus::OutcomeReceiver,
     decode_inbound_payload, finalize_commit_round, member_set,
     mls_crypto::{CommitArtifacts, MlsCommitInput, MlsService},
@@ -45,7 +45,7 @@ pub enum LeaveOutcome {
 /// resolution; fired by [`Conversation::tick_deadlines`].
 #[derive(Debug, Clone, Copy)]
 pub struct AutoVoteEntry {
-    pub fire_at: Instant,
+    pub fire_at: Timestamp,
     pub vote: bool,
 }
 
@@ -86,7 +86,7 @@ pub(crate) struct Timing {
     /// Registered when a proposal opens (own or incoming peer); fired by
     /// `tick_deadlines` which calls `consensus.handle_consensus_timeout`.
     /// Removed when the consensus session resolves naturally via `handle_consensus_outcome`.
-    pub(crate) pending_consensus_timeouts: HashMap<u32, Instant>,
+    pub(crate) pending_consensus_timeouts: HashMap<u32, Timestamp>,
     /// Last commit-round progress snapshot emitted as `ConversationEvent::CommitRoundProgress`.
     /// `poll()` compares the current `(received, expected)` against this and
     /// emits a new event only when the count changes, avoiding repeated events
@@ -99,13 +99,13 @@ pub(crate) struct Timing {
     /// this is older than the recovery window — the epoch steward had its
     /// chance and stayed silent. Cleared when the buffer is drained or nothing
     /// is left to propose.
-    pub(crate) buffered_propose_anchor: Option<Instant>,
+    pub(crate) buffered_propose_anchor: Option<Timestamp>,
     /// Anchor for the backup-steward sync re-send takeover: set when a backup
     /// first sees an unanswered `ConversationSyncRequest`. A backup re-sends the
     /// sync once this is older than the recovery window — the epoch steward
     /// stayed silent. Cleared when a `ConversationSync` is observed or the
     /// takeover no longer applies.
-    pub(crate) sync_resend_anchor: Option<Instant>,
+    pub(crate) sync_resend_anchor: Option<Timestamp>,
 }
 
 impl Timing {
@@ -123,11 +123,15 @@ impl Timing {
     }
 }
 
-pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoreStorage> {
+pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoreStorage, T: WallClock = SystemClock> {
     /// Conversation name. Identifies this conversation in the integrator's
     /// registry and is used to construct scope keys for consensus operations.
     /// Read via [`Conversation::conversation_id`].
     pub(crate) conversation_id: String,
+    /// Caller-owned time source. Every deadline anchor and the consensus
+    /// wire timestamps derive from `clock.now()`; the library reads no
+    /// other clock.
+    pub(crate) clock: T,
     pub(crate) queues: ConversationQueues,
     /// Per-conversation MLS service, plug-in instances, and consensus wiring.
     pub(crate) services: ConversationServices<C, Sc>,
@@ -161,25 +165,29 @@ pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoreStorage> {
     pending_outbound: Mutex<Vec<Outbound>>,
 }
 
-impl<C, Sc> Conversation<C, Sc>
+impl<C, Sc, T> Conversation<C, Sc, T>
 where
     C: ConsensusPlugin,
     Sc: PeerScoreStorage,
+    T: WallClock,
 {
     /// Build a fresh conversation around an already-assembled `services`
     /// bundle (MLS service seeded, plug-ins configured, consensus receiver
     /// subscribed). The time-driven `timing` state starts from defaults.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         conversation_id: String,
         queues: ConversationQueues,
         services: ConversationServices<C, Sc>,
         state_machine: ConversationStateMachine,
         config: ConversationConfig,
+        clock: T,
         self_member_id: Arc<[u8]>,
         app_id: Arc<[u8]>,
     ) -> Self {
         Self {
             conversation_id,
+            clock,
             queues,
             services,
             state_machine,
@@ -527,7 +535,7 @@ where
     /// inactivity). Forward to an external scheduler that calls `poll()` on
     /// fire; extra/early wakeups are no-ops.
     pub fn next_wakeup_in(&self) -> Option<Duration> {
-        let now = Instant::now();
+        let now = self.clock.now();
         let earliest = self
             .timing
             .pending_consensus_timeouts
@@ -544,7 +552,7 @@ where
     /// inactivity check in `check_steward_inactivity`) all gate on the phase
     /// timer; this surfaces the same wall-clock target so an external
     /// scheduler can wake us at the right time.
-    fn phase_deadline(&self) -> Option<Instant> {
+    fn phase_deadline(&self) -> Option<Timestamp> {
         let anchor = self.timing.phase_timer.started_at()?;
         let cfg = &self.config;
         match self.current_state() {
@@ -606,7 +614,7 @@ where
         self.timing.pending_auto_votes.insert(
             proposal_id,
             AutoVoteEntry {
-                fire_at: Instant::now() + delay,
+                fire_at: self.clock.now() + delay,
                 vote,
             },
         );
@@ -646,9 +654,10 @@ where
     /// Register a consensus-session timeout. Fires `delay` from now via
     /// `tick_deadlines`; removed naturally on consensus resolution.
     pub(crate) fn register_consensus_timeout(&mut self, proposal_id: u32, delay: Duration) {
+        let fire_at = self.clock.now() + delay;
         self.timing
             .pending_consensus_timeouts
-            .insert(proposal_id, Instant::now() + delay);
+            .insert(proposal_id, fire_at);
     }
 
     /// Drop the pending consensus timeout for `proposal_id`. Called from
@@ -673,7 +682,8 @@ where
     /// from any other state.
     pub(crate) fn start_freezing(&mut self) -> Option<ConversationState> {
         if self.state_machine.start_freezing() {
-            self.timing.phase_timer.start();
+            let now = self.clock.now();
+            self.timing.phase_timer.start(now);
             info!(state = "Freezing", "state transition");
             Some(ConversationState::Freezing)
         } else {
@@ -700,7 +710,8 @@ where
     /// `Some(Freezing)` on transition; `None` from any other state.
     pub(crate) fn reopen_recovery_window(&mut self) -> Option<ConversationState> {
         if self.state_machine.reopen_freezing() {
-            self.timing.phase_timer.start();
+            let now = self.clock.now();
+            self.timing.phase_timer.start(now);
             info!(state = "Freezing", "state transition (recovery retry)");
             Some(ConversationState::Freezing)
         } else {
@@ -714,7 +725,7 @@ where
             && self
                 .timing
                 .phase_timer
-                .elapsed_since_anchor(self.config.freeze_duration)
+                .elapsed_since_anchor(self.clock.now(), self.config.freeze_duration)
     }
 
     /// Drives the "steward waited too long to commit" transition into
@@ -730,8 +741,9 @@ where
         if self.current_state() != ConversationState::Working || approved_proposals_count == 0 {
             return None;
         }
+        let now = self.clock.now();
         if self.timing.phase_timer.started_at().is_none() {
-            self.timing.phase_timer.start();
+            self.timing.phase_timer.start(now);
             info!(
                 approved = approved_proposals_count,
                 inactivity_ms = inactivity_duration.as_millis() as u64,
@@ -742,7 +754,7 @@ where
         if !self
             .timing
             .phase_timer
-            .elapsed_since_anchor(inactivity_duration)
+            .elapsed_since_anchor(now, inactivity_duration)
         {
             return None;
         }
@@ -757,8 +769,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use openmls_basic_credential::SignatureKeyPair;
 
     use super::*;
@@ -772,7 +782,8 @@ mod tests {
     use crate::{PeerScoringService, ScoringConfig, StewardListService};
     use std::collections::HashMap;
 
-    type TestConversation = Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage>;
+    type TestConversation =
+        Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, crate::MockClock>;
 
     /// Build a conversation with a real creator-side MLS service and the given
     /// steward roster, returning it alongside the provider that backs the MLS
@@ -808,7 +819,7 @@ mod tests {
     fn build_conversation_scored<Sc: PeerScoreStorage + Default>(
         mls: TestMls,
         steward_list: StewardListService,
-    ) -> Conversation<DefaultConsensusPlugin, Sc> {
+    ) -> Conversation<DefaultConsensusPlugin, Sc, crate::MockClock> {
         let (consensus, consensus_rx) = make_test_consensus_service();
         Conversation::new(
             "g".to_string(),
@@ -826,6 +837,7 @@ mod tests {
             },
             ConversationStateMachine::new_as_member(),
             ConversationConfig::default(),
+            crate::MockClock::new(),
             Arc::from(&b"test-member-id"[..]),
             Arc::from(&[0u8; 16][..]),
         )
@@ -940,7 +952,6 @@ mod tests {
 
         // Re-register with a different `vote` and a longer delay; the
         // second insert must overwrite, not co-exist.
-        std::thread::sleep(Duration::from_millis(2));
         conversation.register_auto_vote(7, Duration::from_secs(20), false);
         assert_eq!(conversation.timing.pending_auto_votes.len(), 1);
         let entry = conversation.timing.pending_auto_votes[&7];
@@ -974,11 +985,9 @@ mod tests {
     #[test]
     fn register_then_unregister_consensus_timeout() {
         let mut conversation = make_conversation_working();
-        let before = Instant::now();
         conversation.register_consensus_timeout(42, Duration::from_secs(30));
         let fire_at = conversation.timing.pending_consensus_timeouts[&42];
-        assert!(fire_at > before + Duration::from_secs(29));
-        assert!(fire_at < Instant::now() + Duration::from_secs(31));
+        assert_eq!(fire_at, conversation.clock.now() + Duration::from_secs(30));
 
         conversation.unregister_consensus_timeout(42);
         assert!(
@@ -1098,7 +1107,8 @@ mod tests {
         conversation.config.recovery_inactivity_duration = Duration::ZERO;
         conversation.enter_recovery_mode();
         conversation.start_freezing();
-        conversation.timing.phase_timer.start();
+        let anchor = conversation.clock.now();
+        conversation.timing.phase_timer.start(anchor);
         seed_approved_work(&mut conversation);
 
         conversation.poll(&provider, &signer);
@@ -1142,7 +1152,8 @@ mod tests {
         conversation.config.recovery_max_rounds = 0;
         conversation.enter_recovery_mode();
         conversation.start_freezing();
-        conversation.timing.phase_timer.start();
+        let anchor = conversation.clock.now();
+        conversation.timing.phase_timer.start(anchor);
 
         // No approved proposals — nothing to recover.
         conversation.poll(&provider, &signer);
@@ -1173,7 +1184,8 @@ mod tests {
         conversation.config.recovery_max_rounds = 3;
         conversation.enter_recovery_mode();
         conversation.start_freezing();
-        conversation.timing.phase_timer.start();
+        let anchor = conversation.clock.now();
+        conversation.timing.phase_timer.start(anchor);
         seed_approved_work(&mut conversation);
 
         // Rounds 1 and 2 land no commit but must re-open the collection window
@@ -1216,7 +1228,8 @@ mod tests {
         conversation.config.recovery_max_rounds = 0; // retry forever (default)
         conversation.enter_recovery_mode();
         conversation.start_freezing();
-        conversation.timing.phase_timer.start();
+        let anchor = conversation.clock.now();
+        conversation.timing.phase_timer.start(anchor);
         seed_approved_work(&mut conversation);
 
         for round in 1..=5 {
@@ -1251,7 +1264,8 @@ mod tests {
         conversation.config.recovery_max_rounds = 1;
         conversation.enter_recovery_mode();
         conversation.start_freezing();
-        conversation.timing.phase_timer.start();
+        let anchor = conversation.clock.now();
+        conversation.timing.phase_timer.start(anchor);
         seed_approved_work(&mut conversation);
 
         conversation.poll(&provider, &signer);
@@ -1346,7 +1360,8 @@ mod tests {
     fn epoch_steward_request_clears_takeover_anchor() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_steward(b"test-member-id"));
-        conversation.timing.sync_resend_anchor = Some(Instant::now());
+        let now = conversation.clock.now();
+        conversation.timing.sync_resend_anchor = Some(now);
 
         conversation
             .on_conversation_sync_request(&provider, b"joiner", &signer)

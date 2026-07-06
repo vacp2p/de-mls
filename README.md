@@ -44,9 +44,11 @@ use de_mls::defaults::{DefaultConsensusPlugin, InMemoryPeerScoreStorage};
 // (see `de_mls::defaults::DefaultPeerScoring`). The steward roster is
 // library-owned — you set its size bounds on `config` (a `ConversationConfig`).
 // Create a conversation you steward, or join one from a welcome:
+// The third generic is the time source: `SystemClock` (the default) in
+// production, `MockClock` for virtual-time tests.
 let mut convo: Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage> =
     Conversation::create(id, member_id, &provider, credential, suite, &signer,
-                         &consensus, scoring, app_id, config)?;
+                         &consensus, scoring, SystemClock::new(), app_id, config)?;
 
 // let joined = Conversation::join(member_id, &provider, &signer,
 //                                 welcome_bytes, sync_bytes, …)?;  // Ok(None) = not for us
