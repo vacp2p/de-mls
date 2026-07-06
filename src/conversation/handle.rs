@@ -795,6 +795,13 @@ mod tests {
     }
 
     fn build_conversation(mls: TestMls, steward_list: StewardListService) -> TestConversation {
+        build_conversation_scored::<InMemoryPeerScoreStorage>(mls, steward_list)
+    }
+
+    fn build_conversation_scored<Sc: PeerScoreStorage + Default>(
+        mls: TestMls,
+        steward_list: StewardListService,
+    ) -> Conversation<DefaultConsensusPlugin, Sc> {
         let (consensus, consensus_rx) = make_test_consensus_service();
         Conversation::new(
             "g".to_string(),
@@ -802,7 +809,7 @@ mod tests {
             ConversationServices {
                 mls,
                 scoring: PeerScoringService::new(
-                    InMemoryPeerScoreStorage::default(),
+                    Sc::default(),
                     HashMap::new(),
                     ScoringConfig::default(),
                 ),
@@ -815,6 +822,35 @@ mod tests {
             Arc::from(&b"test-member-id"[..]),
             Arc::from(&[0u8; 16][..]),
         )
+    }
+
+    /// A [`PeerScoreStorage`] whose every read/write fails — for asserting that
+    /// post-commit scoring errors don't wedge the state machine.
+    #[derive(Debug)]
+    struct ScoringFault;
+    impl std::fmt::Display for ScoringFault {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "scoring storage fault")
+        }
+    }
+    impl std::error::Error for ScoringFault {}
+
+    #[derive(Default)]
+    struct FailingScoreStorage;
+    impl PeerScoreStorage for FailingScoreStorage {
+        type Error = ScoringFault;
+        fn get(&self, _member_id: &[u8]) -> Result<Option<i64>, Self::Error> {
+            Err(ScoringFault)
+        }
+        fn set(&mut self, _member_id: &[u8], _score: i64) -> Result<(), Self::Error> {
+            Err(ScoringFault)
+        }
+        fn remove(&mut self, _member_id: &[u8]) -> Result<(), Self::Error> {
+            Err(ScoringFault)
+        }
+        fn all_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, Self::Error> {
+            Err(ScoringFault)
+        }
     }
 
     /// First tick with approved work auto-anchors the timer and returns `None`.
@@ -1020,6 +1056,72 @@ mod tests {
         assert!(
             matches!(err, ConversationError::NoProposals),
             "recovery must relax the steward gate, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn merged_commit_reaches_working_even_if_scoring_storage_fails() {
+        let (mls, provider, signer) = make_creator_mls(b"test-member-id");
+        let mut conversation =
+            build_conversation_scored::<FailingScoreStorage>(mls, steward_service_member());
+        // Mid commit-round, as after a merge lands.
+        conversation.start_selection();
+
+        // A merged commit dispatches ConversationUpdated. The post-commit scoring
+        // sync fails here, but the transition must still land — no Selection wedge.
+        let _ = conversation.dispatch_inbound_result(
+            &provider,
+            ProcessResult::ConversationUpdated,
+            &signer,
+        );
+
+        assert_eq!(
+            conversation.current_state(),
+            ConversationState::Working,
+            "a merged commit reaches Working even when post-commit bookkeeping fails"
+        );
+    }
+
+    #[test]
+    fn recovery_auto_commit_waits_out_the_grace() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_member());
+        // A grace long enough that it won't elapse during the test.
+        conversation.config.recovery_auto_commit_delay = Some(Duration::from_secs(3600));
+        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.enter_recovery_mode();
+        conversation.start_freezing();
+        conversation.timing.phase_timer.start();
+        seed_approved_work(&mut conversation);
+
+        conversation.poll(&provider, &signer);
+
+        assert!(
+            !conversation.queues.commit_round.has_local_candidate(),
+            "no auto-mint before the grace elapses"
+        );
+        assert!(conversation.is_in_recovery_mode());
+    }
+
+    #[test]
+    fn is_deadlock_proposer_true_for_sole_steward() {
+        let conversation =
+            make_conversation_with_steward(steward_service_steward(b"test-member-id")).0;
+        assert!(
+            conversation.is_deadlock_proposer().unwrap(),
+            "the sole steward is the deterministic deadlock proposer"
+        );
+    }
+
+    #[test]
+    fn request_recovery_is_noop_while_in_recovery() {
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(steward_service_steward(b"test-member-id"));
+        conversation.enter_recovery_mode();
+        conversation.request_recovery(&provider, &signer).unwrap();
+        assert!(
+            conversation.drain_outbound().is_empty(),
+            "no Deadlock ECP filed while already in recovery"
         );
     }
 
