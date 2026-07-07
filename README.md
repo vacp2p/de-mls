@@ -43,12 +43,12 @@ use de_mls::defaults::{DefaultConsensusPlugin, InMemoryPeerScoreStorage};
 // pass by reference; `scoring` is a `PeerScoringService` built over the storage
 // (see `de_mls::defaults::DefaultPeerScoring`). The steward roster is
 // library-owned — you set its size bounds on `config` (a `ConversationConfig`).
+// The third generic is the time source: a `WallClock` impl you provide —
+// wrap `SystemTime` in production, use `MockClock` for virtual-time tests.
 // Create a conversation you steward, or join one from a welcome:
-// The third generic is the time source: `SystemClock` (the default) in
-// production, `MockClock` for virtual-time tests.
-let mut convo: Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage> =
+let mut convo: Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, _> =
     Conversation::create(id, member_id, &provider, credential, suite, &signer,
-                         &consensus, scoring, SystemClock::new(), app_id, config)?;
+                         &consensus, scoring, clock, app_id, config)?;
 
 // let joined = Conversation::join(member_id, &provider, &signer,
 //                                 welcome_bytes, sync_bytes, …)?;  // Ok(None) = not for us

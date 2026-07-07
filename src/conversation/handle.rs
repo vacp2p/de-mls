@@ -21,7 +21,7 @@ use crate::{
     CommitRoundResult, ConsensusEngine, ConsensusPlugin, ConversationConfig, ConversationError,
     ConversationEvent, ConversationQueues, ConversationState, ConversationStateMachine,
     OperatingMode, Outbound, PeerScoreStorage, PeerScoringService, PhaseTimer, ProcessResult,
-    ProposalKind, StewardListService, SystemClock, Timestamp, WallClock,
+    ProposalKind, StewardListService, Timestamp, WallClock,
     consensus::outcome_bus::OutcomeReceiver,
     decode_inbound_payload, finalize_commit_round, member_set,
     mls_crypto::{CommitArtifacts, MlsCommitInput, MlsService},
@@ -123,14 +123,13 @@ impl Timing {
     }
 }
 
-pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoreStorage, T: WallClock = SystemClock> {
+pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoreStorage, T: WallClock> {
     /// Conversation name. Identifies this conversation in the integrator's
     /// registry and is used to construct scope keys for consensus operations.
     /// Read via [`Conversation::conversation_id`].
     pub(crate) conversation_id: String,
     /// Caller-owned time source. Every deadline anchor and the consensus
-    /// wire timestamps derive from `clock.now()`; the library reads no
-    /// other clock.
+    /// wire timestamps derive from `clock.now()`.
     pub(crate) clock: T,
     pub(crate) queues: ConversationQueues,
     /// Per-conversation MLS service, plug-in instances, and consensus wiring.
@@ -999,6 +998,43 @@ mod tests {
 
         // Unregistering an unknown id is a no-op (no panic, no error).
         conversation.unregister_consensus_timeout(999);
+    }
+
+    /// `next_wakeup_in` is the external scheduler's contract: `None` with
+    /// nothing scheduled, the earliest of the three deadline sources
+    /// otherwise, and `Some(ZERO)` once a deadline has elapsed.
+    #[test]
+    fn next_wakeup_in_reports_the_earliest_deadline() {
+        let mut conversation = make_conversation_working();
+        assert_eq!(
+            conversation.next_wakeup_in(),
+            None,
+            "nothing scheduled means no wakeup"
+        );
+
+        conversation.register_consensus_timeout(1, Duration::from_secs(30));
+        conversation.register_auto_vote(2, Duration::from_secs(10), true);
+        assert_eq!(
+            conversation.next_wakeup_in(),
+            Some(Duration::from_secs(10)),
+            "the earlier auto-vote wins over the consensus timeout"
+        );
+
+        // A phase deadline (freeze window) undercuts both pending entries.
+        conversation.config.freeze_duration = Duration::from_secs(5);
+        conversation.start_freezing();
+        assert_eq!(
+            conversation.next_wakeup_in(),
+            Some(Duration::from_secs(5)),
+            "the freeze-window end is the earliest deadline"
+        );
+
+        conversation.clock.advance(Duration::from_secs(6));
+        assert_eq!(
+            conversation.next_wakeup_in(),
+            Some(Duration::ZERO),
+            "an elapsed deadline reports zero, not None"
+        );
     }
 
     // ── build_local_candidate guards ──────────────────────────────────

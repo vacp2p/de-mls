@@ -207,11 +207,26 @@ where
 
         for (proposal_id, vote) in auto_votes_due {
             if let Err(e) = self.broadcast_vote(provider, proposal_id, vote, signer) {
-                tracing::debug!(
-                    proposal_id,
-                    error = %e,
-                    "auto-vote skipped (already voted or session resolved)"
-                );
+                match e {
+                    ConversationError::Consensus(
+                        ConsensusError::UserAlreadyVoted
+                        | ConsensusError::SessionNotActive
+                        | ConsensusError::SessionNotFound,
+                    ) => tracing::debug!(
+                        proposal_id,
+                        error = %e,
+                        "auto-vote skipped: already voted or session resolved"
+                    ),
+                    ConversationError::Consensus(ConsensusError::ProposalExpired) => {
+                        tracing::warn!(
+                            proposal_id,
+                            error = %e,
+                            "auto-vote dropped: proposal expired before the vote fired; \
+                             possible clock skew"
+                        )
+                    }
+                    _ => tracing::warn!(proposal_id, error = %e, "auto-vote failed"),
+                }
             }
         }
         for proposal_id in timeouts_due {

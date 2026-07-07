@@ -19,6 +19,7 @@ use std::error::Error as StdError;
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 
+use hashgraph_like_consensus::error::ConsensusError;
 use hashgraph_like_consensus::protos::consensus::v1::Proposal;
 use prost::Message;
 use tracing::{error, info, warn};
@@ -322,11 +323,39 @@ where
             return Ok(());
         }
 
+        let proposal_id = proposal.proposal_id;
+        let expected_voters = proposal.expected_voters_count;
+        let expiration_timestamp = proposal.expiration_timestamp;
+
+        // Consensus validation runs before any queue mirroring, so a proposal
+        // that fails it (expired or otherwise mis-stamped) leaves no local
+        // trace — a crafted timestamp can't arm the partial freeze or park a
+        // pending update.
+        let scope = self.conversation_id.clone();
+        let local_now = self.clock.now().as_secs();
+        if let Err(e) = self
+            .services
+            .consensus
+            .process_incoming_proposal(&scope, proposal, local_now)
+        {
+            if matches!(e, ConsensusError::ProposalExpired) {
+                self.emit_event(ConversationEvent::Error {
+                    operation: "incoming_proposal".to_string(),
+                    message: format!(
+                        "proposal {proposal_id} expired on arrival \
+                         (expiration {expiration_timestamp}, local now {local_now}); \
+                         possible clock skew"
+                    ),
+                });
+            }
+            return Err(e.into());
+        }
+
         if let Some(req) = decoded.as_ref() {
             let current_epoch = self.mls().current_epoch()?;
             match &req.payload {
                 Some(conversation_update_request::Payload::EmergencyCriteria(_)) => {
-                    self.queues.insert_emergency(proposal.proposal_id);
+                    self.queues.insert_emergency(proposal_id);
                 }
                 Some(conversation_update_request::Payload::MemberInvite(_))
                 | Some(conversation_update_request::Payload::RemoveMember(_)) => {
@@ -336,15 +365,6 @@ where
                 _ => {}
             }
         }
-        let proposal_id = proposal.proposal_id;
-        let expected_voters = proposal.expected_voters_count;
-
-        let scope = self.conversation_id.clone();
-        self.services.consensus.process_incoming_proposal(
-            &scope,
-            proposal,
-            self.clock.now().as_secs(),
-        )?;
         // Skip the vote request + auto-vote for fast-path proposals: the
         // creator's bundled YES already resolved the consensus session, so peers have
         // nothing to vote on.

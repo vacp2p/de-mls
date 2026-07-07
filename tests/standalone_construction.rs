@@ -168,7 +168,10 @@ fn join_completes_in_one_call() {
     // Drive the creator until the welcome is minted.
     let mut welcome = None;
     for _ in 0..40 {
+        // Advance both integrators' clocks in lockstep so bob's later join
+        // starts from the same virtual time alice's proposal was stamped at.
         alice.clock.advance(Duration::from_millis(30));
+        bob.clock.advance(Duration::from_millis(30));
         creator.poll(&alice.provider, &alice.signer);
         for event in creator.drain_events() {
             if let ConversationEvent::WelcomeReady {

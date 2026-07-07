@@ -84,7 +84,8 @@ where
     /// packages — the "not for us" branch, not an error.
     ///
     /// The conversation id comes from the MLS group, so the caller needs no
-    /// prior knowledge of the conversation.
+    /// prior knowledge of the conversation. `clock` is the caller-owned
+    /// time source every deadline is measured against.
     #[allow(clippy::too_many_arguments)]
     pub fn join<Pr>(
         member_id: &[u8],

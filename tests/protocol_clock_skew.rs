@@ -51,6 +51,11 @@ fn lockstep_peer_surfaces_the_vote_request() {
         StewardListConfig::new(1, 5).unwrap(),
     );
 
+    assert!(
+        h.member(1).pending_vote_request().is_none(),
+        "no vote request exists before the removal is proposed"
+    );
+
     let bob_id = h.member(1).member_id_bytes().to_vec();
     h.member_mut(0).remove_member(&bob_id);
 
@@ -85,6 +90,10 @@ fn proposal_arriving_past_expiration_is_dropped_by_skewed_peer() {
         h.process(Duration::from_millis(50));
     }
 
+    assert!(
+        h.member(1).saw_expired_proposal(),
+        "bob's inbound processing rejects the proposal as expired"
+    );
     assert!(
         h.member(1).pending_vote_request().is_none(),
         "an expired proposal must be dropped before the vote request"

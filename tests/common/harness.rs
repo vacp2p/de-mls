@@ -34,7 +34,9 @@ use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
 };
 use de_mls::{Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome};
-use de_mls::{ConversationEvent, ConversationState, MockClock, ScoringConfig, StewardListConfig};
+use de_mls::{ConversationError, ConversationEvent, ConversationState, MockClock, ScoringConfig};
+use de_mls::{StewardListConfig, Timestamp};
+use hashgraph_like_consensus::error::ConsensusError;
 
 use crate::common::test_mls_group_config;
 use crate::common::{
@@ -44,6 +46,12 @@ use crate::common::{
 /// Per-conversation MLS service stack the harness runs, on virtual time.
 pub type TestConversation =
     Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, MockClock>;
+
+/// Where every member's virtual clock starts: a realistic Unix epoch, so
+/// consensus wire timestamps carry production-scale values instead of the
+/// 0..2s band.
+pub const HARNESS_EPOCH: Timestamp =
+    Timestamp::from_duration_since_epoch(Duration::from_secs(1_750_000_000));
 
 /// Fast sub-second timing so the virtual-clock polling loop converges in a
 /// handful of rounds.
@@ -91,7 +99,7 @@ impl Integrator {
             scoring_config: ScoringConfig::default(),
             steward_list_config,
             provider: OpenMlsRustCrypto::default(),
-            clock: MockClock::new(),
+            clock: MockClock::at(HARNESS_EPOCH),
         }
     }
 
@@ -128,6 +136,9 @@ pub struct Member {
     integ: Integrator,
     convo: Option<TestConversation>,
     events: Vec<ConversationEvent>,
+    /// Errors returned by `process_inbound` on delivery, in arrival order —
+    /// delivery keeps going, but tests can assert a rejection happened.
+    inbound_errors: Vec<ConversationError>,
     /// The encrypted `conversation_sync_bytes` from the welcome this member
     /// joined with — captured so a test can replay it (idempotency check).
     last_sync: Option<Vec<u8>>,
@@ -168,6 +179,7 @@ impl Member {
             integ,
             convo: Some(convo),
             events: Vec::new(),
+            inbound_errors: Vec::new(),
             last_sync: None,
             pending_config: config,
         }
@@ -189,6 +201,7 @@ impl Member {
             integ,
             convo: None,
             events: Vec::new(),
+            inbound_errors: Vec::new(),
             last_sync: None,
             pending_config: config,
         }
@@ -337,6 +350,17 @@ impl Member {
     /// Every [`ConversationEvent`] this member has emitted, in order.
     pub fn events(&self) -> &[ConversationEvent] {
         &self.events
+    }
+
+    /// Whether any delivered packet was rejected as an expired proposal —
+    /// the receiver-side signature of clock skew.
+    pub fn saw_expired_proposal(&self) -> bool {
+        self.inbound_errors.iter().any(|e| {
+            matches!(
+                e,
+                ConversationError::Consensus(ConsensusError::ProposalExpired)
+            )
+        })
     }
 
     /// Inbound chat messages, decoded from the event log in arrival order.
@@ -491,9 +515,11 @@ impl Member {
     /// Deliver a raw payload to this member as if it arrived from `sender`.
     /// No-op when the member hasn't joined.
     pub fn deliver_raw(&mut self, sender: &[u8], payload: &[u8]) {
-        if let Some(convo) = self.convo.as_mut() {
-            let _ =
-                convo.process_inbound(&self.integ.provider, &self.integ.signer, sender, payload);
+        if let Some(convo) = self.convo.as_mut()
+            && let Err(e) =
+                convo.process_inbound(&self.integ.provider, &self.integ.signer, sender, payload)
+        {
+            self.inbound_errors.push(e);
         }
     }
 
@@ -554,13 +580,15 @@ impl Member {
     }
 
     fn deliver(&mut self, packet: &Outbound) {
-        if let Some(convo) = self.convo.as_mut() {
-            let _ = convo.process_inbound(
+        if let Some(convo) = self.convo.as_mut()
+            && let Err(e) = convo.process_inbound(
                 &self.integ.provider,
                 &self.integ.signer,
                 &packet.sender,
                 &packet.payload,
-            );
+            )
+        {
+            self.inbound_errors.push(e);
         }
     }
 

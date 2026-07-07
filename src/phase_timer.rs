@@ -4,7 +4,7 @@ use crate::wall_clock::Timestamp;
 
 /// Wall-clock anchor for the active phase. Holds only the anchor
 /// [`Timestamp`]; queries take the current time and the relevant
-/// `Duration` as parameters, so the timer itself never reads a clock.
+/// `Duration` as parameters — the caller supplies the clock reading.
 /// [`crate::Conversation`] composes the timer with the state
 /// machine and [`crate::ConversationConfig`] durations.
 #[derive(Debug, Clone, Default)]
