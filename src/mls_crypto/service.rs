@@ -28,6 +28,7 @@ use prost::Message;
 use tracing::warn;
 
 use crate::{
+    Extensions, GroupContext,
     mls_crypto::{
         CommitArtifacts, DecryptedMessage, MlsCommitInput, MlsError, MlsMessageKind,
         MlsProposalOutput, StagedCandidateResult,
@@ -166,6 +167,11 @@ impl MlsService {
     /// Current MLS epoch — the single source of truth; keep no parallel counter.
     pub fn current_epoch(&self) -> Result<u64, MlsError> {
         Ok(self.group.epoch().as_u64())
+    }
+
+    // Extensions configured for the MlsGroup
+    pub fn extensions(&self) -> &Extensions<GroupContext> {
+        self.group.extensions()
     }
 
     // ══════════════════════════════════════════════════════════
