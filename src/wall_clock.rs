@@ -59,7 +59,13 @@ impl Add<Duration> for Timestamp {
 /// timestamps derive from [`now`](WallClock::now).
 pub trait WallClock {
     /// The current time. Successive readings must never decrease — a
-    /// reading that runs backwards un-elapses pending deadlines.
+    /// reading that runs backwards un-elapses pending deadlines and can
+    /// break the timestamp ordering peers validate votes against.
+    ///
+    /// This is weaker than a monotonic clock: forward jumps, freezes, and
+    /// slew are all fine; only backwards readings are ruled out. A
+    /// [`std::time::SystemTime`]-backed impl should clamp against backwards
+    /// steps (return the max of the last reading and now).
     fn now(&self) -> Timestamp;
 }
 
