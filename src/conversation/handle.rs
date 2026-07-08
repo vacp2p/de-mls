@@ -53,7 +53,7 @@ pub struct AutoVoteEntry {
 /// grouped so the handle holds them as one unit. Construction builds the MLS
 /// service, moves the plug-in instances in, and subscribes the consensus
 /// receiver here.
-pub(crate) struct ConversationServices<C: ConsensusPlugin, Sc: PeerScoreStorage> {
+pub(crate) struct ConversationServices<Cp: ConsensusPlugin, Sc: PeerScoreStorage> {
     /// Per-conversation MLS service. Present for the conversation's whole
     /// lifetime: the creator seeds it at [`Conversation::create`], the joiner
     /// at [`Conversation::join`].
@@ -65,7 +65,7 @@ pub(crate) struct ConversationServices<C: ConsensusPlugin, Sc: PeerScoreStorage>
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Built from the
     /// consensus service passed at construction.
-    pub(crate) consensus: ConsensusEngine<C>,
+    pub(crate) consensus: ConsensusEngine<Cp>,
     /// Drain end of `consensus`'s outcome bus. Walked by `tick_deadlines`,
     /// which dispatches each event through `handle_consensus_outcome`.
     /// Subscribed when the conversation is built in [`Conversation::create`] /
@@ -123,17 +123,17 @@ impl Timing {
     }
 }
 
-pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoreStorage, T: WallClock> {
+pub struct Conversation<Cp: ConsensusPlugin, Sc: PeerScoreStorage, Wc: WallClock> {
     /// Conversation name. Identifies this conversation in the integrator's
     /// registry and is used to construct scope keys for consensus operations.
     /// Read via [`Conversation::conversation_id`].
     pub(crate) conversation_id: String,
     /// Caller-owned time source. Every deadline anchor and the consensus
     /// wire timestamps derive from `clock.now()`.
-    pub(crate) clock: T,
+    pub(crate) clock: Wc,
     pub(crate) queues: ConversationQueues,
     /// Per-conversation MLS service, plug-in instances, and consensus wiring.
-    pub(crate) services: ConversationServices<C, Sc>,
+    pub(crate) services: ConversationServices<Cp, Sc>,
     pub(crate) state_machine: ConversationStateMachine,
     /// Per-conversation durable config: voting/consensus durations,
     /// `liveness_criteria_yes`, `pending_update_max_epochs`.
@@ -164,11 +164,11 @@ pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoreStorage, T: WallClock> 
     pending_outbound: Mutex<Vec<Outbound>>,
 }
 
-impl<C, Sc, T> Conversation<C, Sc, T>
+impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
-    C: ConsensusPlugin,
+    Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
-    T: WallClock,
+    Wc: WallClock,
 {
     /// Build a fresh conversation around an already-assembled `services`
     /// bundle (MLS service seeded, plug-ins configured, consensus receiver
@@ -177,10 +177,10 @@ where
     pub(crate) fn new(
         conversation_id: String,
         queues: ConversationQueues,
-        services: ConversationServices<C, Sc>,
+        services: ConversationServices<Cp, Sc>,
         state_machine: ConversationStateMachine,
         config: ConversationConfig,
-        clock: T,
+        clock: Wc,
         self_member_id: Arc<[u8]>,
         app_id: Arc<[u8]>,
     ) -> Self {

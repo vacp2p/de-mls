@@ -18,11 +18,11 @@ use crate::{
     },
 };
 
-impl<C, Sc, T> Conversation<C, Sc, T>
+impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
-    C: ConsensusPlugin,
+    Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
-    T: WallClock,
+    Wc: WallClock,
 {
     /// Handle one resolved decision: tell the integrator, update the proposal
     /// queues via [`apply_consensus_result`], then run the follow-up it asks

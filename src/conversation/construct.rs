@@ -24,11 +24,11 @@ use crate::{
     mls_crypto::MlsService,
 };
 
-impl<C, Sc, T> Conversation<C, Sc, T>
+impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
-    C: ConsensusPlugin,
+    Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
-    T: WallClock,
+    Wc: WallClock,
 {
     /// Create a brand-new conversation we steward. Starts in `Working` with the
     /// local member installed as sole steward at epoch 0. The library seeds a
@@ -44,9 +44,9 @@ where
         credential: CredentialWithKey,
         group_config: &MlsGroupCreateConfig,
         signer: &impl Signer,
-        consensus: &C,
+        consensus: &Cp,
         scoring: PeerScoringService<Sc>,
-        clock: T,
+        clock: Wc,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
     ) -> Result<Self, ConversationError>
@@ -93,9 +93,9 @@ where
         signer: &impl Signer,
         welcome_bytes: &[u8],
         conversation_sync_bytes: &[u8],
-        consensus: &C,
+        consensus: &Cp,
         scoring: PeerScoringService<Sc>,
-        clock: T,
+        clock: Wc,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
     ) -> Result<Option<Self>, ConversationError>
@@ -134,8 +134,8 @@ where
         conversation_id: &str,
         mls: MlsService,
         mut scoring: PeerScoringService<Sc>,
-        consensus: &C,
-        clock: T,
+        consensus: &Cp,
+        clock: Wc,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
         is_creation: bool,

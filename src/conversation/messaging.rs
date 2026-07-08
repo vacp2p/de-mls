@@ -32,11 +32,11 @@ pub struct Outbound {
     pub payload: Vec<u8>,
 }
 
-impl<C, Sc, T> Conversation<C, Sc, T>
+impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
-    C: ConsensusPlugin,
+    Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
-    T: WallClock,
+    Wc: WallClock,
 {
     /// Buffer a chat message for broadcast. The conversation never sends — the
     /// message is enqueued and the integrator drains it via

@@ -31,11 +31,11 @@ pub(crate) enum StewardListReconcile {
     NeedsElection,
 }
 
-impl<C, Sc, T> Conversation<C, Sc, T>
+impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
-    C: ConsensusPlugin,
+    Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
-    T: WallClock,
+    Wc: WallClock,
 {
     // ── Public API ───────────────────────────────────────────────────
 

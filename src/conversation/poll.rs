@@ -31,11 +31,11 @@ pub struct PollOutcome {
     pub leave_requested: bool,
 }
 
-impl<C, Sc, T> Conversation<C, Sc, T>
+impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
-    C: ConsensusPlugin,
+    Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
-    T: WallClock,
+    Wc: WallClock,
 {
     /// Drive one polling cycle: tick consensus deadlines, advance freeze
     /// state, and check steward inactivity.

@@ -168,11 +168,11 @@ pub enum DispatchOutcome {
     LeaveRequested,
 }
 
-impl<C, Sc, T> Conversation<C, Sc, T>
+impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
-    C: ConsensusPlugin,
+    Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
-    T: WallClock,
+    Wc: WallClock,
 {
     /// Decrypt and dispatch an inbound conversation payload. Drops self-echoes.
     /// Runs the full dispatch chain internally. Returns

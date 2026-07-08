@@ -5,11 +5,11 @@ use crate::{
     PeerScoreStorage, WallClock, protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
-impl<C, Sc, T> Conversation<C, Sc, T>
+impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
-    C: ConsensusPlugin,
+    Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
-    T: WallClock,
+    Wc: WallClock,
 {
     /// Current state of the conversation's state machine.
     pub fn state(&self) -> ConversationState {
