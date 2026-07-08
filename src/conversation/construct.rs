@@ -20,20 +20,24 @@ use hashgraph_like_consensus::{events::ConsensusEventBus, service::ConsensusServ
 use crate::{
     ConsensusPlugin, Conversation, ConversationConfig, ConversationError, ConversationEvent,
     ConversationQueues, ConversationServices, ConversationStateMachine, PeerScoreStorage,
-    PeerScoringService, StewardListService, consensus::outcome_bus::OutcomeBus,
+    PeerScoringService, StewardListService, WallClock, consensus::outcome_bus::OutcomeBus,
     mls_crypto::MlsService,
 };
 
-impl<C, Sc> Conversation<C, Sc>
+impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
-    C: ConsensusPlugin,
+    Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
+    Wc: WallClock,
 {
     /// Create a brand-new conversation we steward. Starts in `Working` with the
     /// local member installed as sole steward at epoch 0. The library seeds a
     /// fresh MLS group into `provider` (which it does not retain) from
     /// `credential` and `ciphersuite`. `member_id` names the local member — the
-    /// opaque id bytes the protocol matches on.
+    /// opaque id bytes the protocol matches on. `clock` moves in and becomes
+    /// the conversation's time source — every deadline is measured against
+    /// it; a shared clock (e.g. [`crate::MockClock`]) stays drivable through
+    /// a clone the caller keeps.
     #[allow(clippy::too_many_arguments)]
     pub fn create<Pr>(
         conversation_id: &str,
@@ -42,8 +46,9 @@ where
         credential: CredentialWithKey,
         group_config: &MlsGroupCreateConfig,
         signer: &impl Signer,
-        consensus: &C,
+        consensus: &Cp,
         scoring: PeerScoringService<Sc>,
+        clock: Wc,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
     ) -> Result<Self, ConversationError>
@@ -63,6 +68,7 @@ where
             mls,
             scoring,
             consensus,
+            clock,
             app_id,
             config,
             true,
@@ -80,7 +86,10 @@ where
     /// packages — the "not for us" branch, not an error.
     ///
     /// The conversation id comes from the MLS group, so the caller needs no
-    /// prior knowledge of the conversation.
+    /// prior knowledge of the conversation. `clock` moves in and becomes
+    /// the conversation's time source — every deadline is measured against
+    /// it; a shared clock (e.g. [`crate::MockClock`]) stays drivable through
+    /// a clone the caller keeps.
     #[allow(clippy::too_many_arguments)]
     pub fn join<Pr>(
         member_id: &[u8],
@@ -88,8 +97,9 @@ where
         signer: &impl Signer,
         welcome_bytes: &[u8],
         conversation_sync_bytes: &[u8],
-        consensus: &C,
+        consensus: &Cp,
         scoring: PeerScoringService<Sc>,
+        clock: Wc,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
     ) -> Result<Option<Self>, ConversationError>
@@ -106,6 +116,7 @@ where
             mls,
             scoring,
             consensus,
+            clock,
             app_id,
             config,
             false,
@@ -127,7 +138,8 @@ where
         conversation_id: &str,
         mls: MlsService,
         mut scoring: PeerScoringService<Sc>,
-        consensus: &C,
+        consensus: &Cp,
+        clock: Wc,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
         is_creation: bool,
@@ -177,6 +189,7 @@ where
             services,
             state_machine,
             config,
+            clock,
             Arc::from(member_id),
             app_id,
         );

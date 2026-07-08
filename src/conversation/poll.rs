@@ -6,10 +6,7 @@
 //! `poll()` once per wakeup cycle and reacts to the returned [`PollOutcome`].
 
 use std::error::Error as StdError;
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
@@ -18,8 +15,9 @@ use tracing::{error, info, warn};
 
 use crate::{
     CommitRoundOutcome, ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
-    ConversationState, DispatchOutcome, PeerScoreStorage, ScoreEvent, ScoreOp,
+    ConversationState, DispatchOutcome, PeerScoreStorage, ScoreEvent, ScoreOp, WallClock,
     protos::de_mls::messages::v1::{AppMessage, MemberWelcome},
+    wall_clock::WallClockExt,
 };
 
 /// Summary returned by [`Conversation::poll`] after one polling pass.
@@ -34,10 +32,11 @@ pub struct PollOutcome {
     pub leave_requested: bool,
 }
 
-impl<C, Sc> Conversation<C, Sc>
+impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
-    C: ConsensusPlugin,
+    Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
+    Wc: WallClock,
 {
     /// Drive one polling cycle: tick consensus deadlines, advance freeze
     /// state, and check steward inactivity.
@@ -151,7 +150,9 @@ where
                 .recovery_auto_commit_delay
                 .unwrap_or(Duration::ZERO)
                 + self.config.recovery_inactivity_duration;
-            self.timing.phase_timer.elapsed_since_anchor(window)
+            self.timing
+                .phase_timer
+                .elapsed_since_anchor(self.clock.timestamp(), window)
         } else {
             self.is_freeze_window_elapsed()
         };
@@ -385,7 +386,10 @@ where
         let Some(delay) = self.config.recovery_auto_commit_delay else {
             return;
         };
-        if !self.timing.phase_timer.elapsed_since_anchor(delay)
+        if !self
+            .timing
+            .phase_timer
+            .elapsed_since_anchor(self.clock.timestamp(), delay)
             || self.queues.commit_round.has_local_candidate()
         {
             return;
@@ -473,15 +477,16 @@ where
         }
 
         // Backup steward: give the epoch steward the recovery window first.
+        let now = self.clock.timestamp();
         let anchor = match self.timing.buffered_propose_anchor {
             Some(a) => a,
             None => {
-                self.timing.buffered_propose_anchor = Some(Instant::now());
+                self.timing.buffered_propose_anchor = Some(now);
                 return Ok(());
             }
         };
         let delay = self.config.voting_inactivity_window();
-        if Instant::now() < anchor + delay {
+        if now < anchor + delay {
             return Ok(());
         }
         self.timing.buffered_propose_anchor = None;
@@ -515,7 +520,7 @@ where
             self.timing.sync_resend_anchor = None;
             return Ok(());
         }
-        if Instant::now() < anchor + self.config.voting_inactivity_window() {
+        if self.clock.timestamp() < anchor + self.config.voting_inactivity_window() {
             return Ok(());
         }
         self.timing.sync_resend_anchor = None;
