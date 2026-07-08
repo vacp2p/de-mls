@@ -382,6 +382,13 @@ where
             let delay = self.config.voting_delay_for(kind);
             let vote = self.config.liveness_criteria_yes;
             self.register_auto_vote(proposal_id, delay, vote);
+            // The consensus library resolves a quorum short of real votes
+            // only through `handle_consensus_timeout` (silent peers weighted
+            // by the liveness criteria), and it expects the application to
+            // arm that deadline for every session — not just its own
+            // proposals. Without this, a session whose quorum needs
+            // silent-peer weighting resolves on the proposer alone.
+            self.register_consensus_timeout(proposal_id, self.config.consensus_timeout);
         }
         Ok(())
     }
