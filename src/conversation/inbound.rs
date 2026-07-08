@@ -363,6 +363,9 @@ where
                     self.queues
                         .insert_pending_update(req.clone(), current_epoch);
                 }
+                Some(conversation_update_request::Payload::StewardElection(_)) => {
+                    self.queues.note_observed_election(proposal_id);
+                }
                 _ => {}
             }
         }
@@ -382,6 +385,13 @@ where
             let delay = self.config.voting_delay_for(kind);
             let vote = self.config.liveness_criteria_yes;
             self.register_auto_vote(proposal_id, delay, vote);
+            // The consensus library resolves a quorum short of real votes
+            // only through `handle_consensus_timeout` (silent peers weighted
+            // by the liveness criteria), and it expects the application to
+            // arm that deadline for every session — not just its own
+            // proposals. Without this, a session whose quorum needs
+            // silent-peer weighting resolves on the proposer alone.
+            self.register_consensus_timeout(proposal_id, self.config.consensus_timeout);
         }
         Ok(())
     }
@@ -431,8 +441,11 @@ where
     {
         // The commit merged, so advance to Working FIRST: the bookkeeping below
         // is best-effort and must not be able to strand the state machine in
-        // Selection. reset_retry too — this commit ended any retry cycle.
+        // Selection. reset_retry too — this commit ended any retry cycle, and
+        // the unresponsive-steward accusations and recovery window with it.
         self.services.steward_list.reset_retry();
+        self.queues.clear_unresponsive_stewards();
+        self.timing.reelection_recovered = false;
         let state = self.current_state();
         if matches!(
             state,

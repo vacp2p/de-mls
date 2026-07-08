@@ -107,6 +107,17 @@ pub(crate) struct Timing {
     /// stayed silent. Cleared when a `ConversationSync` is observed or the
     /// takeover no longer applies.
     pub(crate) sync_resend_anchor: Option<Timestamp>,
+    /// Anchor for the reelection-silence watchdog: set when a poll tick finds
+    /// the conversation parked in `Reelection` with no election in flight. A
+    /// full silent window past it counts as a rejected election round (see
+    /// `drive_reelection_retry`). Cleared outside `Reelection`, while an
+    /// election is being voted on, and each time the ladder advances.
+    pub(crate) reelection_silence_anchor: Option<Timestamp>,
+    /// A steward election landed while this conversation was parked in
+    /// `Reelection`: the pending approved work is a recovery continuation,
+    /// so the inactivity check keeps the short recovery window instead of a
+    /// fresh full commit-inactivity wait. Cleared when a commit merges.
+    pub(crate) reelection_recovered: bool,
 }
 
 impl Timing {
@@ -120,6 +131,8 @@ impl Timing {
             last_commit_round_progress: None,
             buffered_propose_anchor: None,
             sync_resend_anchor: None,
+            reelection_silence_anchor: None,
+            reelection_recovered: false,
         }
     }
 }

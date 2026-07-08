@@ -94,6 +94,14 @@ where
             );
         }
 
+        if let Err(e) = self.drive_reelection_retry(provider, signer) {
+            warn!(
+                conversation = %self.conversation_id,
+                error = %e,
+                "reelection-retry drive error in poll"
+            );
+        }
+
         PollOutcome {
             next_wakeup_in: self.next_wakeup_in(),
             leave_requested,
@@ -306,6 +314,10 @@ where
                     };
                     let accused = accuse_target.is_some();
                     if let Some(steward_id) = accuse_target {
+                        // Also strip the accused of recovery proposer
+                        // authority — an offline steward must not stay the
+                        // only member authorized to elect its replacement.
+                        self.queues.note_unresponsive_steward(steward_id.clone());
                         self.services.scoring.apply_op(&ScoreOp {
                             member_id: steward_id,
                             event: ScoreEvent::CensorshipInactivity,
@@ -553,9 +565,12 @@ where
             return Ok(());
         }
         // Recovery uses the shorter retry inactivity window so we don't
-        // burn another full epoch waiting for a steward to commit.
-        let in_recovery =
-            self.is_in_recovery_mode() || self.services.steward_list.next_election_round() > 0;
+        // burn another full epoch waiting for a steward to commit. That
+        // covers open recovery mode, a bumped retry round, and the stretch
+        // between a recovery election landing and its commit merging.
+        let in_recovery = self.is_in_recovery_mode()
+            || self.services.steward_list.next_election_round() > 0
+            || self.timing.reelection_recovered;
         let inactivity = if in_recovery {
             self.config.recovery_inactivity_duration
         } else if self.is_epoch_steward()? {
@@ -580,5 +595,46 @@ where
         );
         self.on_freeze_entered(provider, signer, event)?;
         Ok(())
+    }
+
+    /// Reelection-silence watchdog: while parked in `Reelection` with no
+    /// election in flight, a full silent window counts as a rejected round —
+    /// [`Conversation::advance_election_retry`] bumps the retry ladder, which
+    /// hands proposer authority to the next candidate and, once retries are
+    /// exhausted, escalates to the `Deadlock` emergency proposal. Without
+    /// this, a responsible proposer that never submits (e.g. an offline sole
+    /// steward) would park the conversation in `Reelection` forever.
+    fn drive_reelection_retry<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if self.current_state() != ConversationState::Reelection
+            || self.queues.has_election_in_flight()
+        {
+            self.timing.reelection_silence_anchor = None;
+            return Ok(());
+        }
+        let now = self.clock.timestamp();
+        let anchor = match self.timing.reelection_silence_anchor {
+            Some(a) => a,
+            None => {
+                self.timing.reelection_silence_anchor = Some(now);
+                return Ok(());
+            }
+        };
+        if now < anchor + self.config.voting_inactivity_window() {
+            return Ok(());
+        }
+        self.timing.reelection_silence_anchor = None;
+        info!(
+            conversation = %self.conversation_id,
+            "no election proposal observed within the reelection window: counting a rejected round"
+        );
+        self.advance_election_retry(provider, signer)
     }
 }
