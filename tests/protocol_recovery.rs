@@ -144,8 +144,15 @@ fn sole_steward_offline_recovers_and_commits_approved_add() {
     // remaining member must claim election-proposer authority — the accused
     // steward loses it, and authority falls through to the lowest eligible
     // candidate — install a fresh list, commit the Add, and welcome the joiner.
+    //
+    // The long commit-inactivity against process_until's 30 s virtual budget
+    // also pins the post-election window: the freeze wait before reelection
+    // already costs ~20 s, so the recovered steward must commit within the
+    // short recovery window — waiting out a second full commit-inactivity
+    // epoch would blow the budget.
     let cfg = ConversationConfig {
-        recovery_inactivity_duration: Duration::from_millis(50),
+        commit_inactivity_duration: Duration::from_secs(20),
+        recovery_inactivity_duration: Duration::from_millis(100),
         ..fast_config()
     };
     let mut h = TestHarness::<3>::start(

@@ -113,6 +113,11 @@ pub(crate) struct Timing {
     /// `drive_reelection_retry`). Cleared outside `Reelection`, while an
     /// election is being voted on, and each time the ladder advances.
     pub(crate) reelection_silence_anchor: Option<Timestamp>,
+    /// A steward election landed while this conversation was parked in
+    /// `Reelection`: the pending approved work is a recovery continuation,
+    /// so the inactivity check keeps the short recovery window instead of a
+    /// fresh full commit-inactivity wait. Cleared when a commit merges.
+    pub(crate) reelection_recovered: bool,
 }
 
 impl Timing {
@@ -127,6 +132,7 @@ impl Timing {
             buffered_propose_anchor: None,
             sync_resend_anchor: None,
             reelection_silence_anchor: None,
+            reelection_recovered: false,
         }
     }
 }

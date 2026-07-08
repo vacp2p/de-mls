@@ -565,9 +565,12 @@ where
             return Ok(());
         }
         // Recovery uses the shorter retry inactivity window so we don't
-        // burn another full epoch waiting for a steward to commit.
-        let in_recovery =
-            self.is_in_recovery_mode() || self.services.steward_list.next_election_round() > 0;
+        // burn another full epoch waiting for a steward to commit. That
+        // covers open recovery mode, a bumped retry round, and the stretch
+        // between a recovery election landing and its commit merging.
+        let in_recovery = self.is_in_recovery_mode()
+            || self.services.steward_list.next_election_round() > 0
+            || self.timing.reelection_recovered;
         let inactivity = if in_recovery {
             self.config.recovery_inactivity_duration
         } else if self.is_epoch_steward()? {
