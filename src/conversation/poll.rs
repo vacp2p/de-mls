@@ -306,6 +306,10 @@ where
                     };
                     let accused = accuse_target.is_some();
                     if let Some(steward_id) = accuse_target {
+                        // Also strip the accused of recovery proposer
+                        // authority — an offline steward must not stay the
+                        // only member authorized to elect its replacement.
+                        self.queues.note_unresponsive_steward(steward_id.clone());
                         self.services.scoring.apply_op(&ScoreOp {
                             member_id: steward_id,
                             event: ScoreEvent::CensorshipInactivity,

@@ -438,8 +438,10 @@ where
     {
         // The commit merged, so advance to Working FIRST: the bookkeeping below
         // is best-effort and must not be able to strand the state machine in
-        // Selection. reset_retry too — this commit ended any retry cycle.
+        // Selection. reset_retry too — this commit ended any retry cycle, and
+        // the unresponsive-steward accusations with it.
         self.services.steward_list.reset_retry();
+        self.queues.clear_unresponsive_stewards();
         let state = self.current_state();
         if matches!(
             state,

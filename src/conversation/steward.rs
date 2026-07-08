@@ -495,13 +495,18 @@ where
             }
 
             // Build the candidate pool: settled MLS members minus queued
-            // removals (recovery only — non-recovery elections trust the
-            // current MLS roster). Unsettled (just-joined) members are excluded
-            // — they may not have attached MLS and can't serve as stewards yet.
+            // removals and locally-observed unresponsive stewards (recovery
+            // only — non-recovery elections trust the current MLS roster).
+            // Unsettled (just-joined) members are excluded — they may not
+            // have attached MLS and can't serve as stewards yet.
             let candidate_pool: Vec<Vec<u8>> = mls_members
                 .iter()
                 .filter(|m| self.queues.is_settled(m, epoch))
-                .filter(|m| !(recovery && self.queues.has_approved_removal(m)))
+                .filter(|m| {
+                    !(recovery
+                        && (self.queues.has_approved_removal(m)
+                            || self.queues.is_unresponsive_steward(m)))
+                })
                 .cloned()
                 .collect();
             let pool_set: std::collections::HashSet<&[u8]> =
@@ -516,11 +521,29 @@ where
                 recovery,
             )? {
                 ElectionDecision::Skip(skip) => {
-                    if skip == ElectionSkip::NoEligibleCandidates {
-                        info!(
-                            conversation = %self.conversation_id,
-                            "skipping election: {skip}"
-                        );
+                    match skip {
+                        // Routine outcome of every epoch-advance housekeeping
+                        // call — not worth a log line.
+                        ElectionSkip::NotExhausted => {}
+                        ElectionSkip::NotResponsibleProposer => {
+                            let proposer = self.services.steward_list.responsible_proposer(
+                                self.services.steward_list.next_election_round(),
+                                &candidate_pool,
+                                eligible,
+                            );
+                            info!(
+                                conversation = %self.conversation_id,
+                                proposer = ?proposer,
+                                retry_round = self.services.steward_list.next_election_round(),
+                                "skipping election: {skip}"
+                            );
+                        }
+                        ElectionSkip::NoEligibleCandidates => {
+                            info!(
+                                conversation = %self.conversation_id,
+                                "skipping election: {skip}"
+                            );
+                        }
                     }
                     return Ok(());
                 }
@@ -591,9 +614,11 @@ where
     }
 
     /// Whether this member is the deterministic proposer that should auto-file
-    /// the `Deadlock` ECP when re-election exhausts — the election proposer,
-    /// restricted to a candidate that is MLS-present and not queued for removal.
-    /// Gates the automatic escalation so it doesn't file one ECP per member.
+    /// the `Deadlock` ECP when re-election exhausts — the responsible proposer
+    /// for the current retry round, restricted to candidates that are
+    /// MLS-present, not queued for removal, and not locally observed as
+    /// unresponsive. Gates the automatic escalation so it doesn't file one ECP
+    /// per member.
     pub(crate) fn is_deadlock_proposer(&self) -> Result<bool, ConversationError> {
         let mls = self.mls();
         let mls_members = mls.members()?;
@@ -604,9 +629,15 @@ where
         Ok(self
             .services
             .steward_list
-            .election_proposer(|c: &[u8]| {
-                mls_set.contains(c) && !conversation_ref.has_approved_removal(c)
-            })
+            .responsible_proposer(
+                self.services.steward_list.next_election_round(),
+                &mls_members,
+                |c: &[u8]| {
+                    mls_set.contains(c)
+                        && !conversation_ref.has_approved_removal(c)
+                        && !conversation_ref.is_unresponsive_steward(c)
+                },
+            )
             .is_some_and(|proposer| proposer == self_id))
     }
 }
