@@ -12,6 +12,7 @@ use de_mls::{ConversationConfig, ConversationEvent, ConversationState, StewardLi
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const CHARLIE: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
+const DAVE: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";
 
 #[test]
 fn recovery_auto_mint_converges_on_one_commit() {
@@ -133,5 +134,117 @@ fn manual_only_recovery_does_not_auto_commit() {
     assert!(
         h.member(online[0]).convo().is_in_recovery_mode(),
         "recovery stays open, waiting for a manual commit"
+    );
+}
+
+#[test]
+fn sole_steward_offline_recovers_and_commits_approved_add() {
+    // The filed deadlock: a 2-member group whose installed steward list holds
+    // only the (offline) creator, with an approved Add stuck behind it. The
+    // remaining member must claim election-proposer authority — the accused
+    // steward loses it, and authority falls through to the lowest eligible
+    // candidate — install a fresh list, commit the Add, and welcome the joiner.
+    let cfg = ConversationConfig {
+        recovery_inactivity_duration: Duration::from_millis(50),
+        ..fast_config()
+    };
+    let mut h = TestHarness::<3>::start(
+        [ALICE, BOB, CHARLIE],
+        "sole",
+        cfg,
+        StewardListConfig::new(1, 1).unwrap(),
+    );
+    let conversation_id = h.conversation_id().to_string();
+
+    // Bob joins; Charlie only announces later, so the group is Alice + Bob
+    // with Alice the sole steward.
+    let bob_announcement = h.member_mut(1).announce_key_package(&conversation_id);
+    h.deliver_key_package_all(&bob_announcement);
+    h.process_until("bob joins", |h| h.member(1).is_working());
+
+    // Charlie's announced join reaches consensus on Bob...
+    let charlie_announcement = h.member_mut(2).announce_key_package(&conversation_id);
+    h.deliver_key_package_all(&charlie_announcement);
+    h.process_until("charlie's add is approved on bob", |h| {
+        h.member(1).approved_count() == 1
+    });
+
+    // ...and Alice goes dark before committing it.
+    h.mute(0);
+
+    // Bob must not park in Reelection: the freeze timeout accuses Alice,
+    // authority falls through to Bob, a fresh list installs, and Bob commits
+    // the stuck Add — Charlie receives its welcome.
+    h.process_until("bob recovers and charlie joins", |h| {
+        h.member(1).member_count() == 3 && h.member(2).is_working()
+    });
+
+    assert!(
+        h.member(1).saw_phase(ConversationState::Reelection),
+        "bob went through the reelection stall path"
+    );
+    assert_eq!(
+        h.member(1).epoch(),
+        h.member(2).epoch(),
+        "bob and charlie agree on the epoch"
+    );
+}
+
+#[test]
+fn silent_election_proposer_hands_authority_to_next_member() {
+    // Deeper stall: the sole steward is offline AND the member that authority
+    // first falls through to is offline as well. The reelection-silence
+    // watchdog must count the empty window as a rejected round, rotating
+    // proposer authority to the next online member until the stuck removal
+    // lands.
+    let cfg = ConversationConfig {
+        recovery_inactivity_duration: Duration::from_millis(50),
+        ..fast_config()
+    };
+    let mut h = TestHarness::<4>::bootstrap(
+        [ALICE, BOB, CHARLIE, DAVE],
+        "silent",
+        cfg,
+        StewardListConfig::new(1, 1).unwrap(),
+    );
+    for _ in 0..5 {
+        h.process(Duration::from_millis(40));
+    }
+
+    let steward = (0..4)
+        .find(|&i| h.member(i).is_epoch_steward())
+        .expect("a sole epoch steward exists");
+    let steward_id = h.member(steward).member_id_bytes().to_vec();
+    // With the steward's removal approved, round-0 proposer authority falls
+    // to the lowest remaining member id — take that member offline too.
+    let mut others: Vec<usize> = (0..4).filter(|&i| i != steward).collect();
+    others.sort_by(|&a, &b| {
+        h.member(a)
+            .member_id_bytes()
+            .cmp(h.member(b).member_id_bytes())
+    });
+    let (silent_proposer, online) = (others[0], [others[1], others[2]]);
+    h.mute(steward);
+    h.mute(silent_proposer);
+
+    // Approve the steward's removal among the three non-steward members
+    // (two online + the silent proposer, who still receives and votes but
+    // whose outbound is dropped; the silent peers count as YES at timeout).
+    h.member_mut(online[0]).remove_member(&steward_id);
+
+    h.process_until("removal lands despite two silent members", |h| {
+        online
+            .iter()
+            .all(|&m| h.member(m).member_count() == 3 && h.member(m).is_working())
+    });
+
+    let retried = online
+        .iter()
+        .any(|&m| h.member(m).saw_phase(ConversationState::Reelection));
+    assert!(retried, "the online members went through reelection");
+    assert_eq!(
+        h.member(online[0]).epoch(),
+        h.member(online[1]).epoch(),
+        "no fork between the online members"
     );
 }
