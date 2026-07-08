@@ -15,18 +15,18 @@
 //!   the consensus scope.
 
 use std::error::Error as StdError;
-use std::time::Instant;
 
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 
+use hashgraph_like_consensus::error::ConsensusError;
 use hashgraph_like_consensus::protos::consensus::v1::Proposal;
 use prost::Message;
 use tracing::{error, info, warn};
 
 use crate::{
     ConsensusPlugin, ConversationEvent, PeerScoreStorage, ProcessResult, ProposalKind,
-    ScoreSnapshot, StewardList, StewardListConfig,
+    ScoreSnapshot, StewardList, StewardListConfig, WallClock,
     commit_round::{compute_commit_hash, receive_commit_candidate},
     conversation::{ConversationQueues, member_set},
     mls_crypto::{DecryptedMessage, MlsService},
@@ -35,6 +35,7 @@ use crate::{
         AppMessage, ConversationSync, ConversationUpdateRequest, EventMembershipChange,
         TimingConfig, TypeMembershipChange, app_message, conversation_update_request,
     },
+    wall_clock::WallClockExt,
 };
 
 use crate::{Conversation, ConversationError, ConversationState};
@@ -168,10 +169,11 @@ pub enum DispatchOutcome {
     LeaveRequested,
 }
 
-impl<C, Sc> Conversation<C, Sc>
+impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
-    C: ConsensusPlugin,
+    Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
+    Wc: WallClock,
 {
     /// Decrypt and dispatch an inbound conversation payload. Drops self-echoes.
     /// Runs the full dispatch chain internally. Returns
@@ -322,27 +324,51 @@ where
             return Ok(());
         }
 
+        let proposal_id = proposal.proposal_id;
+        let expected_voters = proposal.expected_voters_count;
+        let expiration_timestamp = proposal.expiration_timestamp;
+
+        // Consensus validation runs before any queue mirroring, so a proposal
+        // that fails it (expired or otherwise mis-stamped) leaves no local
+        // trace — a crafted timestamp can't arm the partial freeze or park a
+        // pending update.
+        let scope = self.conversation_id.clone();
+        let local_now = self.clock.now().as_secs();
+        if let Err(e) = self
+            .services
+            .consensus
+            .process_incoming_proposal(&scope, proposal, local_now)
+        {
+            if matches!(e, ConsensusError::ProposalExpired) {
+                self.emit_event(ConversationEvent::Error {
+                    operation: "incoming_proposal".to_string(),
+                    message: format!(
+                        "proposal {proposal_id} expired on arrival \
+                         (expiration {expiration_timestamp}, local now {local_now}); \
+                         possible clock skew"
+                    ),
+                });
+            }
+            return Err(e.into());
+        }
+
         if let Some(req) = decoded.as_ref() {
             let current_epoch = self.mls().current_epoch()?;
             match &req.payload {
                 Some(conversation_update_request::Payload::EmergencyCriteria(_)) => {
-                    self.queues.insert_emergency(proposal.proposal_id);
+                    self.queues.insert_emergency(proposal_id);
                 }
                 Some(conversation_update_request::Payload::MemberInvite(_))
                 | Some(conversation_update_request::Payload::RemoveMember(_)) => {
                     self.queues
                         .insert_pending_update(req.clone(), current_epoch);
                 }
+                Some(conversation_update_request::Payload::StewardElection(_)) => {
+                    self.queues.note_observed_election(proposal_id);
+                }
                 _ => {}
             }
         }
-        let proposal_id = proposal.proposal_id;
-        let expected_voters = proposal.expected_voters_count;
-
-        let scope = self.conversation_id.clone();
-        self.services
-            .consensus
-            .process_incoming_proposal(&scope, proposal)?;
         // Skip the vote request + auto-vote for fast-path proposals: the
         // creator's bundled YES already resolved the consensus session, so peers have
         // nothing to vote on.
@@ -359,6 +385,13 @@ where
             let delay = self.config.voting_delay_for(kind);
             let vote = self.config.liveness_criteria_yes;
             self.register_auto_vote(proposal_id, delay, vote);
+            // The consensus library resolves a quorum short of real votes
+            // only through `handle_consensus_timeout` (silent peers weighted
+            // by the liveness criteria), and it expects the application to
+            // arm that deadline for every session — not just its own
+            // proposals. Without this, a session whose quorum needs
+            // silent-peer weighting resolves on the proposer alone.
+            self.register_consensus_timeout(proposal_id, self.config.consensus_timeout);
         }
         Ok(())
     }
@@ -408,8 +441,11 @@ where
     {
         // The commit merged, so advance to Working FIRST: the bookkeeping below
         // is best-effort and must not be able to strand the state machine in
-        // Selection. reset_retry too — this commit ended any retry cycle.
+        // Selection. reset_retry too — this commit ended any retry cycle, and
+        // the unresponsive-steward accusations and recovery window with it.
         self.services.steward_list.reset_retry();
+        self.queues.clear_unresponsive_stewards();
+        self.timing.reelection_recovered = false;
         let state = self.current_state();
         if matches!(
             state,
@@ -567,7 +603,7 @@ where
         }
         // A backup arms the takeover timer; a plain member can't answer.
         if self.is_steward() && self.timing.sync_resend_anchor.is_none() {
-            self.timing.sync_resend_anchor = Some(Instant::now());
+            self.timing.sync_resend_anchor = Some(self.clock.timestamp());
         }
         Ok(())
     }

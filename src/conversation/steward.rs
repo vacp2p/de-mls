@@ -10,8 +10,8 @@ use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 use tracing::{error, info};
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
-    ElectionDecision, ElectionSkip, PeerScoreStorage, member_set,
+    ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
+    CreatorVote, ElectionDecision, ElectionSkip, PeerScoreStorage, WallClock, member_set,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
         StewardElectionProposal, TimingConfig, ViolationEvidence, conversation_update_request,
@@ -31,10 +31,11 @@ pub(crate) enum StewardListReconcile {
     NeedsElection,
 }
 
-impl<C, Sc> Conversation<C, Sc>
+impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
-    C: ConsensusPlugin,
+    Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
+    Wc: WallClock,
 {
     // ── Public API ───────────────────────────────────────────────────
 
@@ -494,13 +495,18 @@ where
             }
 
             // Build the candidate pool: settled MLS members minus queued
-            // removals (recovery only — non-recovery elections trust the
-            // current MLS roster). Unsettled (just-joined) members are excluded
-            // — they may not have attached MLS and can't serve as stewards yet.
+            // removals and locally-observed unresponsive stewards (recovery
+            // only — non-recovery elections trust the current MLS roster).
+            // Unsettled (just-joined) members are excluded — they may not
+            // have attached MLS and can't serve as stewards yet.
             let candidate_pool: Vec<Vec<u8>> = mls_members
                 .iter()
                 .filter(|m| self.queues.is_settled(m, epoch))
-                .filter(|m| !(recovery && self.queues.has_approved_removal(m)))
+                .filter(|m| {
+                    !(recovery
+                        && (self.queues.has_approved_removal(m)
+                            || self.queues.is_unresponsive_steward(m)))
+                })
                 .cloned()
                 .collect();
             let pool_set: std::collections::HashSet<&[u8]> =
@@ -515,11 +521,29 @@ where
                 recovery,
             )? {
                 ElectionDecision::Skip(skip) => {
-                    if skip == ElectionSkip::NoEligibleCandidates {
-                        info!(
-                            conversation = %self.conversation_id,
-                            "skipping election: {skip}"
-                        );
+                    match skip {
+                        // Routine outcome of every epoch-advance housekeeping
+                        // call — not worth a log line.
+                        ElectionSkip::NotExhausted => {}
+                        ElectionSkip::NotResponsibleProposer => {
+                            let proposer = self.services.steward_list.responsible_proposer(
+                                self.services.steward_list.next_election_round(),
+                                &candidate_pool,
+                                eligible,
+                            );
+                            info!(
+                                conversation = %self.conversation_id,
+                                proposer = ?proposer,
+                                retry_round = self.services.steward_list.next_election_round(),
+                                "skipping election: {skip}"
+                            );
+                        }
+                        ElectionSkip::NoEligibleCandidates => {
+                            info!(
+                                conversation = %self.conversation_id,
+                                "skipping election: {skip}"
+                            );
+                        }
                     }
                     return Ok(());
                 }
@@ -590,9 +614,11 @@ where
     }
 
     /// Whether this member is the deterministic proposer that should auto-file
-    /// the `Deadlock` ECP when re-election exhausts — the election proposer,
-    /// restricted to a candidate that is MLS-present and not queued for removal.
-    /// Gates the automatic escalation so it doesn't file one ECP per member.
+    /// the `Deadlock` ECP when re-election exhausts — the responsible proposer
+    /// for the current retry round, restricted to candidates that are
+    /// MLS-present, not queued for removal, and not locally observed as
+    /// unresponsive. Gates the automatic escalation so it doesn't file one ECP
+    /// per member.
     pub(crate) fn is_deadlock_proposer(&self) -> Result<bool, ConversationError> {
         let mls = self.mls();
         let mls_members = mls.members()?;
@@ -603,9 +629,61 @@ where
         Ok(self
             .services
             .steward_list
-            .election_proposer(|c: &[u8]| {
-                mls_set.contains(c) && !conversation_ref.has_approved_removal(c)
-            })
+            .responsible_proposer(
+                self.services.steward_list.next_election_round(),
+                &mls_members,
+                |c: &[u8]| {
+                    mls_set.contains(c)
+                        && !conversation_ref.has_approved_removal(c)
+                        && !conversation_ref.is_unresponsive_steward(c)
+                },
+            )
             .is_some_and(|proposer| proposer == self_id))
+    }
+
+    /// Advance the election retry ladder after a failed round — an election
+    /// rejected by vote, or a reelection window that passed with no election
+    /// proposal observed at all. Bumps the retry round (which hands proposer
+    /// authority to the next candidate) and re-runs the election; once
+    /// retries are exhausted, the deterministic deadlock proposer escalates
+    /// to the `Deadlock` emergency proposal instead.
+    pub(crate) fn advance_election_retry<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        self.services.steward_list.bump_retry();
+        let round = self.services.steward_list.next_election_round();
+        let max = self.services.steward_list.max_retries();
+        if round > max {
+            info!(
+                conversation = %self.conversation_id,
+                round, max, "election retries exhausted; escalating to Layer 3"
+            );
+            // Only the deterministic proposer auto-files, so simultaneous
+            // exhaustion across members doesn't produce one ECP each.
+            if self.is_deadlock_proposer()?
+                && let Err(e) = self.request_recovery(provider, signer)
+            {
+                error!(conversation = %self.conversation_id, error = %e, "Deadlock ECP filing failed");
+                self.emit_event(ConversationEvent::Error {
+                    operation: "Reelection stuck".to_string(),
+                    message: e.to_string(),
+                });
+            }
+            return Ok(());
+        }
+        info!(
+            conversation = %self.conversation_id,
+            round, max, "election round failed, retrying"
+        );
+        if let Err(e) = self.initiate_steward_election(provider, true, signer) {
+            info!(conversation = %self.conversation_id, error = %e, "election retry deferred");
+        }
+        Ok(())
     }
 }

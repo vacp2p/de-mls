@@ -114,6 +114,20 @@ pub struct ConversationQueues {
     /// Hashes of recently-seen welcome broadcasts, so gossip duplicates
     /// emit a single `WelcomeReady` event.
     welcome_broadcast_hashes: BoundedSet<CommitHash>,
+    /// Stewards this node observed letting the commit-inactivity window lapse
+    /// (the freeze-timeout accusation). Recovery elections and the `Deadlock`
+    /// escalation skip them when resolving proposer authority, so an offline
+    /// steward can't stay the only member authorized to recover from its own
+    /// silence. A member is cleared individually as soon as authenticated
+    /// activity from it is observed (a signature-validated vote) — a comeback
+    /// restores its authority and candidacy mid-recovery — and the whole set
+    /// clears when a commit merges.
+    unresponsive_stewards: HashSet<Vec<u8>>,
+    /// Steward-election proposals observed from peers and not yet resolved by
+    /// consensus. Folded into [`Self::has_election_in_flight`] so a member
+    /// waiting out a peer's election doesn't count the wait as reelection
+    /// silence and claim proposer authority over a vote already running.
+    observed_election_ids: HashSet<ProposalId>,
 }
 
 impl ConversationQueues {
@@ -132,6 +146,8 @@ impl ConversationQueues {
             early_candidates: Vec::new(),
             member_join_epoch: HashMap::new(),
             welcome_broadcast_hashes: BoundedSet::new(dedup_window),
+            unresponsive_stewards: HashSet::new(),
+            observed_election_ids: HashSet::new(),
         }
     }
 
@@ -304,12 +320,52 @@ impl ConversationQueues {
     }
 
     /// Cheap idempotence check for auto-retry: don't submit a second election
-    /// while the previous one is still being voted on. Reads the local
-    /// voting queue — proposal-queue concern, not steward-list state.
+    /// while a previous one — own or a peer's — is still being voted on.
+    /// Reads the local voting queue and the observed-election set — a
+    /// proposal-queue concern, not steward-list state.
     pub fn has_election_in_flight(&self) -> bool {
-        self.voting_proposals
-            .values()
-            .any(|req| ProposalKind::of(req).is_steward_election())
+        !self.observed_election_ids.is_empty()
+            || self
+                .voting_proposals
+                .values()
+                .any(|req| ProposalKind::of(req).is_steward_election())
+    }
+
+    /// Record a peer's steward-election proposal as in flight.
+    pub fn note_observed_election(&mut self, proposal_id: ProposalId) {
+        self.observed_election_ids.insert(proposal_id);
+    }
+
+    /// A consensus outcome landed for `proposal_id` — the election (if it was
+    /// one) is no longer in flight. No-op for other proposal kinds.
+    pub fn clear_observed_election(&mut self, proposal_id: ProposalId) {
+        self.observed_election_ids.remove(&proposal_id);
+    }
+
+    // ─────────────────────────── Unresponsive stewards ───────────────────────────
+
+    /// Record a locally-observed unresponsive steward (the freeze-timeout
+    /// accusation target).
+    pub fn note_unresponsive_steward(&mut self, member_id: Vec<u8>) {
+        self.unresponsive_stewards.insert(member_id);
+    }
+
+    /// Whether this node observed `member_id` letting the commit-inactivity
+    /// window lapse since the last merged commit.
+    pub fn is_unresponsive_steward(&self, member_id: &[u8]) -> bool {
+        self.unresponsive_stewards.contains(member_id)
+    }
+
+    /// Authenticated activity observed from `member_id` — it is back, so the
+    /// accusation no longer holds and its authority/candidacy return.
+    pub fn clear_unresponsive_steward(&mut self, member_id: &[u8]) {
+        self.unresponsive_stewards.remove(member_id);
+    }
+
+    /// A commit merged — the accusations served their purpose; a steward that
+    /// is still silent gets re-accused by the next freeze timeout.
+    pub fn clear_unresponsive_stewards(&mut self) {
+        self.unresponsive_stewards.clear();
     }
 
     // ─────────────────────────── Emergency (RFC §Partial Freeze) ───────────────────────────
@@ -578,6 +634,23 @@ mod tests {
     fn insert_self_leave(conversation: &mut ConversationQueues, member_id: &[u8]) {
         let remove = ConversationUpdateRequest::remove_member(member_id.to_vec());
         conversation.insert_approved_proposal(self_leave_proposal_id(member_id), remove);
+    }
+
+    #[test]
+    fn unresponsive_accusation_lifts_on_comeback_and_on_commit() {
+        let mut conversation = ConversationQueues::new("test-conversation", 10);
+        conversation.note_unresponsive_steward(member(1));
+        conversation.note_unresponsive_steward(member(2));
+        assert!(conversation.is_unresponsive_steward(&member(1)));
+
+        // Authenticated activity from member 1 — its accusation alone lifts.
+        conversation.clear_unresponsive_steward(&member(1));
+        assert!(!conversation.is_unresponsive_steward(&member(1)));
+        assert!(conversation.is_unresponsive_steward(&member(2)));
+
+        // A merged commit clears the rest.
+        conversation.clear_unresponsive_stewards();
+        assert!(!conversation.is_unresponsive_steward(&member(2)));
     }
 
     #[test]

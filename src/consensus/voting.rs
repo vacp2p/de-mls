@@ -8,7 +8,7 @@
 //! service and return a wire message for the caller to broadcast.
 
 use std::error::Error as StdError;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use hashgraph_like_consensus::{
     error::ConsensusError,
@@ -24,9 +24,10 @@ use tracing::info;
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
-    PeerScoreStorage, ProposalKind,
+    PeerScoreStorage, ProposalKind, WallClock,
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
     self_leave_proposal_id,
+    wall_clock::WallClockExt,
 };
 
 /// The creator's intent at proposal submit time.
@@ -52,10 +53,11 @@ struct ProposalParams {
     liveness_criteria_yes: bool,
 }
 
-impl<C, Sc> Conversation<C, Sc>
+impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
-    C: ConsensusPlugin,
+    Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
+    Wc: WallClock,
 {
     // ── Public API ───────────────────────────────────────────────────
 
@@ -113,10 +115,12 @@ where
                 // have the proposal yet, so a Vote-only message would be
                 // undeliverable.
                 let scope = self.conversation_id.clone();
+                let now = self.clock.now().as_secs();
                 let proposal = self.services.consensus.cast_vote_and_get_proposal(
                     &scope,
                     proposal_id,
                     true,
+                    now,
                 )?;
                 info!(
                     conversation = %self.conversation_id,
@@ -180,7 +184,7 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let now = std::time::Instant::now();
+        let now = self.clock.timestamp();
         let auto_votes_due: Vec<(u32, bool)> = self
             .timing
             .pending_auto_votes
@@ -204,11 +208,26 @@ where
 
         for (proposal_id, vote) in auto_votes_due {
             if let Err(e) = self.broadcast_vote(provider, proposal_id, vote, signer) {
-                tracing::debug!(
-                    proposal_id,
-                    error = %e,
-                    "auto-vote skipped (already voted or session resolved)"
-                );
+                match e {
+                    ConversationError::Consensus(
+                        ConsensusError::UserAlreadyVoted
+                        | ConsensusError::SessionNotActive
+                        | ConsensusError::SessionNotFound,
+                    ) => tracing::debug!(
+                        proposal_id,
+                        error = %e,
+                        "auto-vote skipped: already voted or session resolved"
+                    ),
+                    ConversationError::Consensus(ConsensusError::ProposalExpired) => {
+                        tracing::warn!(
+                            proposal_id,
+                            error = %e,
+                            "auto-vote dropped: proposal expired before the vote fired; \
+                             possible clock skew"
+                        )
+                    }
+                    _ => tracing::warn!(proposal_id, error = %e, "auto-vote failed"),
+                }
             }
         }
         for proposal_id in timeouts_due {
@@ -280,14 +299,29 @@ where
     /// Feed a peer's vote into the local consensus session.
     ///
     /// Late arrivals are swallowed (logged, `Ok`) so inbound dispatch keeps
-    /// draining.
-    pub(crate) fn forward_incoming_vote(&self, vote: Vote) -> Result<(), ConversationError> {
+    /// draining. A vote that passes signature validation is authenticated
+    /// liveness proof for its owner, so it lifts any local unresponsive-
+    /// steward accusation — a member that comes back mid-recovery regains
+    /// proposer authority and steward candidacy.
+    pub(crate) fn forward_incoming_vote(&mut self, vote: Vote) -> Result<(), ConversationError> {
         let proposal_id = vote.proposal_id;
+        let vote_owner = vote.vote_owner.clone();
         let outcome_applied_locally = self.queues.is_consensus_outcome_applied(proposal_id);
         let scope = self.conversation_id.clone();
-        match self.services.consensus.process_incoming_vote(&scope, vote) {
-            Ok(()) => Ok(()),
+        let now = self.clock.now().as_secs();
+        match self
+            .services
+            .consensus
+            .process_incoming_vote(&scope, vote, now)
+        {
+            Ok(()) => {
+                self.queues.clear_unresponsive_steward(&vote_owner);
+                Ok(())
+            }
             Err(ConsensusError::SessionNotActive) => {
+                // Signature validation ran before the session-state check, so
+                // even a late vote proves its owner is back.
+                self.queues.clear_unresponsive_steward(&vote_owner);
                 tracing::debug!(
                     conversation = %self.conversation_id,
                     proposal_id,
@@ -318,9 +352,15 @@ where
     // ── Private ──────────────────────────────────────────────────────
 
     /// Gate a new proposal on the current state and return the expected
-    /// voter count (the full member set). During `Reelection` only
-    /// emergency and election proposals pass; an active emergency
-    /// partial-freezes everything below its priority.
+    /// voter count: the member set minus locally-observed unresponsive
+    /// stewards. Counting an accused-silent member as an expected voter
+    /// would make the recovery ladder's own consensus rounds unresolvable
+    /// in small groups (with two expected voters the consensus library
+    /// requires both real votes, so one offline member vetoes by silence).
+    /// The stamped count travels with the proposal, so every peer's session
+    /// runs the same math. During `Reelection` only emergency and election
+    /// proposals pass; an active emergency partial-freezes everything below
+    /// its priority.
     fn check_proposal_allowed(&self, kind: ProposalKind) -> Result<u32, ConversationError> {
         let state = self.current_state();
 
@@ -344,7 +384,11 @@ where
         }
 
         let members = self.mls().members()?;
-        Ok(members.len() as u32)
+        let expected = members
+            .iter()
+            .filter(|m| !self.queues.is_unresponsive_steward(m))
+            .count();
+        Ok(expected as u32)
     }
 
     /// Push a proposal whose deadline elapsed into the consensus library's
@@ -364,11 +408,11 @@ where
         if !still_active {
             return;
         }
-        match self
-            .services
-            .consensus
-            .handle_consensus_timeout(&scope, proposal_id)
-        {
+        match self.services.consensus.handle_consensus_timeout(
+            &scope,
+            proposal_id,
+            self.clock.now().as_secs(),
+        ) {
             Ok(_) => {}
             Err(ConsensusError::SessionNotFound) | Err(ConsensusError::SessionNotActive) => {
                 let resolved_locally = self.queues.is_consensus_outcome_applied(proposal_id);
@@ -412,10 +456,11 @@ where
             conversation = %self.conversation_id,
             proposal_id, choice, "vote cast"
         );
+        let now = self.clock.now().as_secs();
         let vote_msg = self
             .services
             .consensus
-            .cast_vote(&scope, proposal_id, vote)?;
+            .cast_vote(&scope, proposal_id, vote, now)?;
 
         let payload = self
             .mls_mut()
@@ -445,6 +490,7 @@ where
             &scope,
             create_request,
             Some(ConsensusConfig::gossipsub().with_timeout(params.consensus_timeout)?),
+            self.clock.now().as_secs(),
         )?;
 
         info!(
@@ -472,7 +518,7 @@ where
         let request = ConversationUpdateRequest::remove_member(self_member_id.to_vec());
         let payload = request.encode_to_vec();
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let now = self.clock.now().as_secs();
         let expiration = now.saturating_add(params.proposal_expiration.as_secs());
 
         let proposal_id = self_leave_proposal_id(self_member_id);
@@ -489,14 +535,14 @@ where
             liveness_criteria_yes: params.liveness_criteria_yes,
         };
 
-        let yes_vote = build_vote(&proposal, true, self.services.consensus.signer())?;
+        let yes_vote = build_vote(&proposal, true, self.services.consensus.signer(), now)?;
         proposal.votes.push(yes_vote);
 
         let scope = self.conversation_id.clone();
         match self
             .services
             .consensus
-            .process_incoming_proposal(&scope, proposal.clone())
+            .process_incoming_proposal(&scope, proposal.clone(), now)
         {
             Ok(()) => {
                 info!(

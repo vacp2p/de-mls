@@ -42,9 +42,9 @@ pub trait ConsensusPlugin {
 /// The consensus engine de-mls runs per conversation: the integrator's storage
 /// and signer over de-mls's fixed scope key and outcome bus. Built inside
 /// [`crate::Conversation::create`] / `join`.
-pub type ConsensusEngine<C> = ConsensusService<
+pub type ConsensusEngine<Cp> = ConsensusService<
     ScopeID,
-    <C as ConsensusPlugin>::ConsensusStorage,
+    <Cp as ConsensusPlugin>::ConsensusStorage,
     OutcomeBus,
-    <C as ConsensusPlugin>::Signer,
+    <Cp as ConsensusPlugin>::Signer,
 >;

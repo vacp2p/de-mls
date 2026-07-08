@@ -2,13 +2,14 @@
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, Extensions, GroupContext,
-    MemberRole, PeerScoreStorage, protos::de_mls::messages::v1::ConversationUpdateRequest,
+    MemberRole, PeerScoreStorage,WallClock, protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
-impl<C, Sc> Conversation<C, Sc>
+impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
-    C: ConsensusPlugin,
+    Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
+    Wc: WallClock,
 {
     /// Current state of the conversation's state machine.
     pub fn state(&self) -> ConversationState {

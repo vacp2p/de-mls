@@ -200,6 +200,39 @@ impl StewardListService {
             .and_then(|l| l.epoch_steward(l.election_epoch(), eligible))
     }
 
+    /// The member authorized to act for election retry round `round`: entry
+    /// `round % len` of the authority sequence — the installed list's eligible
+    /// members in rotation order, followed by the remaining eligible
+    /// candidates in ascending id order. Round 0 is the classic
+    /// [`Self::election_proposer`]; every failed round (rejected by vote or
+    /// silent past the reelection window) hands authority to the next entry,
+    /// so an unresponsive proposer can't strand the election or the
+    /// `Deadlock` escalation. `None` when nobody is eligible.
+    pub fn responsible_proposer<'a, F: Fn(&[u8]) -> bool>(
+        &'a self,
+        round: u32,
+        candidate_pool: &'a [Vec<u8>],
+        eligible: F,
+    ) -> Option<&'a [u8]> {
+        let list_members = self.list.as_ref().map(|l| l.members()).unwrap_or(&[]);
+        let mut sequence: Vec<&[u8]> = list_members
+            .iter()
+            .map(Vec::as_slice)
+            .filter(|c| eligible(c))
+            .collect();
+        let mut pool_rest: Vec<&[u8]> = candidate_pool
+            .iter()
+            .map(Vec::as_slice)
+            .filter(|c| eligible(c) && !sequence.contains(c))
+            .collect();
+        pool_rest.sort_unstable();
+        sequence.append(&mut pool_rest);
+        if sequence.is_empty() {
+            return None;
+        }
+        Some(sequence[round as usize % sequence.len()])
+    }
+
     /// Build and install a list of size `sn`. `retry_round` seeds the SHA256 sort
     /// and is stored on the list; use `0` for bootstrap and deterministic regen.
     pub fn install_list(
@@ -254,17 +287,17 @@ impl StewardListService {
         if !recovery && !self.is_exhausted(epoch) {
             return Ok(ElectionDecision::Skip(ElectionSkip::NotExhausted));
         }
+        if candidate_pool.is_empty() {
+            return Ok(ElectionDecision::Skip(ElectionSkip::NoEligibleCandidates));
+        }
+        let retry_round = self.next_election_round();
         let is_authorized = self
-            .election_proposer(&eligible)
+            .responsible_proposer(retry_round, candidate_pool, &eligible)
             .is_some_and(|proposer| proposer == self_member_id);
         if !is_authorized {
             return Ok(ElectionDecision::Skip(ElectionSkip::NotResponsibleProposer));
         }
-        if candidate_pool.is_empty() {
-            return Ok(ElectionDecision::Skip(ElectionSkip::NoEligibleCandidates));
-        }
 
-        let retry_round = self.next_election_round();
         let sn = self.config.compute_list_size(candidate_pool.len());
         let list = StewardList::generate(
             epoch,
@@ -471,6 +504,60 @@ mod tests {
             .election_proposer(|c: &[u8]| c != proposer.as_slice())
             .unwrap();
         assert_ne!(next, proposer.as_slice());
+    }
+
+    #[test]
+    fn responsible_proposer_round_zero_matches_election_proposer() {
+        let mut p = StewardListService::empty(StewardListConfig::new(3, 3).unwrap());
+        let mems = members(&[1, 2, 3]);
+        p.install_list(0, &mems, 3, 0).unwrap();
+
+        assert_eq!(
+            p.responsible_proposer(0, &mems, |_: &[u8]| true),
+            p.election_proposer(|_: &[u8]| true),
+        );
+    }
+
+    #[test]
+    fn responsible_proposer_falls_back_past_ineligible_list() {
+        // The whole installed list is ineligible (e.g. its sole steward is
+        // unresponsive): authority falls back to the lowest eligible pool id.
+        let mut p = StewardListService::empty(StewardListConfig::new(1, 1).unwrap());
+        let listed = members(&[9]);
+        p.install_list(0, &listed, 1, 0).unwrap();
+
+        let pool = members(&[3, 2, 9]);
+        let proposer = p
+            .responsible_proposer(0, &pool, |c: &[u8]| c != member(9).as_slice())
+            .unwrap();
+        assert_eq!(proposer, member(2).as_slice());
+    }
+
+    #[test]
+    fn responsible_proposer_rotates_by_round() {
+        // Authority sequence: eligible list members in list order, then the
+        // remaining eligible pool ids ascending; the round indexes it (mod
+        // len), so every failed round hands authority to the next candidate.
+        let mut p = StewardListService::empty(StewardListConfig::new(1, 1).unwrap());
+        let listed = members(&[9]);
+        p.install_list(0, &listed, 1, 0).unwrap();
+
+        let pool = members(&[3, 2, 9]);
+        let all = |_: &[u8]| true;
+        assert_eq!(p.responsible_proposer(0, &pool, all).unwrap(), member(9));
+        assert_eq!(p.responsible_proposer(1, &pool, all).unwrap(), member(2));
+        assert_eq!(p.responsible_proposer(2, &pool, all).unwrap(), member(3));
+        assert_eq!(p.responsible_proposer(3, &pool, all).unwrap(), member(9));
+    }
+
+    #[test]
+    fn responsible_proposer_none_when_no_one_eligible() {
+        let mut p = StewardListService::empty(StewardListConfig::new(1, 1).unwrap());
+        let listed = members(&[9]);
+        p.install_list(0, &listed, 1, 0).unwrap();
+
+        let pool = members(&[2]);
+        assert_eq!(p.responsible_proposer(0, &pool, |_: &[u8]| false), None);
     }
 
     #[test]

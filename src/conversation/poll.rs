@@ -6,10 +6,7 @@
 //! `poll()` once per wakeup cycle and reacts to the returned [`PollOutcome`].
 
 use std::error::Error as StdError;
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
@@ -18,8 +15,9 @@ use tracing::{error, info, warn};
 
 use crate::{
     CommitRoundOutcome, ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
-    ConversationState, DispatchOutcome, PeerScoreStorage, ScoreEvent, ScoreOp,
+    ConversationState, DispatchOutcome, PeerScoreStorage, ScoreEvent, ScoreOp, WallClock,
     protos::de_mls::messages::v1::{AppMessage, MemberWelcome},
+    wall_clock::WallClockExt,
 };
 
 /// Summary returned by [`Conversation::poll`] after one polling pass.
@@ -34,10 +32,11 @@ pub struct PollOutcome {
     pub leave_requested: bool,
 }
 
-impl<C, Sc> Conversation<C, Sc>
+impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
-    C: ConsensusPlugin,
+    Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
+    Wc: WallClock,
 {
     /// Drive one polling cycle: tick consensus deadlines, advance freeze
     /// state, and check steward inactivity.
@@ -92,6 +91,14 @@ where
                 conversation = %self.conversation_id,
                 error = %e,
                 "inactivity-freeze error in poll"
+            );
+        }
+
+        if let Err(e) = self.drive_reelection_retry(provider, signer) {
+            warn!(
+                conversation = %self.conversation_id,
+                error = %e,
+                "reelection-retry drive error in poll"
             );
         }
 
@@ -151,7 +158,9 @@ where
                 .recovery_auto_commit_delay
                 .unwrap_or(Duration::ZERO)
                 + self.config.recovery_inactivity_duration;
-            self.timing.phase_timer.elapsed_since_anchor(window)
+            self.timing
+                .phase_timer
+                .elapsed_since_anchor(self.clock.timestamp(), window)
         } else {
             self.is_freeze_window_elapsed()
         };
@@ -305,6 +314,10 @@ where
                     };
                     let accused = accuse_target.is_some();
                     if let Some(steward_id) = accuse_target {
+                        // Also strip the accused of recovery proposer
+                        // authority — an offline steward must not stay the
+                        // only member authorized to elect its replacement.
+                        self.queues.note_unresponsive_steward(steward_id.clone());
                         self.services.scoring.apply_op(&ScoreOp {
                             member_id: steward_id,
                             event: ScoreEvent::CensorshipInactivity,
@@ -385,7 +398,10 @@ where
         let Some(delay) = self.config.recovery_auto_commit_delay else {
             return;
         };
-        if !self.timing.phase_timer.elapsed_since_anchor(delay)
+        if !self
+            .timing
+            .phase_timer
+            .elapsed_since_anchor(self.clock.timestamp(), delay)
             || self.queues.commit_round.has_local_candidate()
         {
             return;
@@ -473,15 +489,16 @@ where
         }
 
         // Backup steward: give the epoch steward the recovery window first.
+        let now = self.clock.timestamp();
         let anchor = match self.timing.buffered_propose_anchor {
             Some(a) => a,
             None => {
-                self.timing.buffered_propose_anchor = Some(Instant::now());
+                self.timing.buffered_propose_anchor = Some(now);
                 return Ok(());
             }
         };
         let delay = self.config.voting_inactivity_window();
-        if Instant::now() < anchor + delay {
+        if now < anchor + delay {
             return Ok(());
         }
         self.timing.buffered_propose_anchor = None;
@@ -515,7 +532,7 @@ where
             self.timing.sync_resend_anchor = None;
             return Ok(());
         }
-        if Instant::now() < anchor + self.config.voting_inactivity_window() {
+        if self.clock.timestamp() < anchor + self.config.voting_inactivity_window() {
             return Ok(());
         }
         self.timing.sync_resend_anchor = None;
@@ -548,9 +565,12 @@ where
             return Ok(());
         }
         // Recovery uses the shorter retry inactivity window so we don't
-        // burn another full epoch waiting for a steward to commit.
-        let in_recovery =
-            self.is_in_recovery_mode() || self.services.steward_list.next_election_round() > 0;
+        // burn another full epoch waiting for a steward to commit. That
+        // covers open recovery mode, a bumped retry round, and the stretch
+        // between a recovery election landing and its commit merging.
+        let in_recovery = self.is_in_recovery_mode()
+            || self.services.steward_list.next_election_round() > 0
+            || self.timing.reelection_recovered;
         let inactivity = if in_recovery {
             self.config.recovery_inactivity_duration
         } else if self.is_epoch_steward()? {
@@ -575,5 +595,46 @@ where
         );
         self.on_freeze_entered(provider, signer, event)?;
         Ok(())
+    }
+
+    /// Reelection-silence watchdog: while parked in `Reelection` with no
+    /// election in flight, a full silent window counts as a rejected round —
+    /// [`Conversation::advance_election_retry`] bumps the retry ladder, which
+    /// hands proposer authority to the next candidate and, once retries are
+    /// exhausted, escalates to the `Deadlock` emergency proposal. Without
+    /// this, a responsible proposer that never submits (e.g. an offline sole
+    /// steward) would park the conversation in `Reelection` forever.
+    fn drive_reelection_retry<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if self.current_state() != ConversationState::Reelection
+            || self.queues.has_election_in_flight()
+        {
+            self.timing.reelection_silence_anchor = None;
+            return Ok(());
+        }
+        let now = self.clock.timestamp();
+        let anchor = match self.timing.reelection_silence_anchor {
+            Some(a) => a,
+            None => {
+                self.timing.reelection_silence_anchor = Some(now);
+                return Ok(());
+            }
+        };
+        if now < anchor + self.config.voting_inactivity_window() {
+            return Ok(());
+        }
+        self.timing.reelection_silence_anchor = None;
+        info!(
+            conversation = %self.conversation_id,
+            "no election proposal observed within the reelection window: counting a rejected round"
+        );
+        self.advance_election_retry(provider, signer)
     }
 }
