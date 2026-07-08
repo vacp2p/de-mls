@@ -10,8 +10,8 @@ use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 use tracing::{error, info};
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
-    ElectionDecision, ElectionSkip, PeerScoreStorage, WallClock, member_set,
+    ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
+    CreatorVote, ElectionDecision, ElectionSkip, PeerScoreStorage, WallClock, member_set,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
         StewardElectionProposal, TimingConfig, ViolationEvidence, conversation_update_request,
@@ -639,5 +639,51 @@ where
                 },
             )
             .is_some_and(|proposer| proposer == self_id))
+    }
+
+    /// Advance the election retry ladder after a failed round — an election
+    /// rejected by vote, or a reelection window that passed with no election
+    /// proposal observed at all. Bumps the retry round (which hands proposer
+    /// authority to the next candidate) and re-runs the election; once
+    /// retries are exhausted, the deterministic deadlock proposer escalates
+    /// to the `Deadlock` emergency proposal instead.
+    pub(crate) fn advance_election_retry<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        self.services.steward_list.bump_retry();
+        let round = self.services.steward_list.next_election_round();
+        let max = self.services.steward_list.max_retries();
+        if round > max {
+            info!(
+                conversation = %self.conversation_id,
+                round, max, "election retries exhausted; escalating to Layer 3"
+            );
+            // Only the deterministic proposer auto-files, so simultaneous
+            // exhaustion across members doesn't produce one ECP each.
+            if self.is_deadlock_proposer()?
+                && let Err(e) = self.request_recovery(provider, signer)
+            {
+                error!(conversation = %self.conversation_id, error = %e, "Deadlock ECP filing failed");
+                self.emit_event(ConversationEvent::Error {
+                    operation: "Reelection stuck".to_string(),
+                    message: e.to_string(),
+                });
+            }
+            return Ok(());
+        }
+        info!(
+            conversation = %self.conversation_id,
+            round, max, "election round failed, retrying"
+        );
+        if let Err(e) = self.initiate_steward_election(provider, true, signer) {
+            info!(conversation = %self.conversation_id, error = %e, "election retry deferred");
+        }
+        Ok(())
     }
 }

@@ -123,6 +123,11 @@ pub struct ConversationQueues {
     /// restores its authority and candidacy mid-recovery — and the whole set
     /// clears when a commit merges.
     unresponsive_stewards: HashSet<Vec<u8>>,
+    /// Steward-election proposals observed from peers and not yet resolved by
+    /// consensus. Folded into [`Self::has_election_in_flight`] so a member
+    /// waiting out a peer's election doesn't count the wait as reelection
+    /// silence and claim proposer authority over a vote already running.
+    observed_election_ids: HashSet<ProposalId>,
 }
 
 impl ConversationQueues {
@@ -142,6 +147,7 @@ impl ConversationQueues {
             member_join_epoch: HashMap::new(),
             welcome_broadcast_hashes: BoundedSet::new(dedup_window),
             unresponsive_stewards: HashSet::new(),
+            observed_election_ids: HashSet::new(),
         }
     }
 
@@ -314,12 +320,26 @@ impl ConversationQueues {
     }
 
     /// Cheap idempotence check for auto-retry: don't submit a second election
-    /// while the previous one is still being voted on. Reads the local
-    /// voting queue — proposal-queue concern, not steward-list state.
+    /// while a previous one — own or a peer's — is still being voted on.
+    /// Reads the local voting queue and the observed-election set — a
+    /// proposal-queue concern, not steward-list state.
     pub fn has_election_in_flight(&self) -> bool {
-        self.voting_proposals
-            .values()
-            .any(|req| ProposalKind::of(req).is_steward_election())
+        !self.observed_election_ids.is_empty()
+            || self
+                .voting_proposals
+                .values()
+                .any(|req| ProposalKind::of(req).is_steward_election())
+    }
+
+    /// Record a peer's steward-election proposal as in flight.
+    pub fn note_observed_election(&mut self, proposal_id: ProposalId) {
+        self.observed_election_ids.insert(proposal_id);
+    }
+
+    /// A consensus outcome landed for `proposal_id` — the election (if it was
+    /// one) is no longer in flight. No-op for other proposal kinds.
+    pub fn clear_observed_election(&mut self, proposal_id: ProposalId) {
+        self.observed_election_ids.remove(&proposal_id);
     }
 
     // ─────────────────────────── Unresponsive stewards ───────────────────────────

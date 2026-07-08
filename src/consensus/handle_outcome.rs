@@ -84,6 +84,7 @@ where
             proposal_id, approved, "consensus reached"
         );
         self.queues.mark_consensus_outcome_applied(proposal_id);
+        self.queues.clear_observed_election(proposal_id);
         let consensus_apply =
             apply_consensus_result(&mut self.queues, proposal_id, approved, &request)?;
 
@@ -100,7 +101,7 @@ where
                 self.handle_election_accepted(provider, election, signer)?;
             }
             ConsensusApplyResult::ElectionRejected => {
-                self.handle_election_rejected(provider, signer)?;
+                self.advance_election_retry(provider, signer)?;
             }
             ConsensusApplyResult::RecoveryModeOpened => {
                 // Open the collection window and notify the integrator; who mints
@@ -227,48 +228,6 @@ where
         );
 
         self.process_buffered_updates(provider, signer)
-    }
-
-    /// Bump the retry round and re-run the election, or escalate to a
-    /// `Deadlock` emergency proposal once retries are exhausted.
-    fn handle_election_rejected<Pr>(
-        &mut self,
-        provider: &Pr,
-        signer: &impl Signer,
-    ) -> Result<(), ConversationError>
-    where
-        Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
-    {
-        self.services.steward_list.bump_retry();
-        let round = self.services.steward_list.next_election_round();
-        let max = self.services.steward_list.max_retries();
-        if round > max {
-            info!(
-                conversation = %self.conversation_id,
-                round, max, "election retries exhausted; escalating to Layer 3"
-            );
-            // Only the deterministic proposer auto-files, so simultaneous
-            // exhaustion across members doesn't produce one ECP each.
-            if self.is_deadlock_proposer()?
-                && let Err(e) = self.request_recovery(provider, signer)
-            {
-                error!(conversation = %self.conversation_id, error = %e, "Deadlock ECP filing failed");
-                self.emit_event(ConversationEvent::Error {
-                    operation: "Reelection stuck".to_string(),
-                    message: e.to_string(),
-                });
-            }
-            return Ok(());
-        }
-        info!(
-            conversation = %self.conversation_id,
-            round, max, "steward election rejected, retrying"
-        );
-        if let Err(e) = self.initiate_steward_election(provider, true, signer) {
-            info!(conversation = %self.conversation_id, error = %e, "election retry deferred");
-        }
-        Ok(())
     }
 
     /// Emergency proposal resolved: apply the score ops, clear the

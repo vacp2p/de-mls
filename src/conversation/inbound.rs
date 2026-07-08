@@ -363,6 +363,9 @@ where
                     self.queues
                         .insert_pending_update(req.clone(), current_epoch);
                 }
+                Some(conversation_update_request::Payload::StewardElection(_)) => {
+                    self.queues.note_observed_election(proposal_id);
+                }
                 _ => {}
             }
         }

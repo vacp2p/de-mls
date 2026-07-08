@@ -94,6 +94,14 @@ where
             );
         }
 
+        if let Err(e) = self.drive_reelection_retry(provider, signer) {
+            warn!(
+                conversation = %self.conversation_id,
+                error = %e,
+                "reelection-retry drive error in poll"
+            );
+        }
+
         PollOutcome {
             next_wakeup_in: self.next_wakeup_in(),
             leave_requested,
@@ -584,5 +592,46 @@ where
         );
         self.on_freeze_entered(provider, signer, event)?;
         Ok(())
+    }
+
+    /// Reelection-silence watchdog: while parked in `Reelection` with no
+    /// election in flight, a full silent window counts as a rejected round —
+    /// [`Conversation::advance_election_retry`] bumps the retry ladder, which
+    /// hands proposer authority to the next candidate and, once retries are
+    /// exhausted, escalates to the `Deadlock` emergency proposal. Without
+    /// this, a responsible proposer that never submits (e.g. an offline sole
+    /// steward) would park the conversation in `Reelection` forever.
+    fn drive_reelection_retry<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if self.current_state() != ConversationState::Reelection
+            || self.queues.has_election_in_flight()
+        {
+            self.timing.reelection_silence_anchor = None;
+            return Ok(());
+        }
+        let now = self.clock.timestamp();
+        let anchor = match self.timing.reelection_silence_anchor {
+            Some(a) => a,
+            None => {
+                self.timing.reelection_silence_anchor = Some(now);
+                return Ok(());
+            }
+        };
+        if now < anchor + self.config.voting_inactivity_window() {
+            return Ok(());
+        }
+        self.timing.reelection_silence_anchor = None;
+        info!(
+            conversation = %self.conversation_id,
+            "no election proposal observed within the reelection window: counting a rejected round"
+        );
+        self.advance_election_retry(provider, signer)
     }
 }
