@@ -34,8 +34,10 @@ where
     /// local member installed as sole steward at epoch 0. The library seeds a
     /// fresh MLS group into `provider` (which it does not retain) from
     /// `credential` and `ciphersuite`. `member_id` names the local member — the
-    /// opaque id bytes the protocol matches on. `clock` is the caller-owned
-    /// time source every deadline is measured against.
+    /// opaque id bytes the protocol matches on. `clock` moves in and becomes
+    /// the conversation's time source — every deadline is measured against
+    /// it; a shared clock (e.g. [`crate::MockClock`]) stays drivable through
+    /// a clone the caller keeps.
     #[allow(clippy::too_many_arguments)]
     pub fn create<Pr>(
         conversation_id: &str,
@@ -84,8 +86,10 @@ where
     /// packages — the "not for us" branch, not an error.
     ///
     /// The conversation id comes from the MLS group, so the caller needs no
-    /// prior knowledge of the conversation. `clock` is the caller-owned
-    /// time source every deadline is measured against.
+    /// prior knowledge of the conversation. `clock` moves in and becomes
+    /// the conversation's time source — every deadline is measured against
+    /// it; a shared clock (e.g. [`crate::MockClock`]) stays drivable through
+    /// a clone the caller keeps.
     #[allow(clippy::too_many_arguments)]
     pub fn join<Pr>(
         member_id: &[u8],

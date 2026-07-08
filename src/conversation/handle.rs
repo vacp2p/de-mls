@@ -128,8 +128,9 @@ pub struct Conversation<Cp: ConsensusPlugin, Sc: PeerScoreStorage, Wc: WallClock
     /// registry and is used to construct scope keys for consensus operations.
     /// Read via [`Conversation::conversation_id`].
     pub(crate) conversation_id: String,
-    /// Caller-owned time source. Every deadline anchor and the consensus
-    /// wire timestamps derive from `clock.now()`.
+    /// The conversation's time source, moved in at construction. Every
+    /// deadline anchor and the consensus wire timestamps derive from
+    /// `clock.now()`.
     pub(crate) clock: Wc,
     pub(crate) queues: ConversationQueues,
     /// Per-conversation MLS service, plug-in instances, and consensus wiring.

@@ -78,7 +78,7 @@ pub mod proposal_kind;
 /// Wall-clock anchor combined with the conversation state machine.
 pub mod phase_timer;
 
-/// Caller-owned time source: [`WallClock`] trait, [`Timestamp`],
+/// Caller-supplied time source: [`WallClock`] trait, [`Timestamp`],
 /// and the test-oriented [`MockClock`].
 pub mod wall_clock;
 

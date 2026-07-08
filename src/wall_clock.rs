@@ -1,4 +1,4 @@
-//! Caller-owned time source.
+//! Caller-supplied time source.
 //!
 //! Every deadline in the library — commit/recovery inactivity, the freeze
 //! window, consensus timeouts, auto-votes — is measured against a
@@ -53,9 +53,10 @@ impl Add<Duration> for Timestamp {
     }
 }
 
-/// The conversation's time source, owned by the integrator and moved in at
-/// construction like the other services. All deadline math and the
-/// consensus wire timestamps derive from [`now`](WallClock::now).
+/// The conversation's time source. The integrator picks the impl and moves
+/// an instance in at construction like the other services; the conversation
+/// owns it from then on. All deadline math and the consensus wire
+/// timestamps derive from [`now`](WallClock::now).
 pub trait WallClock {
     /// The current time. Successive readings must never decrease — a
     /// reading that runs backwards un-elapses pending deadlines.
