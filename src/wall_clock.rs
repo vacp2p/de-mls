@@ -58,31 +58,45 @@ impl Add<Duration> for Timestamp {
 /// owns it from then on. All deadline math and the consensus wire
 /// timestamps derive from [`now`](WallClock::now).
 pub trait WallClock {
-    /// The current time. Successive readings must never decrease — a
-    /// reading that runs backwards un-elapses pending deadlines and can
-    /// break the timestamp ordering peers validate votes against.
+    /// The current time as a duration since the Unix epoch. Successive
+    /// readings must never decrease — a reading that runs backwards
+    /// un-elapses pending deadlines and can break the timestamp ordering
+    /// peers validate votes against.
     ///
     /// This is weaker than a monotonic clock: forward jumps, freezes, and
     /// slew are all fine; only backwards readings are ruled out. A
     /// [`std::time::SystemTime`]-backed impl should clamp against backwards
     /// steps (return the max of the last reading and now).
-    fn now(&self) -> Timestamp;
+    fn now(&self) -> Duration;
 }
+
+/// Internal bridge from the integrator-facing [`WallClock`] (plain
+/// [`Duration`] since the Unix epoch) to the [`Timestamp`] the library's
+/// deadline math runs on. Blanket-implemented for every clock, so external
+/// impls never construct the wrapper type.
+pub(crate) trait WallClockExt: WallClock {
+    /// [`WallClock::now`] as a [`Timestamp`].
+    fn timestamp(&self) -> Timestamp {
+        Timestamp::from_duration_since_epoch(self.now())
+    }
+}
+
+impl<Wc: WallClock> WallClockExt for Wc {}
 
 /// Manually driven clock for tests, nanosecond-precise. Clones share the
 /// same underlying  time, so a test keeps one handle to [`advance`](MockClock::advance)
 /// while the conversation owns another.
 ///
-/// Starts at [`Timestamp::ZERO`]; use [`MockClock::at`] to start elsewhere
+/// Starts at the Unix epoch; use [`MockClock::at`] to start elsewhere
 /// (e.g. real time, or skewed relative to another member's clock).
 #[derive(Debug, Clone, Default)]
 pub struct MockClock {
     now_nanos: Arc<AtomicU64>,
 }
 
-/// Truncate a [`Timestamp`] into the `MockClock` nanosecond range.
-fn timestamp_nanos(t: Timestamp) -> u64 {
-    t.0.as_nanos().min(u64::MAX as u128) as u64
+/// Truncate a [`Duration`] into the `MockClock` nanosecond range.
+fn duration_nanos(d: Duration) -> u64 {
+    d.as_nanos().min(u64::MAX as u128) as u64
 }
 
 impl MockClock {
@@ -90,17 +104,17 @@ impl MockClock {
         Self::default()
     }
 
-    /// A clock starting at `start`.
-    pub fn at(start: Timestamp) -> Self {
+    /// A clock starting at `start` past the Unix epoch.
+    pub fn at(start: Duration) -> Self {
         Self {
-            now_nanos: Arc::new(AtomicU64::new(timestamp_nanos(start))),
+            now_nanos: Arc::new(AtomicU64::new(duration_nanos(start))),
         }
     }
 
     /// Move time forward by `d` (saturating). Visible to every clone
     /// immediately.
     pub fn advance(&self, d: Duration) {
-        let add = d.as_nanos().min(u64::MAX as u128) as u64;
+        let add = duration_nanos(d);
         let _ = self
             .now_nanos
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
@@ -110,8 +124,8 @@ impl MockClock {
 }
 
 impl WallClock for MockClock {
-    fn now(&self) -> Timestamp {
-        Timestamp(Duration::from_nanos(self.now_nanos.load(Ordering::Relaxed)))
+    fn now(&self) -> Duration {
+        Duration::from_nanos(self.now_nanos.load(Ordering::Relaxed))
     }
 }
 
@@ -124,7 +138,7 @@ mod tests {
         let clock = MockClock::new();
         let handle = clock.clone();
         handle.advance(Duration::from_secs(5));
-        assert_eq!(clock.now(), Timestamp::ZERO + Duration::from_secs(5));
+        assert_eq!(clock.now(), Duration::from_secs(5));
     }
 
     #[test]
@@ -132,13 +146,22 @@ mod tests {
         let clock = MockClock::new();
         clock.advance(Duration::from_micros(500));
         clock.advance(Duration::from_micros(500));
-        assert_eq!(clock.now(), Timestamp::ZERO + Duration::from_millis(1));
+        assert_eq!(clock.now(), Duration::from_millis(1));
     }
 
     #[test]
     fn mock_clock_at_reproduces_the_start_exactly() {
-        let start = Timestamp::from_duration_since_epoch(Duration::new(1_750_000_000, 123_456));
+        let start = Duration::new(1_750_000_000, 123_456);
         assert_eq!(MockClock::at(start).now(), start);
+    }
+
+    #[test]
+    fn blanket_timestamp_bridges_now_into_deadline_math() {
+        let clock = MockClock::at(Duration::from_secs(7));
+        assert_eq!(
+            clock.timestamp(),
+            Timestamp::from_duration_since_epoch(Duration::from_secs(7))
+        );
     }
 
     #[test]

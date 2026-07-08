@@ -29,13 +29,13 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use prost::Message;
 
+use de_mls::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
 };
 use de_mls::{Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome};
 use de_mls::{ConversationError, ConversationEvent, ConversationState, MockClock, ScoringConfig};
-use de_mls::{StewardListConfig, Timestamp};
 use hashgraph_like_consensus::error::ConsensusError;
 
 use crate::common::test_mls_group_config;
@@ -47,11 +47,10 @@ use crate::common::{
 pub type TestConversation =
     Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, MockClock>;
 
-/// Where every member's virtual clock starts: a realistic Unix epoch, so
-/// consensus wire timestamps carry production-scale values instead of the
-/// 0..2s band.
-pub const HARNESS_EPOCH: Timestamp =
-    Timestamp::from_duration_since_epoch(Duration::from_secs(1_750_000_000));
+/// Where every member's virtual clock starts (as a duration past the Unix
+/// epoch): a realistic wall time, so consensus wire timestamps carry
+/// production-scale values instead of the 0..2s band.
+pub const HARNESS_EPOCH: Duration = Duration::from_secs(1_750_000_000);
 
 /// Fast sub-second timing so the virtual-clock polling loop converges in a
 /// handful of rounds.

@@ -27,6 +27,7 @@ use crate::{
     PeerScoreStorage, ProposalKind, WallClock,
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
     self_leave_proposal_id,
+    wall_clock::WallClockExt,
 };
 
 /// The creator's intent at proposal submit time.
@@ -183,7 +184,7 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let now = self.clock.now();
+        let now = self.clock.timestamp();
         let auto_votes_due: Vec<(u32, bool)> = self
             .timing
             .pending_auto_votes

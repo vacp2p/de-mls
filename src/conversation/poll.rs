@@ -17,6 +17,7 @@ use crate::{
     CommitRoundOutcome, ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
     ConversationState, DispatchOutcome, PeerScoreStorage, ScoreEvent, ScoreOp, WallClock,
     protos::de_mls::messages::v1::{AppMessage, MemberWelcome},
+    wall_clock::WallClockExt,
 };
 
 /// Summary returned by [`Conversation::poll`] after one polling pass.
@@ -151,7 +152,7 @@ where
                 + self.config.recovery_inactivity_duration;
             self.timing
                 .phase_timer
-                .elapsed_since_anchor(self.clock.now(), window)
+                .elapsed_since_anchor(self.clock.timestamp(), window)
         } else {
             self.is_freeze_window_elapsed()
         };
@@ -388,7 +389,7 @@ where
         if !self
             .timing
             .phase_timer
-            .elapsed_since_anchor(self.clock.now(), delay)
+            .elapsed_since_anchor(self.clock.timestamp(), delay)
             || self.queues.commit_round.has_local_candidate()
         {
             return;
@@ -476,7 +477,7 @@ where
         }
 
         // Backup steward: give the epoch steward the recovery window first.
-        let now = self.clock.now();
+        let now = self.clock.timestamp();
         let anchor = match self.timing.buffered_propose_anchor {
             Some(a) => a,
             None => {
@@ -519,7 +520,7 @@ where
             self.timing.sync_resend_anchor = None;
             return Ok(());
         }
-        if self.clock.now() < anchor + self.config.voting_inactivity_window() {
+        if self.clock.timestamp() < anchor + self.config.voting_inactivity_window() {
             return Ok(());
         }
         self.timing.sync_resend_anchor = None;

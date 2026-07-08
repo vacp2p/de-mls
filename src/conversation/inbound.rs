@@ -35,6 +35,7 @@ use crate::{
         AppMessage, ConversationSync, ConversationUpdateRequest, EventMembershipChange,
         TimingConfig, TypeMembershipChange, app_message, conversation_update_request,
     },
+    wall_clock::WallClockExt,
 };
 
 use crate::{Conversation, ConversationError, ConversationState};
@@ -589,7 +590,7 @@ where
         }
         // A backup arms the takeover timer; a plain member can't answer.
         if self.is_steward() && self.timing.sync_resend_anchor.is_none() {
-            self.timing.sync_resend_anchor = Some(self.clock.now());
+            self.timing.sync_resend_anchor = Some(self.clock.timestamp());
         }
         Ok(())
     }

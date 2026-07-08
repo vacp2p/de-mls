@@ -29,6 +29,7 @@ use crate::{
         AppMessage, CommitCandidate, conversation_update_request::Payload,
     },
     replay_early_candidates,
+    wall_clock::WallClockExt,
 };
 
 /// Outcome of [`Conversation::leave`].
@@ -535,7 +536,7 @@ where
     /// inactivity). Forward to an external scheduler that calls `poll()` on
     /// fire; extra/early wakeups are no-ops.
     pub fn next_wakeup_in(&self) -> Option<Duration> {
-        let now = self.clock.now();
+        let now = self.clock.timestamp();
         let earliest = self
             .timing
             .pending_consensus_timeouts
@@ -614,7 +615,7 @@ where
         self.timing.pending_auto_votes.insert(
             proposal_id,
             AutoVoteEntry {
-                fire_at: self.clock.now() + delay,
+                fire_at: self.clock.timestamp() + delay,
                 vote,
             },
         );
@@ -654,7 +655,7 @@ where
     /// Register a consensus-session timeout. Fires `delay` from now via
     /// `tick_deadlines`; removed naturally on consensus resolution.
     pub(crate) fn register_consensus_timeout(&mut self, proposal_id: u32, delay: Duration) {
-        let fire_at = self.clock.now() + delay;
+        let fire_at = self.clock.timestamp() + delay;
         self.timing
             .pending_consensus_timeouts
             .insert(proposal_id, fire_at);
@@ -682,7 +683,7 @@ where
     /// from any other state.
     pub(crate) fn start_freezing(&mut self) -> Option<ConversationState> {
         if self.state_machine.start_freezing() {
-            let now = self.clock.now();
+            let now = self.clock.timestamp();
             self.timing.phase_timer.start(now);
             info!(state = "Freezing", "state transition");
             Some(ConversationState::Freezing)
@@ -710,7 +711,7 @@ where
     /// `Some(Freezing)` on transition; `None` from any other state.
     pub(crate) fn reopen_recovery_window(&mut self) -> Option<ConversationState> {
         if self.state_machine.reopen_freezing() {
-            let now = self.clock.now();
+            let now = self.clock.timestamp();
             self.timing.phase_timer.start(now);
             info!(state = "Freezing", "state transition (recovery retry)");
             Some(ConversationState::Freezing)
@@ -725,7 +726,7 @@ where
             && self
                 .timing
                 .phase_timer
-                .elapsed_since_anchor(self.clock.now(), self.config.freeze_duration)
+                .elapsed_since_anchor(self.clock.timestamp(), self.config.freeze_duration)
     }
 
     /// Drives the "steward waited too long to commit" transition into
@@ -741,7 +742,7 @@ where
         if self.current_state() != ConversationState::Working || approved_proposals_count == 0 {
             return None;
         }
-        let now = self.clock.now();
+        let now = self.clock.timestamp();
         if self.timing.phase_timer.started_at().is_none() {
             self.timing.phase_timer.start(now);
             info!(
@@ -987,7 +988,10 @@ mod tests {
         let mut conversation = make_conversation_working();
         conversation.register_consensus_timeout(42, Duration::from_secs(30));
         let fire_at = conversation.timing.pending_consensus_timeouts[&42];
-        assert_eq!(fire_at, conversation.clock.now() + Duration::from_secs(30));
+        assert_eq!(
+            fire_at,
+            conversation.clock.timestamp() + Duration::from_secs(30)
+        );
 
         conversation.unregister_consensus_timeout(42);
         assert!(
@@ -1144,7 +1148,7 @@ mod tests {
         conversation.config.recovery_inactivity_duration = Duration::ZERO;
         conversation.enter_recovery_mode();
         conversation.start_freezing();
-        let anchor = conversation.clock.now();
+        let anchor = conversation.clock.timestamp();
         conversation.timing.phase_timer.start(anchor);
         seed_approved_work(&mut conversation);
 
@@ -1189,7 +1193,7 @@ mod tests {
         conversation.config.recovery_max_rounds = 0;
         conversation.enter_recovery_mode();
         conversation.start_freezing();
-        let anchor = conversation.clock.now();
+        let anchor = conversation.clock.timestamp();
         conversation.timing.phase_timer.start(anchor);
 
         // No approved proposals — nothing to recover.
@@ -1221,7 +1225,7 @@ mod tests {
         conversation.config.recovery_max_rounds = 3;
         conversation.enter_recovery_mode();
         conversation.start_freezing();
-        let anchor = conversation.clock.now();
+        let anchor = conversation.clock.timestamp();
         conversation.timing.phase_timer.start(anchor);
         seed_approved_work(&mut conversation);
 
@@ -1265,7 +1269,7 @@ mod tests {
         conversation.config.recovery_max_rounds = 0; // retry forever (default)
         conversation.enter_recovery_mode();
         conversation.start_freezing();
-        let anchor = conversation.clock.now();
+        let anchor = conversation.clock.timestamp();
         conversation.timing.phase_timer.start(anchor);
         seed_approved_work(&mut conversation);
 
@@ -1301,7 +1305,7 @@ mod tests {
         conversation.config.recovery_max_rounds = 1;
         conversation.enter_recovery_mode();
         conversation.start_freezing();
-        let anchor = conversation.clock.now();
+        let anchor = conversation.clock.timestamp();
         conversation.timing.phase_timer.start(anchor);
         seed_approved_work(&mut conversation);
 
@@ -1397,7 +1401,7 @@ mod tests {
     fn epoch_steward_request_clears_takeover_anchor() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_steward(b"test-member-id"));
-        let now = conversation.clock.now();
+        let now = conversation.clock.timestamp();
         conversation.timing.sync_resend_anchor = Some(now);
 
         conversation
