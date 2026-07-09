@@ -1,8 +1,9 @@
 //! Read-only queries over a conversation's state.
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationState, MemberRole,
-    PeerScoreStorage, WallClock, protos::de_mls::messages::v1::ConversationUpdateRequest,
+    ConsensusPlugin, Conversation, ConversationError, ConversationState, Extensions, GroupContext,
+    MemberRole, PeerScoreStorage, WallClock,
+    protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
 impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
@@ -150,5 +151,9 @@ where
 
     pub fn approved_proposals_for_current_epoch(&self) -> Vec<ConversationUpdateRequest> {
         self.queues.approved_proposals().values().cloned().collect()
+    }
+
+    pub fn extensions(&self) -> &Extensions<GroupContext> {
+        self.mls().extensions()
     }
 }

@@ -108,6 +108,8 @@ pub use wall_clock::{MockClock, Timestamp, WallClock};
 /// MLS cryptographic operations: OpenMLS wrapper for encryption/decryption.
 pub mod mls_crypto;
 
+pub use openmls::prelude::{Extensions, GroupContext};
+
 /// Reference implementations of the library's plug-in traits — in-memory
 /// MLS / peer-score storage, default consensus + per-conversation
 /// plug-in bundles, and a reference key-package provider. Production
