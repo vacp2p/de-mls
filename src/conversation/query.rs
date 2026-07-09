@@ -2,7 +2,8 @@
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, Extensions, GroupContext,
-    MemberRole, PeerScoreStorage,WallClock, protos::de_mls::messages::v1::ConversationUpdateRequest,
+    MemberRole, PeerScoreStorage, WallClock,
+    protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
 impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
