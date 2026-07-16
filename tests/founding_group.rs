@@ -248,28 +248,21 @@ fn a_single_silent_founder_and_the_next_add() {
     assert!(!h.member(2).is_working());
 }
 
-/// The creator founds the group, everyone arrives, then the creator — the sole
-/// steward of epoch 1, since nobody else has settled yet — is cut off in a
-/// send-only partition: it still hears proposals, so it still acts as steward
-/// and mints commits, but nothing it sends arrives.
+/// A send-only partition of the sole epoch-1 steward: it still hears proposals,
+/// so it still mints commits, but nothing it sends arrives.
 ///
-/// Two separate things are true, and the second is the reason this test exists.
+/// The guarantee this test pins is recovery — the survivors land the add
+/// without the creator, so a group does not die with its founder.
 ///
-/// The survivors *do* recover: they land the add without the creator, so a
-/// group does not die with the member who founded it. That is the property
-/// that matters for founding.
-///
-/// But the creator merged its own lost commit locally and advanced onto a
-/// branch of its own, and it never rejoins. Both branches report the same epoch
-/// number and the same member set, so `epochs_agree` and `membership_agrees` —
-/// the assertions the rest of the suite converges on — are `true` across a
-/// forked group. Only the epoch secret tells them apart.
-///
-/// The fork itself is a partition-induced divergence (the steward is isolated
-/// past the recovery window), not obviously a protocol defect. The silence is
-/// the finding: nothing in the library or the suite detects it.
+/// Known gap, documented but not asserted: the isolated creator merged its own
+/// lost commit and advanced onto a private branch. Both branches report the
+/// same epoch number and member set — `epochs_agree`/`membership_agrees` can't
+/// tell them apart — and nothing detects the divergence. We assert the recovery
+/// and that integer-level agreement (which is *why* the fork is silent), but
+/// deliberately not that the fork persists: a future fork fix shouldn't have to
+/// fight this test.
 #[test]
-fn survivors_recover_without_the_creator_but_the_creator_forks() {
+fn survivors_recover_when_the_sole_steward_is_partitioned() {
     let mut h = TestHarness::<5>::start(
         [ALICE, BOB, CHARLIE, DAVE, ERIN],
         "offline",
@@ -311,8 +304,11 @@ fn survivors_recover_without_the_creator_but_the_creator_forks() {
     );
     assert!(h.member(4).is_working(), "erin joined without the creator");
 
-    // The creator comes back. Nothing about its return is rejected, flagged,
-    // or repaired.
+    // The creator returns from the partition. Nothing detects or repairs the
+    // divergence: its branch and the survivors' report the same epoch number
+    // and member set even though their epoch secrets differ. That integer-level
+    // agreement is exactly why the fork is silent — assert it (it survives a
+    // future fix), but don't assert the fork itself.
     h.unmute(0);
     for _ in 0..40 {
         h.process(STEP);
@@ -321,9 +317,5 @@ fn survivors_recover_without_the_creator_but_the_creator_forks() {
     assert!(
         h.epochs_agree() && h.membership_agrees(),
         "both branches report the same epoch number and member set"
-    );
-    assert!(
-        !h.secrets_agree(1, b"after the partition"),
-        "yet the creator is on a branch of its own, undetected"
     );
 }
