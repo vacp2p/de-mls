@@ -287,7 +287,7 @@ mod tests {
         let request = election_request(list.members().to_vec(), 10);
 
         let proposal_id = 42;
-        conversation.track_voting_proposal(proposal_id, request.clone());
+        conversation.track_voting_proposal(proposal_id, &request);
 
         let result =
             apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
@@ -310,7 +310,7 @@ mod tests {
         let request = election_request(vec![member(1), member(2)], 10);
 
         let proposal_id = 43;
-        conversation.track_voting_proposal(proposal_id, request.clone());
+        conversation.track_voting_proposal(proposal_id, &request);
 
         let result =
             apply_consensus_result(&mut conversation, proposal_id, false, &request).unwrap();
@@ -371,7 +371,7 @@ mod tests {
         // A second removal for the same target passes consensus.
         let dup_id = 21;
         let dup_request = remove_request(target.clone());
-        conversation.track_voting_proposal(dup_id, dup_request.clone());
+        conversation.track_voting_proposal(dup_id, &dup_request);
 
         let result = apply_consensus_result(&mut conversation, dup_id, true, &dup_request).unwrap();
 
@@ -474,7 +474,7 @@ mod tests {
         let request = remove_request(target.clone());
 
         let proposal_id = 70;
-        conversation.track_voting_proposal(proposal_id, request.clone());
+        conversation.track_voting_proposal(proposal_id, &request);
 
         apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
 
@@ -497,7 +497,7 @@ mod tests {
             .unwrap();
 
         let proposal_id = 300;
-        conversation.track_voting_proposal(proposal_id, request.clone());
+        conversation.track_voting_proposal(proposal_id, &request);
 
         apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
 

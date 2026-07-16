@@ -21,6 +21,15 @@ use crate::{
 /// Consensus proposal identifier (assigned by the consensus service).
 pub type ProposalId = u32;
 
+/// What the queues need to reason about an in-flight proposal without holding
+/// the full request — consensus storage keeps that. Just who it targets and
+/// whether it is a steward election.
+#[derive(Clone, Debug)]
+struct VotingMeta {
+    target: Option<Vec<u8>>,
+    kind: ProposalKind,
+}
+
 /// Represents a pending membership update that may not yet be committed.
 ///
 /// Buffered by each member. If the epoch steward doesn't commit the change,
@@ -80,12 +89,13 @@ pub struct ConversationQueues {
     /// vector — library proposal IDs are content-derived hashes, so
     /// sort-by-id is not temporal.
     approved_proposals: IndexMap<ProposalId, ConversationUpdateRequest>,
-    /// Proposals in flight through consensus — ours and peers', treated
-    /// identically. It is the record that a change is already being voted on,
-    /// which stops the epoch steward re-proposing it out of `pending_updates`
-    /// (RFC §Consensus Types: the epoch steward collects and commits YES-voted
-    /// proposals; it does not re-create them).
-    voting_proposals: HashMap<ProposalId, ConversationUpdateRequest>,
+    /// Index of proposals in flight through consensus — ours and peers',
+    /// treated identically. The record that a change is already being voted on,
+    /// so the epoch steward doesn't re-propose it out of `pending_updates` (RFC
+    /// §Consensus Types: the steward collects and commits YES-voted proposals;
+    /// it does not re-create them). Holds only what the queues query; the full
+    /// request lives in consensus storage.
+    voting_proposals: HashMap<ProposalId, VotingMeta>,
     /// Active emergency criteria proposals not yet finalized by consensus.
     /// While non-empty, lower-priority proposals MUST be blocked (RFC §Partial Freeze).
     active_emergency_ids: HashSet<ProposalId>,
@@ -214,11 +224,15 @@ impl ConversationQueues {
     /// already approved. A buffered update whose target is in this set is
     /// already covered by a live proposal and must not be re-proposed.
     pub fn active_proposal_targets(&self) -> HashSet<&[u8]> {
-        self.voting_proposals
+        let voting = self
+            .voting_proposals
             .values()
-            .chain(self.approved_proposals.values())
-            .filter_map(target_member_id_of)
-            .collect()
+            .filter_map(|m| m.target.as_deref());
+        let approved = self
+            .approved_proposals
+            .values()
+            .filter_map(target_member_id_of);
+        voting.chain(approved).collect()
     }
 
     /// True iff `approved_proposals` carries any `RemoveMember(member_id)`,
@@ -303,9 +317,14 @@ impl ConversationQueues {
     pub fn track_voting_proposal(
         &mut self,
         proposal_id: ProposalId,
-        proposal: ConversationUpdateRequest,
+        proposal: &ConversationUpdateRequest,
     ) {
-        self.voting_proposals.entry(proposal_id).or_insert(proposal);
+        self.voting_proposals
+            .entry(proposal_id)
+            .or_insert_with(|| VotingMeta {
+                target: target_member_id_of(proposal).map(<[u8]>::to_vec),
+                kind: ProposalKind::of(proposal),
+            });
     }
 
     /// True while `proposal_id` is in flight (in the voting queue).
@@ -319,13 +338,11 @@ impl ConversationQueues {
     }
 
     /// Cheap idempotence check for auto-retry: don't submit a second election
-    /// while a previous one — own or a peer's — is still being voted on.
-    /// Reads the local voting queue and the observed-election set — a
-    /// proposal-queue concern, not steward-list state.
+    /// while one — own or a peer's — is still being voted on.
     pub fn has_election_in_flight(&self) -> bool {
         self.voting_proposals
             .values()
-            .any(|req| ProposalKind::of(req).is_steward_election())
+            .any(|m| m.kind.is_steward_election())
     }
 
     // ─────────────────────────── Unresponsive stewards ───────────────────────────
@@ -896,7 +913,7 @@ mod tests {
             ViolationEvidence::score_below_threshold(target.clone(), 0, 0).with_creator(creator);
         let request = evidence.into_update_request().unwrap();
         let proposal_id = 300;
-        conversation.track_voting_proposal(proposal_id, request.clone());
+        conversation.track_voting_proposal(proposal_id, &request);
         conversation.insert_pending_removal(target.clone());
 
         apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();

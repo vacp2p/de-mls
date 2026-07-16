@@ -68,10 +68,6 @@ where
     /// partial freeze during an active emergency). On success the proposal
     /// is on the wire and a consensus-timeout deadline is armed for
     /// `tick_deadlines` to fire.
-    ///
-    /// Local ownership is recorded before any vote is cast: with a single
-    /// expected voter the bundled YES resolves the session synchronously,
-    /// and the outcome handler must already see us as the owner by then.
     pub fn initiate_proposal<Pr>(
         &mut self,
         provider: &Pr,
@@ -100,8 +96,7 @@ where
             },
         )?;
 
-        self.queues
-            .track_voting_proposal(proposal_id, request.clone());
+        self.queues.track_voting_proposal(proposal_id, &request);
         if kind.is_emergency() {
             self.queues.insert_emergency(proposal_id);
         }
@@ -274,8 +269,7 @@ where
 
         // Track before the session opens: the bundled YES fires
         // `ConsensusReached` synchronously.
-        self.queues
-            .track_voting_proposal(proposal_id, request.clone());
+        self.queues.track_voting_proposal(proposal_id, &request);
 
         let submitted = self.submit_self_leave_proposal(ProposalParams {
             expected_voters: 1,

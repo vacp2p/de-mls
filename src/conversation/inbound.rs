@@ -356,7 +356,7 @@ where
             let current_epoch = self.mls().current_epoch()?;
             // In flight the moment it arrives, so the steward's drain won't
             // re-propose it.
-            self.queues.track_voting_proposal(proposal_id, req.clone());
+            self.queues.track_voting_proposal(proposal_id, req);
             match &req.payload {
                 Some(conversation_update_request::Payload::EmergencyCriteria(_)) => {
                     self.queues.insert_emergency(proposal_id);
