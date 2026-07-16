@@ -354,17 +354,20 @@ where
 
         if let Some(req) = decoded.as_ref() {
             let current_epoch = self.mls().current_epoch()?;
+            // In flight the moment it arrives, so the steward's drain won't
+            // re-propose it.
+            self.queues.track_voting_proposal(proposal_id, req.clone());
             match &req.payload {
                 Some(conversation_update_request::Payload::EmergencyCriteria(_)) => {
                     self.queues.insert_emergency(proposal_id);
                 }
                 Some(conversation_update_request::Payload::MemberInvite(_))
                 | Some(conversation_update_request::Payload::RemoveMember(_)) => {
+                    // RFC §Buffering KeyPackages: hold the change until a
+                    // commit applies it, so a later steward can retry it if this
+                    // round never lands.
                     self.queues
                         .insert_pending_update(req.clone(), current_epoch);
-                }
-                Some(conversation_update_request::Payload::StewardElection(_)) => {
-                    self.queues.note_observed_election(proposal_id);
                 }
                 _ => {}
             }

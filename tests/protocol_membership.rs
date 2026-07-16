@@ -11,6 +11,8 @@ use de_mls::{ConversationState, StewardListConfig};
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const CHARLIE: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
+const DAVE: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";
+const ERIN: &str = "47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a";
 
 #[test]
 fn three_members_join_and_converge() {
@@ -106,5 +108,129 @@ fn welcome_fans_out_to_every_member_with_a_single_minter() {
     assert!(
         h.epochs_agree() && h.membership_agrees(),
         "the group reconverges after charlie joins"
+    );
+}
+
+/// A plain member inviting someone with `add_member` must cost exactly one
+/// proposal.
+///
+/// `add_member` is an invitation — the caller already holds the joiner's key
+/// package — and is distinct from `sponsor_member`, which relays a join request
+/// announced on the group's channel. But every member mirrors each membership
+/// proposal it sees into `pending_updates`, the backup buffer whose job is to
+/// retry an add that never landed. The epoch steward drains that buffer
+/// immediately, and the drain skips only targets that already carry an
+/// *approved* proposal — not one still in flight. So the steward re-proposes an
+/// invitation that is already being voted on, doubling the consensus traffic and
+/// putting two Adds for one member into the commit batch.
+///
+/// Four members is the smallest group that shows it, and the size is load-bearing:
+/// `poll` runs `tick_deadlines` before the buffer drain, so at three members the
+/// steward's own auto-vote completes the `ceil(2n/3) = 2` quorum inside the same
+/// poll and the drain correctly sees an approved proposal. From four members up,
+/// quorum needs a vote that has not been relayed yet, the drain sees nothing
+/// approved, and it re-proposes.
+#[test]
+fn non_steward_add_member_costs_exactly_one_proposal() {
+    let mut h = TestHarness::<5>::start(
+        [ALICE, BOB, CHARLIE, DAVE, ERIN],
+        "one-prop",
+        fast_config(),
+        StewardListConfig::new(1, 5).unwrap(),
+    );
+    for i in 1..4 {
+        let kp = h.member_mut(i).mint_key_package();
+        h.member_mut(0).add_member(&kp);
+    }
+    h.process_until("founding commit lands", |h| {
+        h.member(0).member_count() == 4 && h.members()[..4].iter().all(|m| m.is_working())
+    });
+    assert!(
+        !h.member(1).is_steward(),
+        "bob must be a plain member for this to test the non-steward path"
+    );
+
+    let erin_kp = h.member_mut(4).mint_key_package();
+    let erin_id = erin_kp.member_id().to_vec();
+    h.member_mut(1).add_member(&erin_kp);
+    h.process_until("erin joins", |h| h.member(4).is_working());
+
+    for i in 0..4 {
+        let seen = h.member(i).observed_invite_proposals(&erin_id).len();
+        assert_eq!(
+            seen, 1,
+            "member {i} saw {seen} proposals for a single invitation"
+        );
+    }
+    assert_eq!(
+        h.member(0)
+            .committed_adds()
+            .iter()
+            .filter(|id| **id == erin_id)
+            .count(),
+        1,
+        "erin is added exactly once"
+    );
+}
+
+/// An invitation and a sponsored join request can name the same member at the
+/// same time: bob holds erin's key package and invites her (RFC step 5, "any
+/// member start to create voting proposals"), while erin also publishes a key
+/// package that the steward turns into its own proposal (RFC step 3, "upon
+/// receipt, the steward MUST initiate a voting proposal"). Neither node can see
+/// the other's proposal before creating its own, so both reach consensus.
+///
+/// The two invites carry different key packages, so — unlike two duplicate
+/// removals, which are byte-identical and collapse into one MLS proposal — they
+/// become two Adds for one leaf, and MLS rejects the whole commit with
+/// "Duplicate signature key in proposals and group". The steward retries and
+/// fails identically every round, so the group stops admitting anyone at all.
+#[test]
+fn invitation_racing_a_sponsored_join_admits_the_member_once() {
+    let mut h = TestHarness::<5>::start(
+        [ALICE, BOB, CHARLIE, DAVE, ERIN],
+        "race",
+        fast_config(),
+        StewardListConfig::new(1, 5).unwrap(),
+    );
+    for i in 1..4 {
+        let kp = h.member_mut(i).mint_key_package();
+        h.member_mut(0).add_member(&kp);
+    }
+    h.process_until("founding commit lands", |h| {
+        h.member(0).member_count() == 4 && h.members()[..4].iter().all(|m| m.is_working())
+    });
+    let epoch_before = h.member(0).epoch();
+
+    // Two key packages for erin, proposed by two different members.
+    let invited_kp = h.member_mut(4).mint_key_package();
+    let erin_id = invited_kp.member_id().to_vec();
+    let announced_kp = h.member_mut(4).announce_key_package("race");
+
+    h.deliver_key_package_to(0, &announced_kp); // steward sponsors the request
+    h.member_mut(1).add_member(&invited_kp); // bob invites her in parallel
+
+    h.process_until("erin joins despite the racing invites", |h| {
+        h.member(4).is_working()
+    });
+
+    assert_eq!(
+        h.member(0)
+            .committed_adds()
+            .iter()
+            .filter(|id| **id == erin_id)
+            .count(),
+        1,
+        "erin is admitted exactly once"
+    );
+    assert_eq!(h.member(0).member_count(), 5, "the group grew by one");
+    assert!(
+        h.member(0).epoch() > epoch_before,
+        "the round committed rather than stalling"
+    );
+    assert!(h.epochs_agree() && h.membership_agrees());
+    assert!(
+        h.secrets_agree(1, b"after the race"),
+        "the group stays one group"
     );
 }

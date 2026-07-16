@@ -80,7 +80,11 @@ pub struct ConversationQueues {
     /// vector — library proposal IDs are content-derived hashes, so
     /// sort-by-id is not temporal.
     approved_proposals: IndexMap<ProposalId, ConversationUpdateRequest>,
-    /// Proposals waiting on consensus voting (created by this user).
+    /// Proposals in flight through consensus — ours and peers', treated
+    /// identically. It is the record that a change is already being voted on,
+    /// which stops the epoch steward re-proposing it out of `pending_updates`
+    /// (RFC §Consensus Types: the epoch steward collects and commits YES-voted
+    /// proposals; it does not re-create them).
     voting_proposals: HashMap<ProposalId, ConversationUpdateRequest>,
     /// Active emergency criteria proposals not yet finalized by consensus.
     /// While non-empty, lower-priority proposals MUST be blocked (RFC §Partial Freeze).
@@ -123,11 +127,6 @@ pub struct ConversationQueues {
     /// restores its authority and candidacy mid-recovery — and the whole set
     /// clears when a commit merges.
     unresponsive_stewards: HashSet<Vec<u8>>,
-    /// Steward-election proposals observed from peers and not yet resolved by
-    /// consensus. Folded into [`Self::has_election_in_flight`] so a member
-    /// waiting out a peer's election doesn't count the wait as reelection
-    /// silence and claim proposer authority over a vote already running.
-    observed_election_ids: HashSet<ProposalId>,
 }
 
 impl ConversationQueues {
@@ -147,7 +146,6 @@ impl ConversationQueues {
             member_join_epoch: HashMap::new(),
             welcome_broadcast_hashes: BoundedSet::new(dedup_window),
             unresponsive_stewards: HashSet::new(),
-            observed_election_ids: HashSet::new(),
         }
     }
 
@@ -233,6 +231,17 @@ impl ConversationQueues {
             .any(|req| removes_member(req, member_id))
     }
 
+    /// True iff `approved_proposals` already admits `member_id`. Mirrors
+    /// [`Self::has_approved_removal`]: an invitation and a sponsored join
+    /// request can admit the same member under different proposal ids, and
+    /// their key packages need not match — so MLS cannot collapse them into one
+    /// proposal and rejects the whole batch.
+    pub fn has_approved_invite(&self, member_id: &[u8]) -> bool {
+        self.approved_proposals
+            .values()
+            .any(|req| invites_member(req, member_id))
+    }
+
     /// True if `member_id` has a self-leave waiting for the next commit —
     /// an approved `RemoveMember(member_id)` under the deterministic
     /// self-leave ID. Used by live rotation to skip the leaver.
@@ -243,14 +252,7 @@ impl ConversationQueues {
             .is_some_and(|req| removes_member(req, member_id))
     }
 
-    /// Move a proposal from the voting queue into the approved queue.
-    pub fn mark_proposal_as_approved(&mut self, proposal_id: ProposalId) {
-        if let Some(proposal) = self.voting_proposals.remove(&proposal_id) {
-            self.approved_proposals.insert(proposal_id, proposal);
-        }
-    }
-
-    /// Insert a proposal straight into the approved queue (non-owner path).
+    /// Insert a proposal straight into the approved queue, staged for commit.
     pub fn insert_approved_proposal(
         &mut self,
         proposal_id: ProposalId,
@@ -295,28 +297,25 @@ impl ConversationQueues {
 
     // ─────────────────────────── Voting Proposals ───────────────────────────
 
-    /// True when this user created `proposal_id` (it's still in the voting queue).
-    pub fn is_owner_of_proposal(&self, proposal_id: ProposalId) -> bool {
-        self.voting_proposals.contains_key(&proposal_id)
-    }
-
-    /// Add a newly-created proposal to the voting queue.
-    pub fn insert_voting_proposal(
+    /// Record `proposal_id` as in flight, whoever opened it. Idempotent: a
+    /// later sighting (e.g. a peer echo of our own proposal) leaves the first
+    /// entry untouched.
+    pub fn track_voting_proposal(
         &mut self,
         proposal_id: ProposalId,
         proposal: ConversationUpdateRequest,
     ) {
-        self.voting_proposals.insert(proposal_id, proposal);
+        self.voting_proposals.entry(proposal_id).or_insert(proposal);
     }
 
-    /// Drop a proposal from the voting queue (rejected or failed consensus).
+    /// True while `proposal_id` is in flight (in the voting queue).
+    pub fn is_voting(&self, proposal_id: ProposalId) -> bool {
+        self.voting_proposals.contains_key(&proposal_id)
+    }
+
+    /// Drop a proposal from the voting queue (resolved, rejected, or deduped).
     pub fn remove_voting_proposal(&mut self, proposal_id: ProposalId) {
         self.voting_proposals.remove(&proposal_id);
-    }
-
-    /// Drop every entry in the voting queue.
-    pub fn clear_voting_proposals(&mut self) {
-        self.voting_proposals.clear();
     }
 
     /// Cheap idempotence check for auto-retry: don't submit a second election
@@ -324,22 +323,9 @@ impl ConversationQueues {
     /// Reads the local voting queue and the observed-election set — a
     /// proposal-queue concern, not steward-list state.
     pub fn has_election_in_flight(&self) -> bool {
-        !self.observed_election_ids.is_empty()
-            || self
-                .voting_proposals
-                .values()
-                .any(|req| ProposalKind::of(req).is_steward_election())
-    }
-
-    /// Record a peer's steward-election proposal as in flight.
-    pub fn note_observed_election(&mut self, proposal_id: ProposalId) {
-        self.observed_election_ids.insert(proposal_id);
-    }
-
-    /// A consensus outcome landed for `proposal_id` — the election (if it was
-    /// one) is no longer in flight. No-op for other proposal kinds.
-    pub fn clear_observed_election(&mut self, proposal_id: ProposalId) {
-        self.observed_election_ids.remove(&proposal_id);
+        self.voting_proposals
+            .values()
+            .any(|req| ProposalKind::of(req).is_steward_election())
     }
 
     // ─────────────────────────── Unresponsive stewards ───────────────────────────
@@ -609,6 +595,14 @@ fn removes_member(req: &ConversationUpdateRequest, member_id: &[u8]) -> bool {
     )
 }
 
+/// True when `req` admits `member_id`, whatever key package it carries.
+fn invites_member(req: &ConversationUpdateRequest, member_id: &[u8]) -> bool {
+    matches!(
+        req.payload.as_ref(),
+        Some(conversation_update_request::Payload::MemberInvite(m)) if m.member_id == member_id
+    )
+}
+
 /// Capacity of the resolved-outcome dedup set (`resolved_proposals`): proposal
 /// IDs with a locally observed consensus outcome, kept for the duplicate-drop
 /// guard in `handle_consensus_outcome` and the late-vote classifier in
@@ -862,23 +856,6 @@ mod tests {
         assert!(!conversation.has_pending_update(&prior));
     }
 
-    /// `clear_voting_proposals` empties the owner-side voting queue —
-    /// proposals the local node submitted but never reached consensus
-    /// must not survive into the next round.
-    #[test]
-    fn clear_voting_proposals_empties_owner_queue() {
-        let mut conversation = ConversationQueues::new("reject-voting", 10);
-        conversation.insert_voting_proposal(1, ConversationUpdateRequest { payload: None });
-        conversation.insert_voting_proposal(2, ConversationUpdateRequest { payload: None });
-        assert!(conversation.is_owner_of_proposal(1));
-        assert!(conversation.is_owner_of_proposal(2));
-
-        conversation.clear_voting_proposals();
-
-        assert!(!conversation.is_owner_of_proposal(1));
-        assert!(!conversation.is_owner_of_proposal(2));
-    }
-
     /// `observe → has → resolve` cycle for `pending_removal_targets`,
     /// covering the idempotent re-observe path.
     #[test]
@@ -919,7 +896,7 @@ mod tests {
             ViolationEvidence::score_below_threshold(target.clone(), 0, 0).with_creator(creator);
         let request = evidence.into_update_request().unwrap();
         let proposal_id = 300;
-        conversation.insert_voting_proposal(proposal_id, request.clone());
+        conversation.track_voting_proposal(proposal_id, request.clone());
         conversation.insert_pending_removal(target.clone());
 
         apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();

@@ -84,7 +84,6 @@ where
             proposal_id, approved, "consensus reached"
         );
         self.queues.mark_consensus_outcome_applied(proposal_id);
-        self.queues.clear_observed_election(proposal_id);
         let consensus_apply =
             apply_consensus_result(&mut self.queues, proposal_id, approved, &request)?;
 

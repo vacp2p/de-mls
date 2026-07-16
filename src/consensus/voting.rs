@@ -101,7 +101,7 @@ where
         )?;
 
         self.queues
-            .insert_voting_proposal(proposal_id, request.clone());
+            .track_voting_proposal(proposal_id, request.clone());
         if kind.is_emergency() {
             self.queues.insert_emergency(proposal_id);
         }
@@ -272,11 +272,10 @@ where
         let request = ConversationUpdateRequest::remove_member(self.self_member_id.to_vec());
         let proposal_id = self_leave_proposal_id(&self.self_member_id);
 
-        // Ownership must be recorded before the session opens: the bundled
-        // YES fires `ConsensusReached` synchronously, and the outcome
-        // handler needs `is_owner_of_proposal` to already be true.
+        // Track before the session opens: the bundled YES fires
+        // `ConsensusReached` synchronously.
         self.queues
-            .insert_voting_proposal(proposal_id, request.clone());
+            .track_voting_proposal(proposal_id, request.clone());
 
         let submitted = self.submit_self_leave_proposal(ProposalParams {
             expected_voters: 1,
