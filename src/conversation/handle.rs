@@ -420,6 +420,13 @@ where
                 error = %e,
                 "own commit candidate build failed"
             );
+            // A mint failure stalls this round and repeats on every retry, and
+            // the phase change alone reads as a healthy freeze — so the
+            // integrator has no other view of it.
+            self.emit_event(ConversationEvent::Error {
+                operation: "commit_candidate_build".to_string(),
+                message: e.to_string(),
+            });
         }
         self.emit_event(ConversationEvent::PhaseChange(event));
         Ok(())
@@ -855,6 +862,55 @@ mod tests {
             Arc::from(&b"test-member-id"[..]),
             Arc::from(&[0u8; 16][..]),
         )
+    }
+
+    /// Build a conversation whose sole steward is the local member, plus the
+    /// provider/signer backing it — the shape every commit-mint test needs.
+    fn make_steward_conversation() -> (TestConversation, TestProvider, SignatureKeyPair) {
+        let (mls, provider, signer) = make_creator_mls(b"test-member-id");
+        (
+            build_conversation(mls, steward_service_steward(b"test-member-id")),
+            provider,
+            signer,
+        )
+    }
+
+    fn invite_for(
+        joiner_id: &[u8],
+        key_package_bytes: Vec<u8>,
+    ) -> crate::protos::de_mls::messages::v1::ConversationUpdateRequest {
+        use crate::protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberInvite};
+        ConversationUpdateRequest::member_invite(MemberInvite {
+            key_package_bytes,
+            member_id: joiner_id.to_vec(),
+        })
+    }
+
+    /// A candidate that cannot be minted is not a phase-change detail — it
+    /// stalls the round and every retry after it. The integrator has no other
+    /// way to see it, so freeze entry must surface the failure rather than
+    /// logging it and reporting a clean phase change.
+    #[test]
+    fn freeze_entry_surfaces_candidate_build_failure() {
+        let (mut convo, provider, signer) = make_steward_conversation();
+        // Undecodable key-package bytes: the mint fails inside OpenMLS.
+        convo
+            .queues
+            .insert_approved_proposal(1, invite_for(b"joiner-member-id", vec![0xAA; 32]));
+
+        convo
+            .on_freeze_entered(&provider, &signer, ConversationState::Freezing)
+            .expect("freeze entry itself reports Ok");
+
+        let errors: Vec<_> = convo
+            .drain_events()
+            .into_iter()
+            .filter(|e| matches!(e, ConversationEvent::Error { .. }))
+            .collect();
+        assert!(
+            !errors.is_empty(),
+            "a failed candidate mint must reach the integrator as an Error event"
+        );
     }
 
     /// A [`PeerScoreStorage`] whose every read/write fails — for asserting that
