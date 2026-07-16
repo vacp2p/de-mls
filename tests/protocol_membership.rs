@@ -234,3 +234,50 @@ fn invitation_racing_a_sponsored_join_admits_the_member_once() {
         "the group stays one group"
     );
 }
+
+/// The same node proposing one joiner twice — with different key packages, so
+/// the two requests don't collide on their content-derived proposal id — must
+/// open exactly one consensus session. The local in-flight dedup at proposal
+/// initiation catches the second; without it, a redundant session runs and is
+/// only cleaned up at approval.
+#[test]
+fn repeated_add_for_one_joiner_opens_one_proposal() {
+    let mut h = TestHarness::<5>::start(
+        [ALICE, BOB, CHARLIE, DAVE, ERIN],
+        "double-add",
+        fast_config(),
+        StewardListConfig::new(1, 5).unwrap(),
+    );
+    for i in 1..4 {
+        let kp = h.member_mut(i).mint_key_package();
+        h.member_mut(0).add_member(&kp);
+    }
+    h.process_until("founding commit lands", |h| {
+        h.member(0).member_count() == 4 && h.members()[..4].iter().all(|m| m.is_working())
+    });
+
+    let erin_kp_a = h.member_mut(4).mint_key_package();
+    let erin_id = erin_kp_a.member_id().to_vec();
+    let erin_kp_b = h.member_mut(4).mint_key_package();
+
+    // Two proposals for erin, back to back, before any poll resolves the first.
+    h.member_mut(0).add_member(&erin_kp_a);
+    h.member_mut(0).add_member(&erin_kp_b);
+
+    h.process_until("erin joins", |h| h.member(4).is_working());
+
+    assert_eq!(
+        h.member(0).observed_invite_proposals(&erin_id).len(),
+        1,
+        "a repeated add for one joiner opens exactly one proposal"
+    );
+    assert_eq!(
+        h.member(0)
+            .committed_adds()
+            .iter()
+            .filter(|id| **id == erin_id)
+            .count(),
+        1,
+        "erin is added once"
+    );
+}
