@@ -1,6 +1,5 @@
 //! Per-conversation protocol-queue state: approved/voting proposal queues,
-//! commit-round candidate buffer, pending-update buffer, urgent-commit
-//! target, ECP dedup.
+//! commit-round candidate buffer, pending-update buffer, urgent-commit target.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -10,7 +9,8 @@ use indexmap::{IndexMap, IndexSet};
 use crate::{
     commit_round::{CommitHash, CommitRoundBuffer},
     conversation::util::{
-        is_auto_approved_entry, member_set, self_leave_proposal_id, target_member_id_of,
+        in_flight_target, is_auto_approved_entry, member_set, self_leave_proposal_id,
+        target_member_id_of,
     },
     proposal_kind::ProposalKind,
     protos::de_mls::messages::v1::{
@@ -99,8 +99,6 @@ pub struct ConversationQueues {
     /// Active emergency criteria proposals not yet finalized by consensus.
     /// While non-empty, lower-priority proposals MUST be blocked (RFC §Partial Freeze).
     active_emergency_ids: HashSet<ProposalId>,
-    /// Members with pending score-based removal ECPs (dedup to prevent duplicates).
-    pending_removal_targets: HashSet<Vec<u8>>,
     /// Recent commit hashes for dedup.
     committed_batch_hashes: BoundedSet<CommitHash>,
     /// Commit-round candidate buffer for deterministic selection.
@@ -146,7 +144,6 @@ impl ConversationQueues {
             approved_proposals: IndexMap::new(),
             voting_proposals: HashMap::new(),
             active_emergency_ids: HashSet::new(),
-            pending_removal_targets: HashSet::new(),
             committed_batch_hashes: BoundedSet::new(dedup_window),
             commit_round: CommitRoundBuffer::default(),
             pending_updates: HashMap::new(),
@@ -322,7 +319,7 @@ impl ConversationQueues {
         self.voting_proposals
             .entry(proposal_id)
             .or_insert_with(|| VotingMeta {
-                target: target_member_id_of(proposal).map(<[u8]>::to_vec),
+                target: in_flight_target(proposal).map(<[u8]>::to_vec),
                 kind: ProposalKind::of(proposal),
             });
     }
@@ -393,23 +390,6 @@ impl ConversationQueues {
     /// should be rejected under the current freeze state.
     pub fn partial_freeze_blocks(&self, kind: ProposalKind) -> bool {
         self.has_active_emergency() && kind < ProposalKind::Emergency
-    }
-
-    // ─────────────────────────── Removal Dedup ───────────────────────────
-
-    /// Record that a score-based removal ECP has been submitted for this member.
-    pub fn insert_pending_removal(&mut self, member_id: Vec<u8>) {
-        self.pending_removal_targets.insert(member_id);
-    }
-
-    /// Check if a removal ECP is already pending for this member.
-    pub fn has_pending_removal(&self, member_id: &[u8]) -> bool {
-        self.pending_removal_targets.contains(member_id)
-    }
-
-    /// Mark a removal ECP as finalized (resolved regardless of outcome).
-    pub fn remove_pending_removal(&mut self, member_id: &[u8]) {
-        self.pending_removal_targets.remove(member_id);
     }
 
     // ─────────────────────────── Committed-Hash Dedup ───────────────────────────
@@ -571,11 +551,6 @@ impl ConversationQueues {
                 _ => true,
             }
         });
-
-        // Drop removal-dedup entries for targets no longer present: a leaked
-        // entry (ECP that never resolved) would otherwise block them forever.
-        self.pending_removal_targets
-            .retain(|target| in_conversation.contains(target));
     }
 
     // ─────────────────────────── Urgent (ECP-driven) Commit Target ───────────────────────────
@@ -873,35 +848,13 @@ mod tests {
         assert!(!conversation.has_pending_update(&prior));
     }
 
-    /// `observe → has → resolve` cycle for `pending_removal_targets`,
-    /// covering the idempotent re-observe path.
+    /// A score-below-threshold removal is a live change for its target across
+    /// its whole lifecycle: while the ECP is still voting (via the in-flight
+    /// index) and after it resolves into a queued `RemoveMember` (via the
+    /// approved queue). `active_proposal_targets` sees it the whole time, so
+    /// the steward never files a duplicate.
     #[test]
-    fn pending_removal_target_observe_resolve_cycle() {
-        let mut conversation = ConversationQueues::new("dedup", 10);
-        let target = member(10);
-
-        assert!(!conversation.has_pending_removal(&target));
-
-        conversation.insert_pending_removal(target.clone());
-        assert!(conversation.has_pending_removal(&target));
-
-        conversation.insert_pending_removal(target.clone());
-        assert!(
-            conversation.has_pending_removal(&target),
-            "second observe is idempotent"
-        );
-
-        conversation.remove_pending_removal(&target);
-        assert!(!conversation.has_pending_removal(&target));
-    }
-
-    /// Once an ECP score-below-threshold YES has resolved into a queued
-    /// `RemoveMember`, `has_approved_removal` flips true (it's in the approved
-    /// queue) and `has_pending_removal` flips false (the in-flight ECP dedup
-    /// is cleared). Both gates together must keep the steward from
-    /// re-proposing for the same target.
-    #[test]
-    fn below_threshold_target_queued_for_removal_is_not_re_proposed() {
+    fn score_removal_target_stays_covered_through_its_lifecycle() {
         use crate::apply_consensus_result;
         use crate::protos::de_mls::messages::v1::ViolationEvidence;
 
@@ -913,20 +866,27 @@ mod tests {
             ViolationEvidence::score_below_threshold(target.clone(), 0, 0).with_creator(creator);
         let request = evidence.into_update_request().unwrap();
         let proposal_id = 300;
+
+        // Voting: the ECP hasn't produced a RemoveMember yet, but the target is
+        // already covered — the blind spot the ECP-aware index closes.
         conversation.track_voting_proposal(proposal_id, &request);
-        conversation.insert_pending_removal(target.clone());
-
-        apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
-        // Mirror the coordinator: clear the in-flight ECP dedup on resolution.
-        conversation.remove_pending_removal(&target);
-
         assert!(
-            conversation.has_approved_removal(&target),
-            "RemoveMember should be queued in approved_proposals"
+            conversation
+                .active_proposal_targets()
+                .contains(target.as_slice()),
+            "the in-flight ECP already covers its target"
         );
+        assert!(!conversation.has_approved_removal(&target));
+
+        // Resolved: the ECP transforms into a queued RemoveMember, and the
+        // target stays covered with no gap.
+        apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
+        assert!(conversation.has_approved_removal(&target));
         assert!(
-            !conversation.has_pending_removal(&target),
-            "in-flight ECP dedup is cleared once the ECP resolves"
+            conversation
+                .active_proposal_targets()
+                .contains(target.as_slice()),
+            "the queued RemoveMember still covers the target"
         );
     }
 }

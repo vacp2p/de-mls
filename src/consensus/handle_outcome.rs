@@ -13,9 +13,7 @@ use crate::{
     ConsensusApplyResult, ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
     ConversationState, PeerScoreStorage, ScoreOp, WallClock, apply_consensus_result,
     emergency_score_ops,
-    protos::de_mls::messages::v1::{
-        ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
-    },
+    protos::de_mls::messages::v1::{ConversationUpdateRequest, StewardElectionProposal},
 };
 
 impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
@@ -128,7 +126,7 @@ where
         // Empty for everything but emergency-criteria payloads.
         let score_ops = emergency_score_ops(&request, approved);
         if !score_ops.is_empty() {
-            self.handle_emergency_scored(provider, proposal_id, &request, &score_ops, signer)?;
+            self.handle_emergency_scored(provider, proposal_id, &score_ops, signer)?;
         }
 
         Ok(())
@@ -233,16 +231,14 @@ where
         self.process_buffered_updates(provider, signer)
     }
 
-    /// Emergency proposal resolved: apply the score ops, clear the
-    /// pending-removal buffer, lift the partial freeze (removing it from
-    /// the emergency set), and resume from `Reelection` if the emergency
-    /// put us there. Ends with a below-threshold sweep — the score ops may
-    /// have pushed someone over the removal line.
+    /// Emergency proposal resolved: apply the score ops, lift the partial
+    /// freeze (removing it from the emergency set), and resume from
+    /// `Reelection` if the emergency put us there. Ends with a below-threshold
+    /// sweep — the score ops may have pushed someone over the removal line.
     fn handle_emergency_scored<Pr>(
         &mut self,
         provider: &Pr,
         proposal_id: u32,
-        request: &ConversationUpdateRequest,
         score_ops: &[ScoreOp],
         signer: &impl Signer,
     ) -> Result<(), ConversationError>
@@ -251,12 +247,6 @@ where
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
         self.services.scoring.apply_ops(score_ops)?;
-        if let Some(conversation_update_request::Payload::EmergencyCriteria(ec)) = &request.payload
-            && let Some(ev) = &ec.evidence
-        {
-            self.queues.remove_pending_removal(&ev.target_member_id);
-        }
-
         self.queues.remove_emergency(proposal_id);
         let resumed_event = if self.current_state() == ConversationState::Reelection {
             Some(self.start_working())

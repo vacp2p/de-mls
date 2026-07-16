@@ -4,7 +4,9 @@ use std::collections::HashSet;
 
 use sha2::{Digest, Sha256};
 
-use crate::protos::de_mls::messages::v1::{ConversationUpdateRequest, conversation_update_request};
+use crate::protos::de_mls::messages::v1::{
+    ConversationUpdateRequest, ViolationType, conversation_update_request,
+};
 
 /// Deterministic proposal ID for a self-leave, derived from the leaver's ID.
 /// Pinning the ID dedupes a crash-retry against any in-flight
@@ -39,4 +41,22 @@ pub fn target_member_id_of(request: &ConversationUpdateRequest) -> Option<&[u8]>
         conversation_update_request::Payload::RemoveMember(m) => Some(&m.member_id),
         _ => None,
     }
+}
+
+/// Member a proposal will add or remove once it lands — the membership target,
+/// plus a score-below-threshold ECP, which transforms into a RemoveMember on
+/// approval. Lets the in-flight index dedup a repeated or buffered change
+/// against a live score-removal for the whole voting window, not just after it
+/// becomes a RemoveMember.
+pub fn in_flight_target(request: &ConversationUpdateRequest) -> Option<&[u8]> {
+    if let Some(id) = target_member_id_of(request) {
+        return Some(id);
+    }
+    let conversation_update_request::Payload::EmergencyCriteria(ec) = request.payload.as_ref()?
+    else {
+        return None;
+    };
+    let ev = ec.evidence.as_ref()?;
+    (ViolationType::try_from(ev.violation_type) == Ok(ViolationType::ScoreBelowThreshold))
+        .then_some(ev.target_member_id.as_slice())
 }
