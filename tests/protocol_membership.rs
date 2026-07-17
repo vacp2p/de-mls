@@ -229,10 +229,7 @@ fn invitation_racing_a_sponsored_join_admits_the_member_once() {
         "the round committed rather than stalling"
     );
     assert!(h.epochs_agree() && h.membership_agrees());
-    assert!(
-        h.secrets_agree(1, b"after the race"),
-        "the group stays one group"
-    );
+    assert!(h.converged(), "the group stays one group");
 }
 
 /// The same node proposing one joiner twice — with different key packages, so

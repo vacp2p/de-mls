@@ -345,6 +345,14 @@ impl Member {
             .unwrap_or(0)
     }
 
+    /// This member's epoch authenticator, or empty if it hasn't joined.
+    pub fn epoch_authenticator(&self) -> Vec<u8> {
+        self.convo
+            .as_ref()
+            .map(|c| c.epoch_authenticator())
+            .unwrap_or_default()
+    }
+
     pub fn member_count(&self) -> usize {
         self.convo
             .as_ref()
@@ -865,27 +873,21 @@ impl<const N: usize> TestHarness<N> {
         self.members.iter().all(Member::is_working)
     }
 
-    /// Whether every joined member can decrypt a message from `from`.
+    /// Every joined member shares the same epoch *and* the same epoch
+    /// authenticator — the real convergence check.
     ///
-    /// This is the only available check that tells one group apart from two
-    /// that merely agree on the integers: [`Self::epochs_agree`] compares epoch
-    /// *numbers* and [`Self::membership_agrees`] compares member-id *sets*, and
-    /// both report `true` for members whose epoch secrets have diverged. MLS
-    /// exposes `epoch_authenticator` for exactly this purpose, but de-mls does
-    /// not surface it, so a chat round-trip stands in.
-    ///
-    /// Drives the bus (chat needs relaying), so call it as a terminal
-    /// assertion rather than inside a predicate.
-    pub fn secrets_agree(&mut self, from: usize, probe: &[u8]) -> bool {
-        self.members[from].send_message(probe.to_vec());
-        for _ in 0..20 {
-            self.process(Duration::from_millis(50));
-        }
-        self.members
-            .iter()
-            .enumerate()
-            .filter(|(i, m)| *i != from && m.convo.is_some())
-            .all(|(_, m)| m.got_chat(probe))
+    /// [`Self::epochs_agree`] compares epoch *numbers* and
+    /// [`Self::membership_agrees`] compares member-id *sets*, and both report
+    /// `true` across a forked group whose branches share an epoch and roster
+    /// but hold different epoch secrets. The authenticator is the value that
+    /// tells them apart, so this is the check that actually detects a fork.
+    pub fn converged(&self) -> bool {
+        let mut joined = self.members.iter().filter(|m| m.convo.is_some());
+        let Some(first) = joined.next() else {
+            return true;
+        };
+        let key = (first.epoch(), first.epoch_authenticator());
+        joined.all(|m| (m.epoch(), m.epoch_authenticator()) == key)
     }
 
     /// Every member sees the same set of MLS members (order-independent).
