@@ -48,12 +48,7 @@ pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
 /// detection (see [`ConversationConfig::dedup_window`]).
 pub const DEFAULT_DEDUP_WINDOW: usize = 10;
 
-/// Default grace before Layer-3 recovery auto-commits: how long the group waits
-/// for a *manual* `commit_in_recovery` before every online node auto-mints a
-/// candidate (see [`ConversationConfig::recovery_auto_commit_delay`]).
-pub const DEFAULT_RECOVERY_AUTO_COMMIT_DELAY: Duration = Duration::from_secs(5);
-
-/// Default Layer-3 recovery round cap: `0` retries the manual+auto cycle
+/// Default Layer-3 recovery round cap: `0` retries the recovery-commit cycle
 /// forever (RFC Layer 3 is terminal and assumes an honest majority eventually
 /// commits). See [`ConversationConfig::recovery_max_rounds`].
 pub const DEFAULT_RECOVERY_MAX_ROUNDS: u32 = 0;
@@ -112,12 +107,7 @@ pub struct ConversationConfig {
     /// (duplicate-candidate and duplicate-welcome-broadcast detection). See
     /// [`DEFAULT_DEDUP_WINDOW`].
     pub dedup_window: usize,
-    /// Layer-3 recovery policy: how long to wait for a manual `commit_in_recovery`
-    /// before every online node auto-mints. `None` = manual-only (never auto);
-    /// `Some(ZERO)` = immediate; `Some(d)` = grace then auto. See
-    /// [`DEFAULT_RECOVERY_AUTO_COMMIT_DELAY`].
-    pub recovery_auto_commit_delay: Option<Duration>,
-    /// Layer-3 recovery stop-line: how many manual+auto rounds to attempt before
+    /// Layer-3 recovery stop-line: how many recovery rounds to attempt before
     /// giving up and emitting [`crate::ConversationEvent::RecoveryExhausted`].
     /// `0` retries forever. See [`DEFAULT_RECOVERY_MAX_ROUNDS`].
     pub recovery_max_rounds: u32,
@@ -144,7 +134,6 @@ impl Default for ConversationConfig {
             max_consensus_sessions: DEFAULT_MAX_CONSENSUS_SESSIONS,
             commit_batch_max: DEFAULT_COMMIT_BATCH_MAX,
             dedup_window: DEFAULT_DEDUP_WINDOW,
-            recovery_auto_commit_delay: Some(DEFAULT_RECOVERY_AUTO_COMMIT_DELAY),
             recovery_max_rounds: DEFAULT_RECOVERY_MAX_ROUNDS,
             steward_list: StewardListConfig::default(),
         }

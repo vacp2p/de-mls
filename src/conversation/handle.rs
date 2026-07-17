@@ -141,8 +141,8 @@ pub struct Conversation<Cp: ConsensusPlugin, Sc: PeerScoreStorage, Wc: WallClock
     pub(crate) config: ConversationConfig,
     /// Authorization mode (RFC §Layer 3 Anti-Deadlock ECP).
     operating_mode: OperatingMode,
-    /// Manual+auto recovery rounds elapsed with no commit in the current
-    /// recovery episode. Reset on entry; compared against `recovery_max_rounds`
+    /// Recovery rounds elapsed with no commit in the current recovery episode.
+    /// Reset on entry; compared against `recovery_max_rounds`
     /// to decide the stop line. Meaningful only while in recovery.
     pub(crate) recovery_rounds: u32,
     /// Time-driven state walked once per polling cycle.
@@ -421,9 +421,9 @@ where
     /// Mint this member's commit candidate from the approved batch and queue it
     /// for broadcast. `Ok(true)` if a candidate was produced, `Ok(false)` if
     /// there was nothing to commit (e.g. the batch is only our own removal).
-    /// Shared by the freeze-entry mint, the manual recovery commit, and the
-    /// recovery auto-fallback — the eligibility gate (stewards, or any member in
-    /// recovery) lives in [`Self::build_local_candidate`].
+    /// Shared by the freeze-entry mint and the manual recovery commit — the
+    /// eligibility gate (stewards, or any member in recovery) lives in
+    /// [`Self::build_local_candidate`].
     pub(crate) fn mint_and_broadcast_candidate<Pr>(
         &mut self,
         provider: &Pr,
@@ -445,9 +445,10 @@ where
 
     /// Manually produce a Layer-3 recovery commit: mint our candidate and queue
     /// its broadcast (only valid in recovery, where the steward gate is relaxed).
-    /// `true` if a candidate was produced, `false` if there was nothing to commit.
-    /// If no member calls this within `recovery_auto_commit_delay`, every online
-    /// node auto-mints instead.
+    /// `Ok(true)` if a candidate was produced, `Ok(false)` if there was nothing
+    /// to commit or we already hold a local candidate this round — so the app
+    /// can call it every cycle in recovery without minting duplicates. de-mls no
+    /// longer auto-mints; the app owns the recovery-commit timing.
     pub fn commit_in_recovery<Pr>(
         &mut self,
         provider: &Pr,
@@ -459,6 +460,9 @@ where
     {
         if !self.is_in_recovery_mode() {
             return Err(ConversationError::NotInRecovery);
+        }
+        if self.queues.commit_round.has_local_candidate() {
+            return Ok(false);
         }
         self.mint_and_broadcast_candidate(provider, signer)
     }
@@ -493,6 +497,23 @@ where
         };
         self.on_freeze_entered(provider, signer, event)?;
         Ok(true)
+    }
+
+    /// Re-broadcast our commit candidate for the current round, so members that
+    /// dropped the original receive it and apply it — the steward's alternative
+    /// to survivors minting a competing commit, which forks. `Ok(true)` if a
+    /// candidate was re-sent, `Ok(false)` when we hold none for this round
+    /// (nothing minted yet, or it already merged and cleared the buffer). de-mls
+    /// does not time this; the app calls it when its liveness policy judges the
+    /// commit was likely dropped.
+    pub fn resend_commit(&self) -> Result<bool, ConversationError> {
+        match self.queues.commit_round.local_candidate_bytes() {
+            Some(payload) => {
+                self.broadcast(payload);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     /// Finalize the active commit round.
@@ -731,7 +752,7 @@ where
 
     /// Re-open the Layer-3 recovery collection window: `Selection` → `Freezing`
     /// with the phase timer re-anchored, so the next poll re-enters
-    /// `advance_freezing` and the manual/auto commit cycle retries. Returns
+    /// `advance_freezing` and the recovery commit cycle retries. Returns
     /// `Some(Freezing)` on transition; `None` from any other state.
     pub(crate) fn reopen_recovery_window(&mut self) -> Option<ConversationState> {
         if self.state_machine.reopen_freezing() {
@@ -1106,6 +1127,41 @@ mod tests {
         );
     }
 
+    /// `resend_commit` re-broadcasts a held candidate exactly once, and is a
+    /// no-op broadcasting nothing when none is held.
+    #[test]
+    fn resend_commit_rebroadcasts_a_held_candidate() {
+        let (mut conversation, _provider, _signer) =
+            make_conversation_with_steward(steward_service_steward(b"test-member-id"));
+
+        // No candidate this round — nothing to re-send, nothing broadcast.
+        assert!(!conversation.resend_commit().unwrap());
+        assert!(conversation.drain_outbound().is_empty());
+
+        // With our own candidate buffered, resend re-broadcasts its bytes once.
+        let candidate = CommitCandidate {
+            commit_message: b"held-commit".to_vec(),
+            ..Default::default()
+        };
+        conversation.queues.commit_round.add(
+            candidate,
+            /* is_local */ true,
+            None,
+            Vec::new(),
+            0,
+            5,
+        );
+
+        assert!(conversation.resend_commit().unwrap());
+        let out = conversation.drain_outbound();
+        assert_eq!(
+            out.len(),
+            1,
+            "the held candidate re-broadcasts exactly once"
+        );
+        assert!(!out[0].payload.is_empty());
+    }
+
     #[test]
     fn merged_commit_reaches_working_even_if_scoring_storage_fails() {
         let (mls, provider, signer) = make_creator_mls(b"test-member-id");
@@ -1127,28 +1183,6 @@ mod tests {
             ConversationState::Working,
             "a merged commit reaches Working even when post-commit bookkeeping fails"
         );
-    }
-
-    #[test]
-    fn recovery_auto_commit_waits_out_the_grace() {
-        let (mut conversation, provider, signer) =
-            make_conversation_with_steward(steward_service_member());
-        // A grace long enough that it won't elapse during the test.
-        conversation.config.recovery_auto_commit_delay = Some(Duration::from_secs(3600));
-        conversation.config.recovery_inactivity_duration = Duration::ZERO;
-        conversation.enter_recovery_mode();
-        conversation.start_freezing();
-        let anchor = conversation.clock.timestamp();
-        conversation.timing.phase_timer.start(anchor);
-        seed_approved_work(&mut conversation);
-
-        conversation.poll(&provider, &signer);
-
-        assert!(
-            !conversation.queues.commit_round.has_local_candidate(),
-            "no auto-mint before the grace elapses"
-        );
-        assert!(conversation.is_in_recovery_mode());
     }
 
     #[test]
@@ -1177,7 +1211,6 @@ mod tests {
     fn recovery_with_empty_queue_exits_without_spinning() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_member());
-        conversation.config.recovery_auto_commit_delay = Some(Duration::ZERO);
         conversation.config.recovery_inactivity_duration = Duration::ZERO;
         // 0 would spin forever without the empty-queue exit.
         conversation.config.recovery_max_rounds = 0;
@@ -1208,9 +1241,8 @@ mod tests {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_member());
         // Zero-length windows so each poll resolves one commit-less round.
-        // Manual-only (no auto-mint) with real pending work: rounds produce no
-        // commit and stay on the retry path.
-        conversation.config.recovery_auto_commit_delay = None;
+        // Real pending work but no committer: rounds produce no commit and stay
+        // on the retry path.
         conversation.config.recovery_inactivity_duration = Duration::ZERO;
         conversation.config.recovery_max_rounds = 3;
         conversation.enter_recovery_mode();
@@ -1254,7 +1286,6 @@ mod tests {
     fn recovery_retries_forever_when_max_rounds_zero() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_member());
-        conversation.config.recovery_auto_commit_delay = None;
         conversation.config.recovery_inactivity_duration = Duration::ZERO;
         conversation.config.recovery_max_rounds = 0; // retry forever (default)
         conversation.enter_recovery_mode();
@@ -1288,9 +1319,8 @@ mod tests {
     fn recovery_exhausts_after_max_rounds() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_member());
-        // Manual-only with pending work and a 1-round stop line: the first
+        // Pending work but no committer, with a 1-round stop line: the first
         // commit-less round must exhaust recovery.
-        conversation.config.recovery_auto_commit_delay = None;
         conversation.config.recovery_inactivity_duration = Duration::ZERO;
         conversation.config.recovery_max_rounds = 1;
         conversation.enter_recovery_mode();

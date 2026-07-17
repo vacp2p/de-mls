@@ -163,6 +163,12 @@ pub struct Member {
     reelection_anchor: Option<Duration>,
     sync_resend_anchor: Option<Duration>,
     buffered_anchor: Option<Duration>,
+    /// Recovery-commit policy: when `true` (the default), this member mints in
+    /// Layer-3 recovery via `commit_in_recovery` each round it's open. de-mls no
+    /// longer auto-mints; this is the harness standing in for that policy.
+    /// A test flips it off (via [`TestHarness::set_recovery_auto_commit`]) to
+    /// model a manual-only integrator that never presses the button.
+    recovery_auto_commit: bool,
 }
 
 /// Arm `anchor` the first tick `active` holds and report whether `delay` has
@@ -222,6 +228,7 @@ impl Member {
             reelection_anchor: None,
             sync_resend_anchor: None,
             buffered_anchor: None,
+            recovery_auto_commit: true,
         }
     }
 
@@ -249,6 +256,7 @@ impl Member {
             reelection_anchor: None,
             sync_resend_anchor: None,
             buffered_anchor: None,
+            recovery_auto_commit: true,
         }
     }
 
@@ -791,6 +799,21 @@ impl Member {
         }
     }
 
+    /// Reference Layer-3 recovery-commit policy — the auto-mint de-mls no longer
+    /// keeps. While recovery is open, mint via `commit_in_recovery` each round
+    /// (idempotent: a no-op once a local candidate exists). A member with the
+    /// policy off never presses the button, modelling a manual-only integrator.
+    pub fn drive_recovery_policy(&mut self) {
+        if !self.recovery_auto_commit {
+            return;
+        }
+        if let Some(convo) = self.convo.as_mut()
+            && convo.is_in_recovery_mode()
+        {
+            let _ = convo.commit_in_recovery(&self.integ.provider, &self.integ.signer);
+        }
+    }
+
     /// Drain this member's pending events into its log (no welcome routing) —
     /// for standalone members driven outside a [`TestHarness`].
     pub fn pump_events(&mut self) {
@@ -987,6 +1010,15 @@ impl<const N: usize> TestHarness<N> {
         self.muted[index] = false;
     }
 
+    /// Set every member's recovery-commit policy (see
+    /// [`Member::drive_recovery_policy`]). `false` models a manual-only
+    /// integrator that opens recovery but never calls `commit_in_recovery`.
+    pub fn set_recovery_auto_commit(&mut self, enabled: bool) {
+        for member in &mut self.members {
+            member.recovery_auto_commit = enabled;
+        }
+    }
+
     /// Deliver a key-package announcement to every member (self-echoes drop
     /// inside `deliver_key_package`).
     pub fn deliver_key_package_all(&mut self, packet: &Outbound) {
@@ -1080,6 +1112,7 @@ impl<const N: usize> TestHarness<N> {
             let _ = member.poll();
             member.drive_commit_policy();
             member.drive_takeover_policy();
+            member.drive_recovery_policy();
         }
         self.drain_and_route_welcomes();
         self.relay_outbound();

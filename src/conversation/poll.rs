@@ -99,11 +99,6 @@ where
         }
 
         let in_recovery = self.is_in_recovery_mode();
-        // Layer-3 auto-fallback: once the manual grace passes, every online node
-        // mints so a commit lands even if no member explicitly commits.
-        if in_recovery {
-            self.maybe_auto_commit_recovery(provider, signer);
-        }
 
         let (received, expected) = self.commit_candidate_count();
 
@@ -118,17 +113,13 @@ where
                 .is_some_and(|list| received >= list.len());
 
         // Recovery reuses the shorter `recovery_inactivity_duration` as its
-        // collection settle (after the manual grace / auto-mint), rather than
-        // the full `freeze_duration`.
+        // collection settle, rather than the full `freeze_duration`. The app
+        // drives the commit itself (via `commit_in_recovery`) within it.
         let window_elapsed = if in_recovery {
-            let window = self
-                .config
-                .recovery_auto_commit_delay
-                .unwrap_or(Duration::ZERO)
-                + self.config.recovery_inactivity_duration;
-            self.timing
-                .phase_timer
-                .elapsed_since_anchor(self.clock.timestamp(), window)
+            self.timing.phase_timer.elapsed_since_anchor(
+                self.clock.timestamp(),
+                self.config.recovery_inactivity_duration,
+            )
         } else {
             self.is_freeze_window_elapsed()
         };
@@ -236,7 +227,7 @@ where
             CommitRoundOutcome::NoCandidate => {
                 // Recovery: no commit landed this round (manual-only with no
                 // press, or everyone offline). Do NOT fall back to re-election;
-                // Layer 3 is already past it. Retry the manual+auto cycle until
+                // Layer 3 is already past it. Retry the recovery cycle until
                 // the integrator's stop-line policy (`recovery_max_rounds`) says
                 // to give up — `0` retries forever.
                 if in_recovery {
@@ -351,36 +342,6 @@ where
             self.emit_event(ConversationEvent::PhaseChange(reopened));
         }
         DispatchOutcome::Done
-    }
-
-    /// Layer-3 auto-fallback: once `recovery_auto_commit_delay` has elapsed with
-    /// no local candidate (no member has committed yet), mint our own so a commit
-    /// can land. No-op when the policy is manual-only (`None`), before the grace,
-    /// or once we've already minted. Best-effort — build errors are logged, not
-    /// surfaced, so `poll` keeps driving.
-    fn maybe_auto_commit_recovery<Pr>(&mut self, provider: &Pr, signer: &impl Signer)
-    where
-        Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
-    {
-        let Some(delay) = self.config.recovery_auto_commit_delay else {
-            return;
-        };
-        if !self
-            .timing
-            .phase_timer
-            .elapsed_since_anchor(self.clock.timestamp(), delay)
-            || self.queues.commit_round.has_local_candidate()
-        {
-            return;
-        }
-        if let Err(e) = self.mint_and_broadcast_candidate(provider, signer) {
-            error!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "recovery auto-commit failed"
-            );
-        }
     }
 
     /// Hand off the joiner welcome after a commit merged: attach the
