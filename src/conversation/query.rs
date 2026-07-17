@@ -41,6 +41,13 @@ where
         Ok((epoch, self.services.steward_list.next_election_round()))
     }
 
+    /// This member's epoch authenticator for the current epoch. Compared at the
+    /// same epoch number, a mismatch across members is a fork; a match is real
+    /// convergence. Pair with [`Self::epoch_and_retry`] to compare like epochs.
+    pub fn epoch_authenticator(&self) -> Vec<u8> {
+        self.mls().epoch_authenticator().to_vec()
+    }
+
     /// Count of buffered pending membership updates. Used by tests and the UI
     /// to verify buffer hygiene (e.g., that a joiner's buffer is empty right
     /// after they receive the welcome).

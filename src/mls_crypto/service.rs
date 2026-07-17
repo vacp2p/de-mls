@@ -169,6 +169,15 @@ impl MlsService {
         Ok(self.group.epoch().as_u64())
     }
 
+    /// MLS epoch authenticator — a secret-derived tag identifying this group's
+    /// exact state at the current epoch. Two members at the same epoch number
+    /// with different authenticators have diverged (forked); identical
+    /// authenticators confirm the same state. The one value that tells a real
+    /// convergence apart from two branches that merely share an epoch count.
+    pub fn epoch_authenticator(&self) -> &[u8] {
+        self.group.epoch_authenticator().as_slice()
+    }
+
     // Extensions configured for the MlsGroup
     pub fn extensions(&self) -> &Extensions<GroupContext> {
         self.group.extensions()

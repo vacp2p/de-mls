@@ -283,7 +283,7 @@ fn survivors_recover_when_the_sole_steward_is_partitioned() {
     assert_eq!(h.member(0).epoch(), 1);
     assert!(h.member(0).is_epoch_steward(), "creator stewards epoch 1");
     assert!(
-        h.secrets_agree(0, b"before the partition"),
+        h.converged(),
         "the founded group is one group to begin with"
     );
 
@@ -304,11 +304,10 @@ fn survivors_recover_when_the_sole_steward_is_partitioned() {
     );
     assert!(h.member(4).is_working(), "erin joined without the creator");
 
-    // The creator returns from the partition. Nothing detects or repairs the
-    // divergence: its branch and the survivors' report the same epoch number
-    // and member set even though their epoch secrets differ. That integer-level
-    // agreement is exactly why the fork is silent — assert it (it survives a
-    // future fix), but don't assert the fork itself.
+    // The creator returns from the partition. Nothing repairs the divergence:
+    // its branch and the survivors' report the same epoch number and member set
+    // even though their epoch secrets differ — which is exactly why the fork
+    // was silent before we surfaced the authenticator.
     h.unmute(0);
     for _ in 0..40 {
         h.process(STEP);
@@ -316,6 +315,15 @@ fn survivors_recover_when_the_sole_steward_is_partitioned() {
 
     assert!(
         h.epochs_agree() && h.membership_agrees(),
-        "both branches report the same epoch number and member set"
+        "the integer views match — the reason the fork went unnoticed"
+    );
+    // The capability this slice adds: the authenticator catches the divergence
+    // the integer checks miss. This assertion is the fork's canary — when
+    // prevention or auto-rejoin lands, this scenario stops forking and the
+    // assertion flips to `converged()`. That break is the signal to update the
+    // test, not a regression.
+    assert!(
+        !h.converged(),
+        "the epoch authenticators diverge — the fork the counts can't see"
     );
 }
