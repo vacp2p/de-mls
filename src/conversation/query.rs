@@ -72,6 +72,34 @@ where
         self.services.steward_list.is_steward(&self.self_member_id)
     }
 
+    /// Size of the approved batch the local member would commit if it called
+    /// [`Conversation::commit_now`] right now, or `None` when there is nothing
+    /// to commit: not in `Working`, no approved proposals, or an election is in
+    /// flight (committing on a stale steward list only produces a NoCandidate).
+    /// The app polls this on its own cadence to drive the commit timing de-mls
+    /// no longer keeps — pair it with [`Conversation::commit_now`].
+    pub fn pending_commit_work(&self) -> Option<usize> {
+        if self.current_state() != ConversationState::Working
+            || self.queues.has_election_in_flight()
+        {
+            return None;
+        }
+        let count = self.queues.approved_proposals_count();
+        (count > 0).then_some(count)
+    }
+
+    /// `true` when the conversation is in a recovery posture: Layer-3 recovery
+    /// is open, a steward-election retry round is in progress, or an election
+    /// just landed while parked in `Reelection` (a recovery continuation). The
+    /// app reads this alongside [`Self::pending_commit_work`] to commit the
+    /// pending batch on the short recovery window rather than a fresh full
+    /// commit-inactivity wait.
+    pub fn in_recovery_posture(&self) -> bool {
+        self.is_in_recovery_mode()
+            || self.services.steward_list.next_election_round() > 0
+            || self.timing.reelection_recovered
+    }
+
     /// `true` if the local member is the **primary** steward designated for the
     /// current epoch — the one that should commit and sponsor joiners first.
     /// Unlike [`Self::is_steward`] (true for any member on the list, backups

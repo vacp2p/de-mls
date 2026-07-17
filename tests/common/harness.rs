@@ -35,7 +35,9 @@ use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
     conversation_update_request,
 };
-use de_mls::{Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome};
+use de_mls::{
+    Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome, WallClock,
+};
 use de_mls::{ConversationError, ConversationEvent, ConversationState, MockClock, ScoringConfig};
 use hashgraph_like_consensus::error::ConsensusError;
 
@@ -149,6 +151,11 @@ pub struct Member {
     /// an invitee that is in the ratchet tree but has never run the protocol:
     /// distinct from `mute`, which silences a member that did join.
     accepts_welcome: bool,
+    /// Virtual-time anchor for the harness's commit-inactivity policy: when this
+    /// member first saw approved work to commit. de-mls no longer times commits,
+    /// so the harness (the reference app) drives `commit_now` off this. `None`
+    /// when there is nothing pending. See [`Member::drive_commit_policy`].
+    commit_anchor: Option<Duration>,
 }
 
 impl Member {
@@ -187,6 +194,7 @@ impl Member {
             last_sync: None,
             pending_config: config,
             accepts_welcome: true,
+            commit_anchor: None,
         }
     }
 
@@ -210,6 +218,7 @@ impl Member {
             last_sync: None,
             pending_config: config,
             accepts_welcome: true,
+            commit_anchor: None,
         }
     }
 
@@ -625,6 +634,7 @@ impl Member {
         self.convo = None;
         self.last_sync = None;
         self.pending_config = config;
+        self.commit_anchor = None;
     }
 
     /// Advance this member's timers/state machine one tick, returning the
@@ -636,6 +646,55 @@ impl Member {
                 next_wakeup_in: None,
                 leave_requested: false,
             },
+        }
+    }
+
+    /// Reference commit-inactivity policy — the timing de-mls no longer keeps,
+    /// reimplemented here as the harness's own liveness policy. Once this member
+    /// holds approved work, wait a role-based delay off `commit_anchor`, then
+    /// call `commit_now`: the epoch steward leads at `commit_inactivity_duration`;
+    /// every other member waits an extra `recovery_inactivity_duration`. In the
+    /// normal case the primary's commit lands first and clears the work before
+    /// the longer delay fires; when the sole steward is silent, a non-steward's
+    /// freeze-entry produces a NoCandidate that escalates to reelection — the
+    /// path a group recovers by. Called once per member each `process` round,
+    /// after `poll`.
+    fn drive_commit_policy(&mut self) {
+        let (lead, recovering) = {
+            let Some(convo) = self.convo.as_ref() else {
+                self.commit_anchor = None;
+                return;
+            };
+            if convo.pending_commit_work().is_none() {
+                self.commit_anchor = None;
+                return;
+            }
+            (
+                convo.is_epoch_steward().unwrap_or(false),
+                convo.in_recovery_posture(),
+            )
+        };
+        let now = self.integ.clock.now();
+        let anchor = *self.commit_anchor.get_or_insert(now);
+        // A recovery continuation (open recovery mode or a bumped retry round)
+        // commits within the short recovery window rather than waiting out a
+        // fresh full commit-inactivity epoch.
+        let delay = if recovering {
+            self.pending_config.recovery_inactivity_duration
+        } else if lead {
+            self.pending_config.commit_inactivity_duration
+        } else {
+            self.pending_config.commit_inactivity_duration
+                + self.pending_config.recovery_inactivity_duration
+        };
+        if now.saturating_sub(anchor) < delay {
+            return;
+        }
+        self.commit_anchor = None;
+        // Best-effort, like the poll step it replaces: a transient mint failure
+        // leaves the work pending and surfaces as non-convergence in the test.
+        if let Some(convo) = self.convo.as_mut() {
+            let _ = convo.commit_now(&self.integ.provider, &self.integ.signer);
         }
     }
 
@@ -926,6 +985,7 @@ impl<const N: usize> TestHarness<N> {
         }
         for member in &mut self.members {
             let _ = member.poll();
+            member.drive_commit_policy();
         }
         self.drain_and_route_welcomes();
         self.relay_outbound();

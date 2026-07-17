@@ -86,14 +86,6 @@ where
             );
         }
 
-        if let Err(e) = self.start_freeze_on_inactivity(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "inactivity-freeze error in poll"
-            );
-        }
-
         if let Err(e) = self.drive_reelection_retry(provider, signer) {
             warn!(
                 conversation = %self.conversation_id,
@@ -541,60 +533,6 @@ where
             "backup steward re-sending conversation sync: epoch steward silent past recovery window"
         );
         self.share_conversation_sync(provider, signer)
-    }
-
-    /// Steward-inactivity freeze entry: once the inactivity timer fires with
-    /// approved work pending, start the commit round and transition into
-    /// `Freezing`. Stewards build their own commit candidate too;
-    /// candidate-build failure is logged and the freeze transition proceeds
-    /// (peers' candidates still get processed). No-ops outside `Working`
-    /// (via `check_steward_inactivity`) and while an election is in flight.
-    fn start_freeze_on_inactivity<Pr>(
-        &mut self,
-        provider: &Pr,
-        signer: &impl Signer,
-    ) -> Result<(), ConversationError>
-    where
-        Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
-    {
-        let proposal_count = self.queues.approved_proposals_count();
-        // Hold the freeze while an election is in flight — committing on
-        // the known-stale list would just produce a NoCandidate.
-        if self.queues.has_election_in_flight() {
-            return Ok(());
-        }
-        // Recovery uses the shorter retry inactivity window so we don't
-        // burn another full epoch waiting for a steward to commit. That
-        // covers open recovery mode, a bumped retry round, and the stretch
-        // between a recovery election landing and its commit merging.
-        let in_recovery = self.is_in_recovery_mode()
-            || self.services.steward_list.next_election_round() > 0
-            || self.timing.reelection_recovered;
-        let inactivity = if in_recovery {
-            self.config.recovery_inactivity_duration
-        } else if self.is_epoch_steward()? {
-            // The primary steward leads: it commits at the commit-inactivity
-            // deadline.
-            self.config.commit_inactivity_duration
-        } else {
-            // Backups (and non-stewards) wait an extra recovery window. In the
-            // normal case the primary's commit candidate pulls them into freeze
-            // first, so they never self-drive it; only a silent primary lets
-            // this longer deadline fire and a backup step in.
-            self.config.commit_inactivity_duration + self.config.recovery_inactivity_duration
-        };
-        let Some(event) = self.check_steward_inactivity(proposal_count, inactivity) else {
-            return Ok(());
-        };
-
-        info!(
-            conversation = %self.conversation_id,
-            approved = proposal_count,
-            "steward inactivity transition"
-        );
-        self.on_freeze_entered(provider, signer, event)?;
-        Ok(())
     }
 
     /// Reelection-silence watchdog: while parked in `Reelection` with no

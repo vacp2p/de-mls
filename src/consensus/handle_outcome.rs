@@ -210,10 +210,11 @@ where
         self.exit_recovery_mode();
         let resumed_from_reelection = if self.current_state() == ConversationState::Reelection {
             // The approved work this conversation froze over is a recovery
-            // continuation: keep the short recovery window until its commit
-            // merges. `retry_round > 0` covers only bumped rounds — a
-            // round-0 recovery election would otherwise wait out a fresh
-            // full commit-inactivity epoch.
+            // continuation: flag it so the app commits on the short recovery
+            // window (via `in_recovery_posture`) rather than a fresh full
+            // commit-inactivity epoch. `retry_round > 0` covers only bumped
+            // rounds — a round-0 recovery election would otherwise wait a full
+            // commit-inactivity epoch.
             self.timing.reelection_recovered = true;
             Some(self.start_working())
         } else {

@@ -173,6 +173,9 @@ fn join_completes_in_one_call() {
         alice.clock.advance(Duration::from_millis(30));
         bob.clock.advance(Duration::from_millis(30));
         creator.poll(&alice.provider, &alice.signer);
+        // de-mls no longer self-times the commit; the app (this test) drives it
+        // once the add is approved. A no-op until there is approved work.
+        let _ = creator.commit_now(&alice.provider, &alice.signer);
         for event in creator.drain_events() {
             if let ConversationEvent::WelcomeReady {
                 welcome: w,

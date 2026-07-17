@@ -114,9 +114,10 @@ pub(crate) struct Timing {
     /// election is being voted on, and each time the ladder advances.
     pub(crate) reelection_silence_anchor: Option<Timestamp>,
     /// A steward election landed while this conversation was parked in
-    /// `Reelection`: the pending approved work is a recovery continuation,
-    /// so the inactivity check keeps the short recovery window instead of a
-    /// fresh full commit-inactivity wait. Cleared when a commit merges.
+    /// `Reelection`: the pending approved work is a recovery continuation. The
+    /// app reads this via [`Conversation::in_recovery_posture`] to commit on the
+    /// short recovery window instead of a fresh full commit-inactivity wait.
+    /// Cleared when a commit merges.
     pub(crate) reelection_recovered: bool,
 }
 
@@ -477,6 +478,38 @@ where
         self.mint_and_broadcast_candidate(provider, signer)
     }
 
+    /// Start the commit round now instead of waiting out a commit-inactivity
+    /// timer: enter `Freezing` and, if we're a steward, mint our candidate from
+    /// the approved batch. de-mls no longer keeps this timer — the app calls
+    /// this when its own liveness policy decides the epoch steward has sat on
+    /// approved work long enough, or when a backup takes over a silent primary.
+    ///
+    /// `Ok(true)` when the freeze was entered, `Ok(false)` when there is nothing
+    /// to do: not in `Working`, no approved work, or an election in flight
+    /// (committing on a stale steward list only produces a NoCandidate). Mirrors
+    /// the guards of [`Self::pending_commit_work`].
+    pub fn commit_now<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<bool, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if self.current_state() != ConversationState::Working
+            || self.queues.approved_proposals_count() == 0
+            || self.queues.has_election_in_flight()
+        {
+            return Ok(false);
+        }
+        let Some(event) = self.start_freezing() else {
+            return Ok(false);
+        };
+        self.on_freeze_entered(provider, signer, event)?;
+        Ok(true)
+    }
+
     /// Finalize the active commit round.
     pub(crate) fn finalize_commit_round<Pr>(
         &mut self,
@@ -568,27 +601,13 @@ where
         Some(earliest.saturating_duration_since(now))
     }
 
-    /// State-driven phase-timer deadline, if one is currently active. The
-    /// conversation's polling paths (the freeze step in `poll`, and the
-    /// inactivity check in `check_steward_inactivity`) all gate on the phase
-    /// timer; this surfaces the same wall-clock target so an external
-    /// scheduler can wake us at the right time.
+    /// State-driven phase-timer deadline, if one is currently active. Only the
+    /// `Freezing` settle window is time-driven now; surface its wall-clock
+    /// target so an external scheduler can wake us when the window elapses.
     fn phase_deadline(&self) -> Option<Timestamp> {
         let anchor = self.timing.phase_timer.started_at()?;
-        let cfg = &self.config;
         match self.current_state() {
-            ConversationState::Freezing => Some(anchor + cfg.freeze_duration),
-            ConversationState::Working => {
-                if self.queues.approved_proposals_count() == 0 {
-                    return None;
-                }
-                let dur = if self.is_in_recovery_mode() {
-                    cfg.recovery_inactivity_duration
-                } else {
-                    cfg.commit_inactivity_duration
-                };
-                Some(anchor + dur)
-            }
+            ConversationState::Freezing => Some(anchor + self.config.freeze_duration),
             _ => None,
         }
     }
@@ -748,44 +767,6 @@ where
                 .phase_timer
                 .elapsed_since_anchor(self.clock.timestamp(), self.config.freeze_duration)
     }
-
-    /// Drives the "steward waited too long to commit" transition into
-    /// `Freezing`. Call each poll tick. Returns `Some(Freezing)` exactly
-    /// on the tick that transitions; `None` while still waiting, outside
-    /// Working, or when there's no approved work. Self-starts the
-    /// inactivity anchor on the first tick with approved work.
-    pub(crate) fn check_steward_inactivity(
-        &mut self,
-        approved_proposals_count: usize,
-        inactivity_duration: Duration,
-    ) -> Option<ConversationState> {
-        if self.current_state() != ConversationState::Working || approved_proposals_count == 0 {
-            return None;
-        }
-        let now = self.clock.timestamp();
-        if self.timing.phase_timer.started_at().is_none() {
-            self.timing.phase_timer.start(now);
-            info!(
-                approved = approved_proposals_count,
-                inactivity_ms = inactivity_duration.as_millis() as u64,
-                "inactivity timer started"
-            );
-            return None;
-        }
-        if !self
-            .timing
-            .phase_timer
-            .elapsed_since_anchor(now, inactivity_duration)
-        {
-            return None;
-        }
-        info!(
-            inactivity_ms = inactivity_duration.as_millis() as u64,
-            approved = approved_proposals_count,
-            "inactivity window elapsed, entering freeze"
-        );
-        self.start_freezing()
-    }
 }
 
 #[cfg(test)]
@@ -940,51 +921,6 @@ mod tests {
         fn all_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, Self::Error> {
             Err(ScoringFault)
         }
-    }
-
-    /// First tick with approved work auto-anchors the timer and returns `None`.
-    /// Second tick before timeout still returns `None`. State must remain Working.
-    #[test]
-    fn check_steward_inactivity_first_tick_anchors_and_returns_none() {
-        let mut conversation = make_conversation_working();
-        assert_eq!(conversation.current_state(), ConversationState::Working);
-        assert!(
-            conversation.timing.phase_timer.started_at().is_none(),
-            "fresh conversation has no anchor"
-        );
-
-        let result =
-            conversation.check_steward_inactivity(/* approved */ 1, Duration::from_secs(10));
-
-        assert_eq!(result, None, "first tick auto-anchors and returns None");
-        assert!(
-            conversation.timing.phase_timer.started_at().is_some(),
-            "anchor must be set after first tick"
-        );
-        assert_eq!(
-            conversation.current_state(),
-            ConversationState::Working,
-            "state must stay Working until inactivity actually elapses"
-        );
-
-        let result =
-            conversation.check_steward_inactivity(/* approved */ 1, Duration::from_secs(10));
-        assert_eq!(
-            result, None,
-            "second tick before timeout still returns None"
-        );
-    }
-
-    /// No approved work → no anchor started, no transition.
-    #[test]
-    fn check_steward_inactivity_noop_without_approved_work() {
-        let mut conversation = make_conversation_working();
-        let result = conversation.check_steward_inactivity(0, Duration::from_secs(10));
-        assert_eq!(result, None);
-        assert!(
-            conversation.timing.phase_timer.started_at().is_none(),
-            "no approved work must not start the timer"
-        );
     }
 
     // ── Caller-polled deadlines + drain model ───────────────────────────
