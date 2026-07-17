@@ -27,10 +27,16 @@ its transport address), the transport itself, the OpenMLS provider (crypto +
 storage), the consensus backend (proposal/vote storage + a vote-signing key),
 key-package minting, and the registry of conversations.
 
-**de-mls owns:** the protocol — MLS commits, proposal voting, steward election,
-and freeze timing — along with the per-conversation state behind it: proposal
-queues, deduplication, the steward list, peer scores, and the `Conversation`
-state machine.
+**de-mls owns:** the protocol — MLS commits, proposal voting, steward election —
+along with the per-conversation state behind it: proposal queues, deduplication,
+the steward list, peer scores, and the `Conversation` state machine. It also
+owns the **agreement/settle timing** that every member must share (see
+[Driving & timing](#driving--timing)).
+
+**You also own the liveness timing:** de-mls keeps no liveness timers. It tells
+you *what* is actionable (via condition queries) and *how* to act (via
+triggers); *when* to act — commit, take over a silent steward, recover — is
+yours to drive, on a clock or by hand.
 
 ## The `Conversation` API
 
@@ -73,6 +79,46 @@ bounds via `ConversationConfig`'s `steward_list` field.
 A complete, runnable construction — creator and joiner built straight from
 direct arguments — is in
 [`tests/standalone_construction.rs`](tests/standalone_construction.rs).
+
+## Driving & timing
+
+de-mls carries no liveness timers. Each cycle the app: calls `poll()` (resolves
+votes + advances any in-flight commit round), reads the **condition queries** to
+see what's actionable, and pulls the matching **trigger** when its own timer or
+signal says to. The full surface is indexed in
+[`src/conversation/driving.rs`](src/conversation/driving.rs):
+
+| Condition query | Trigger | Meaning |
+|---|---|---|
+| `pending_commit_work()` | `commit_now()` | approved batch waiting to commit |
+| `pending_buffered_updates()` | `propose_buffered_updates()` | buffered joins/removes to propose |
+| `pending_sync_resend()` | `share_conversation_sync()` | unanswered sync request (backup) |
+| `pending_reelection()` | `advance_election_retry()` | a silent reelection round |
+| *(recovery open)* | `commit_in_recovery()` / `request_recovery()` | Layer-3 recovery |
+| *(commit dropped)* | `resend_commit()` | re-broadcast a held candidate |
+
+**Two kinds of timing.** de-mls owns the **agreement/settle** durations on
+`ConversationConfig` — every member must agree on them, so they ride in
+`ConversationSync` to joiners:
+
+- `voting_delay` / `election_voting_delay` — grace for a manual vote before the auto-vote fires
+- `consensus_timeout` — how long a vote session stays open
+- `freeze_duration` — commit-round candidate-collection window
+- `recovery_inactivity_duration` — the shorter settle window during recovery
+- `proposal_expiration`
+
+The **liveness** durations — how long *you* wait before driving `commit_now`, a
+backup takeover, or recovery — are yours; keep them in your own config.
+
+**How they depend on each other.** Respect, per member:
+
+```
+voting_delay  <  consensus_timeout  <  your commit-inactivity  <  your takeover window
+```
+
+and, across the network, `consensus_timeout > Δ` (max message delay): if a vote
+session times out before votes propagate, it resolves on the silent-vote
+fallback, which can resolve differently per node and split the steward list.
 
 ## Consensus
 
