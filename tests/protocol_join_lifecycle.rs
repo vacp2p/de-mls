@@ -140,8 +140,11 @@ fn backup_steward_resends_sync_when_epoch_steward_silent() {
     );
 
     // Past the window with no answer seen, the backup re-sends the sync.
-    h.member(backup)
-        .advance_clock(cfg.voting_inactivity_window() + Duration::from_millis(50));
+    h.member(backup).advance_clock(
+        common::harness::HARNESS_COMMIT_INACTIVITY
+            + cfg.recovery_inactivity_duration
+            + Duration::from_millis(50),
+    );
     h.member_mut(backup).drive_takeover_policy();
     assert_eq!(
         h.member_mut(backup).take_outbound().len(),

@@ -55,11 +55,10 @@ pub type TestConversation =
 /// production-scale values instead of the 0..2s band.
 pub const HARNESS_EPOCH: Duration = Duration::from_secs(1_750_000_000);
 
-/// Fast sub-second timing so the virtual-clock polling loop converges in a
-/// handful of rounds.
+/// Fast sub-second agreement/settle timing (the de-mls-owned config) so the
+/// virtual-clock polling loop converges in a handful of rounds.
 pub fn fast_config() -> ConversationConfig {
     ConversationConfig {
-        commit_inactivity_duration: Duration::from_millis(50),
         freeze_duration: Duration::from_millis(20),
         voting_delay: Duration::from_millis(30),
         election_voting_delay: Duration::from_millis(30),
@@ -68,6 +67,13 @@ pub fn fast_config() -> ConversationConfig {
         ..ConversationConfig::default()
     }
 }
+
+/// The app's commit-inactivity delay — how long the harness (standing in for a
+/// real integrator) lets the epoch steward sit on approved work before driving
+/// `commit_now`. de-mls no longer owns this liveness timing, so the reference
+/// app carries it. A backup's takeover window derives from it plus the
+/// de-mls-owned `recovery_inactivity_duration`.
+pub const HARNESS_COMMIT_INACTIVITY: Duration = Duration::from_millis(50);
 
 /// Per-member integrator state: the member's credential + signer, the consensus
 /// backend, the seed configs, and the provider it mints a key package into while
@@ -169,6 +175,10 @@ pub struct Member {
     /// A test flips it off (via [`TestHarness::set_recovery_auto_commit`]) to
     /// model a manual-only integrator that never presses the button.
     recovery_auto_commit: bool,
+    /// The app's commit-inactivity delay for this member (see
+    /// [`HARNESS_COMMIT_INACTIVITY`]). de-mls no longer carries it; the harness
+    /// does, and a test tunes it via [`TestHarness::set_commit_inactivity`].
+    commit_inactivity: Duration,
 }
 
 /// Arm `anchor` the first tick `active` holds and report whether `delay` has
@@ -229,6 +239,7 @@ impl Member {
             sync_resend_anchor: None,
             buffered_anchor: None,
             recovery_auto_commit: true,
+            commit_inactivity: HARNESS_COMMIT_INACTIVITY,
         }
     }
 
@@ -257,6 +268,7 @@ impl Member {
             sync_resend_anchor: None,
             buffered_anchor: None,
             recovery_auto_commit: true,
+            commit_inactivity: HARNESS_COMMIT_INACTIVITY,
         }
     }
 
@@ -693,8 +705,9 @@ impl Member {
     /// Reference commit-inactivity policy — the timing de-mls no longer keeps,
     /// reimplemented here as the harness's own liveness policy. Once this member
     /// holds approved work, wait a role-based delay off `commit_anchor`, then
-    /// call `commit_now`: the epoch steward leads at `commit_inactivity_duration`;
-    /// every other member waits an extra `recovery_inactivity_duration`. In the
+    /// call `commit_now`: the epoch steward leads at `commit_inactivity` (the
+    /// app's own delay); every other member waits an extra
+    /// `recovery_inactivity_duration`. In the
     /// normal case the primary's commit lands first and clears the work before
     /// the longer delay fires; when the sole steward is silent, a non-steward's
     /// freeze-entry produces a NoCandidate that escalates to reelection — the
@@ -723,10 +736,9 @@ impl Member {
         let delay = if recovering {
             self.pending_config.recovery_inactivity_duration
         } else if lead {
-            self.pending_config.commit_inactivity_duration
+            self.commit_inactivity
         } else {
-            self.pending_config.commit_inactivity_duration
-                + self.pending_config.recovery_inactivity_duration
+            self.commit_inactivity + self.pending_config.recovery_inactivity_duration
         };
         if now.saturating_sub(anchor) < delay {
             return;
@@ -763,7 +775,7 @@ impl Member {
             )
         };
         let now = self.integ.clock.now();
-        let window = self.pending_config.voting_inactivity_window();
+        let window = self.commit_inactivity + self.pending_config.recovery_inactivity_duration;
 
         if window_elapsed(&mut self.reelection_anchor, now, reelection, window) {
             self.reelection_anchor = None;
@@ -1016,6 +1028,14 @@ impl<const N: usize> TestHarness<N> {
     pub fn set_recovery_auto_commit(&mut self, enabled: bool) {
         for member in &mut self.members {
             member.recovery_auto_commit = enabled;
+        }
+    }
+
+    /// Set every member's app commit-inactivity delay (see
+    /// [`HARNESS_COMMIT_INACTIVITY`]) — the timing de-mls no longer owns.
+    pub fn set_commit_inactivity(&mut self, delay: Duration) {
+        for member in &mut self.members {
+            member.commit_inactivity = delay;
         }
     }
 

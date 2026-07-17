@@ -123,7 +123,6 @@ fn create_builds_a_working_steward_session_without_user() {
 /// inactivity commit land within a few polling rounds.
 fn fast_config() -> de_mls::ConversationConfig {
     de_mls::ConversationConfig {
-        commit_inactivity_duration: Duration::from_millis(50),
         freeze_duration: Duration::from_millis(20),
         voting_delay: Duration::from_millis(30),
         election_voting_delay: Duration::from_millis(30),

@@ -28,12 +28,14 @@ const FRANK: &str = "8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092e
 /// One driving step of virtual time.
 const STEP: Duration = Duration::from_millis(50);
 
-/// A config whose commit-inactivity window is long enough to measure, while
-/// every other gate stays sub-second. Preserves the documented ordering
-/// invariant `voting_delay < consensus_timeout < commit_inactivity_duration`.
+/// The app's commit-inactivity delay, wide enough to measure. Applied to the
+/// harness via [`TestHarness::set_commit_inactivity`] — de-mls no longer owns it.
+const MEASURED_COMMIT_INACTIVITY: Duration = Duration::from_secs(2);
+
+/// The de-mls-owned agreement/settle timing paired with
+/// `MEASURED_COMMIT_INACTIVITY`, all other gates sub-second.
 fn measurable_commit_window() -> ConversationConfig {
     ConversationConfig {
-        commit_inactivity_duration: Duration::from_secs(2),
         freeze_duration: Duration::from_millis(20),
         voting_delay: Duration::from_millis(30),
         election_voting_delay: Duration::from_millis(30),
@@ -70,9 +72,10 @@ fn founding_adds_batch_into_one_commit_after_one_inactivity_window() {
     let mut h = TestHarness::<4>::start(
         [ALICE, BOB, CHARLIE, DAVE],
         "found",
-        config.clone(),
+        config,
         StewardListConfig::new(1, 5).unwrap(),
     );
+    h.set_commit_inactivity(MEASURED_COMMIT_INACTIVITY);
 
     for i in 1..4 {
         let kp = h.member_mut(i).mint_key_package();
@@ -89,9 +92,8 @@ fn founding_adds_batch_into_one_commit_after_one_inactivity_window() {
     );
 
     assert!(
-        landed_at >= config.commit_inactivity_duration,
-        "the founding commit waited a full inactivity window ({:?}), landed at {landed_at:?}",
-        config.commit_inactivity_duration,
+        landed_at >= MEASURED_COMMIT_INACTIVITY,
+        "the founding commit waited a full inactivity window ({MEASURED_COMMIT_INACTIVITY:?}), landed at {landed_at:?}",
     );
 
     let welcomes = h.member(0).welcome_readys();

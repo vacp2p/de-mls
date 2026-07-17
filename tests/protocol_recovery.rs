@@ -152,7 +152,6 @@ fn sole_steward_offline_recovers_and_commits_approved_add() {
     // short recovery window — waiting out a second full commit-inactivity
     // epoch would blow the budget.
     let cfg = ConversationConfig {
-        commit_inactivity_duration: Duration::from_secs(20),
         recovery_inactivity_duration: Duration::from_millis(100),
         ..fast_config()
     };
@@ -162,6 +161,9 @@ fn sole_steward_offline_recovers_and_commits_approved_add() {
         cfg,
         StewardListConfig::new(1, 1).unwrap(),
     );
+    // The app's wide commit-inactivity: the freeze wait before reelection costs
+    // ~20 s, so this pins the post-election short-window behavior.
+    h.set_commit_inactivity(Duration::from_secs(20));
     let conversation_id = h.conversation_id().to_string();
 
     // Bob joins; Charlie only announces later, so the group is Alice + Bob

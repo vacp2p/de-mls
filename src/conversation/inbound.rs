@@ -729,12 +729,9 @@ fn validate_conversation_sync(
 
 /// Name of the first zero-valued field in `timing`, or `None` if all
 /// fields are non-zero. Zero in any timing field would short-circuit the
-/// timer it drives (consensus_timeout firing immediately,
-/// commit_inactivity breaking the inactivity tracker, etc.).
+/// timer it drives (consensus_timeout firing immediately, etc.).
 fn first_zero_timing_field(timing: &TimingConfig) -> Option<&'static str> {
-    if timing.commit_inactivity_duration_ms == 0 {
-        Some("commit_inactivity_duration_ms")
-    } else if timing.freeze_duration_ms == 0 {
+    if timing.freeze_duration_ms == 0 {
         Some("freeze_duration_ms")
     } else if timing.proposal_expiration_ms == 0 {
         Some("proposal_expiration_ms")
@@ -827,12 +824,10 @@ mod conversation_sync_tests {
 
     fn nonzero_timing() -> TimingConfig {
         TimingConfig {
-            commit_inactivity_duration_ms: 60_000,
             freeze_duration_ms: 30_000,
             proposal_expiration_ms: 3_600_000,
             consensus_timeout_ms: 30_000,
             recovery_inactivity_duration_ms: 5_000,
-            voting_inactivity_duration_ms: 65_000,
         }
     }
 
@@ -886,13 +881,6 @@ mod conversation_sync_tests {
     #[test]
     fn each_zero_field_is_detected() {
         let cases = [
-            (
-                "commit_inactivity_duration_ms",
-                TimingConfig {
-                    commit_inactivity_duration_ms: 0,
-                    ..nonzero_timing()
-                },
-            ),
             (
                 "freeze_duration_ms",
                 TimingConfig {
