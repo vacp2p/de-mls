@@ -156,6 +156,30 @@ pub struct Member {
     /// so the harness (the reference app) drives `commit_now` off this. `None`
     /// when there is nothing pending. See [`Member::drive_commit_policy`].
     commit_anchor: Option<Duration>,
+    /// Anchors for the backup-takeover policies de-mls no longer times: silent
+    /// reelection round, unanswered sync request, and unproposed buffered
+    /// updates. Each records when its condition was first seen; the harness acts
+    /// once the voting-inactivity window passes. See [`Member::drive_takeover_policy`].
+    reelection_anchor: Option<Duration>,
+    sync_resend_anchor: Option<Duration>,
+    buffered_anchor: Option<Duration>,
+}
+
+/// Arm `anchor` the first tick `active` holds and report whether `delay` has
+/// since elapsed; clear it when `active` goes false. The shared shape behind
+/// every harness takeover policy.
+fn window_elapsed(
+    anchor: &mut Option<Duration>,
+    now: Duration,
+    active: bool,
+    delay: Duration,
+) -> bool {
+    if !active {
+        *anchor = None;
+        return false;
+    }
+    let start = *anchor.get_or_insert(now);
+    now.saturating_sub(start) >= delay
 }
 
 impl Member {
@@ -195,6 +219,9 @@ impl Member {
             pending_config: config,
             accepts_welcome: true,
             commit_anchor: None,
+            reelection_anchor: None,
+            sync_resend_anchor: None,
+            buffered_anchor: None,
         }
     }
 
@@ -219,6 +246,9 @@ impl Member {
             pending_config: config,
             accepts_welcome: true,
             commit_anchor: None,
+            reelection_anchor: None,
+            sync_resend_anchor: None,
+            buffered_anchor: None,
         }
     }
 
@@ -635,6 +665,9 @@ impl Member {
         self.last_sync = None;
         self.pending_config = config;
         self.commit_anchor = None;
+        self.reelection_anchor = None;
+        self.sync_resend_anchor = None;
+        self.buffered_anchor = None;
     }
 
     /// Advance this member's timers/state machine one tick, returning the
@@ -659,7 +692,7 @@ impl Member {
     /// freeze-entry produces a NoCandidate that escalates to reelection — the
     /// path a group recovers by. Called once per member each `process` round,
     /// after `poll`.
-    fn drive_commit_policy(&mut self) {
+    pub fn drive_commit_policy(&mut self) {
         let (lead, recovering) = {
             let Some(convo) = self.convo.as_ref() else {
                 self.commit_anchor = None;
@@ -695,6 +728,66 @@ impl Member {
         // leaves the work pending and surfaces as non-convergence in the test.
         if let Some(convo) = self.convo.as_mut() {
             let _ = convo.commit_now(&self.integ.provider, &self.integ.signer);
+        }
+    }
+
+    /// Reference backup-takeover policy — the three liveness timers de-mls no
+    /// longer keeps, reimplemented as the harness's own policy. Each fires after
+    /// the voting-inactivity window once its condition holds: a silent reelection
+    /// round advances the retry ladder; an unanswered sync request is re-sent by
+    /// a backup; and unproposed buffered updates are proposed — immediately by the
+    /// epoch steward, after the window by a backup. Called once per member each
+    /// `process` round, after `drive_commit_policy`.
+    pub fn drive_takeover_policy(&mut self) {
+        let (reelection, sync_resend, buffered, is_epoch, is_steward) = {
+            let Some(convo) = self.convo.as_ref() else {
+                self.reelection_anchor = None;
+                self.sync_resend_anchor = None;
+                self.buffered_anchor = None;
+                return;
+            };
+            (
+                convo.reelection_stalled(),
+                convo.awaiting_sync_resend(),
+                convo.pending_buffered_updates() > 0,
+                convo.is_epoch_steward().unwrap_or(false),
+                convo.is_steward(),
+            )
+        };
+        let now = self.integ.clock.now();
+        let window = self.pending_config.voting_inactivity_window();
+
+        if window_elapsed(&mut self.reelection_anchor, now, reelection, window) {
+            self.reelection_anchor = None;
+            if let Some(convo) = self.convo.as_mut() {
+                let _ = convo.advance_election_retry(&self.integ.provider, &self.integ.signer);
+            }
+        }
+        if window_elapsed(&mut self.sync_resend_anchor, now, sync_resend, window) {
+            self.sync_resend_anchor = None;
+            if let Some(convo) = self.convo.as_mut() {
+                let _ = convo.share_conversation_sync(&self.integ.provider, &self.integ.signer);
+            }
+        }
+        // The epoch steward proposes buffered updates immediately; a backup waits
+        // out the window. Plain members never drain (window_elapsed clears when
+        // `buffered && is_steward` is false).
+        let buffered_ready = if buffered && is_epoch {
+            self.buffered_anchor = None;
+            true
+        } else {
+            window_elapsed(
+                &mut self.buffered_anchor,
+                now,
+                buffered && is_steward,
+                window,
+            )
+        };
+        if buffered_ready {
+            self.buffered_anchor = None;
+            if let Some(convo) = self.convo.as_mut() {
+                let _ = convo.propose_buffered_updates(&self.integ.provider, &self.integ.signer);
+            }
         }
     }
 
@@ -986,6 +1079,7 @@ impl<const N: usize> TestHarness<N> {
         for member in &mut self.members {
             let _ = member.poll();
             member.drive_commit_policy();
+            member.drive_takeover_policy();
         }
         self.drain_and_route_welcomes();
         self.relay_outbound();

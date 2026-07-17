@@ -131,8 +131,9 @@ fn backup_steward_resends_sync_when_epoch_steward_silent() {
     }
 
     // Within the window the backup holds off — the epoch steward owns the answer.
+    // de-mls no longer times this; the harness's takeover policy does.
     h.member_mut(backup).take_outbound();
-    h.member_mut(backup).poll();
+    h.member_mut(backup).drive_takeover_policy();
     assert!(
         h.member_mut(backup).take_outbound().is_empty(),
         "backup waits out the recovery window before covering"
@@ -141,7 +142,7 @@ fn backup_steward_resends_sync_when_epoch_steward_silent() {
     // Past the window with no answer seen, the backup re-sends the sync.
     h.member(backup)
         .advance_clock(cfg.voting_inactivity_window() + Duration::from_millis(50));
-    h.member_mut(backup).poll();
+    h.member_mut(backup).drive_takeover_policy();
     assert_eq!(
         h.member_mut(backup).take_outbound().len(),
         1,

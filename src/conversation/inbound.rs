@@ -35,7 +35,6 @@ use crate::{
         AppMessage, ConversationSync, ConversationUpdateRequest, EventMembershipChange,
         TimingConfig, TypeMembershipChange, app_message, conversation_update_request,
     },
-    wall_clock::WallClockExt,
 };
 
 use crate::{Conversation, ConversationError, ConversationState};
@@ -544,9 +543,9 @@ where
     /// (not the full MLS set — the list may have been generated before we
     /// existed), then applies list + protocol flags + timing + peer scores.
     fn on_conversation_sync(&mut self, sync: ConversationSync) -> Result<(), ConversationError> {
-        // A sync is on the wire — the request round is answered, so disarm any
+        // A sync is on the wire — the request round is answered, so clear any
         // pending backup takeover before the list-present guard returns.
-        self.timing.sync_resend_anchor = None;
+        self.timing.sync_resend_pending = false;
         if self.services.steward_list.current_list().is_some() {
             return Ok(());
         }
@@ -582,9 +581,10 @@ where
     }
 
     /// Answer a sync re-send request. The epoch steward responds now; a backup
-    /// arms `sync_resend_anchor` and takes over from `poll` only if the epoch
-    /// steward stays silent. The list-present guard in `on_conversation_sync`
-    /// means only the degraded requester adopts the broadcast.
+    /// records the request (`sync_resend_pending`) so the app can take over via
+    /// `share_conversation_sync` if the epoch steward stays silent. The
+    /// list-present guard in `on_conversation_sync` means only the degraded
+    /// requester adopts the broadcast.
     pub(crate) fn on_conversation_sync_request<Pr>(
         &mut self,
         provider: &Pr,
@@ -596,7 +596,7 @@ where
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
         if self.is_epoch_steward()? {
-            self.timing.sync_resend_anchor = None;
+            self.timing.sync_resend_pending = false;
             tracing::debug!(
                 conversation = %self.conversation_id,
                 requester = ?requester,
@@ -604,9 +604,10 @@ where
             );
             return self.share_conversation_sync(provider, signer);
         }
-        // A backup arms the takeover timer; a plain member can't answer.
-        if self.is_steward() && self.timing.sync_resend_anchor.is_none() {
-            self.timing.sync_resend_anchor = Some(self.clock.timestamp());
+        // A backup records the unanswered request; the app times the takeover
+        // and calls `share_conversation_sync`. A plain member can't answer.
+        if self.is_steward() {
+            self.timing.sync_resend_pending = true;
         }
         Ok(())
     }

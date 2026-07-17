@@ -228,6 +228,33 @@ where
         self.drain_buffered_updates(provider, signer)
     }
 
+    /// Propose every actionable buffered membership update now. de-mls no longer
+    /// times this — the app calls it when its liveness policy decides to act:
+    /// the epoch steward drains immediately, a backup takes over a silent
+    /// primary. Returns `Ok(true)` if a drain ran, `Ok(false)` when there is
+    /// nothing to do — not in `Working`, approved work already pending, not a
+    /// steward, or the buffer holds nothing actionable. Read
+    /// [`Self::pending_buffered_updates`] to decide when to call it.
+    pub fn propose_buffered_updates<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<bool, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if self.current_state() != ConversationState::Working
+            || self.queues.approved_proposals_count() > 0
+            || !self.is_steward()
+            || self.actionable_buffered_updates()?.is_empty()
+        {
+            return Ok(false);
+        }
+        self.drain_buffered_updates(provider, signer)?;
+        Ok(true)
+    }
+
     /// Buffered membership updates still needing a proposal: not already
     /// covered by a live (voting or approved) proposal, and still valid — an
     /// Add for a non-member or a Remove for a current member.
@@ -635,7 +662,7 @@ where
     /// authority to the next candidate) and re-runs the election; once
     /// retries are exhausted, the deterministic deadlock proposer escalates
     /// to the `Deadlock` emergency proposal instead.
-    pub(crate) fn advance_election_retry<Pr>(
+    pub fn advance_election_retry<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,

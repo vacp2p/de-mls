@@ -94,25 +94,12 @@ pub(crate) struct Timing {
     /// on consecutive polling ticks that observe the same progress. Reset to
     /// `None` when the conversation leaves `Freezing`.
     pub(crate) last_commit_round_progress: Option<(usize, usize)>,
-    /// Anchor for the backup-steward proposal takeover: set when an
-    /// unproposed buffered membership update first appears with no live
-    /// proposal for it. A backup steward proposes the buffered update once
-    /// this is older than the recovery window — the epoch steward had its
-    /// chance and stayed silent. Cleared when the buffer is drained or nothing
-    /// is left to propose.
-    pub(crate) buffered_propose_anchor: Option<Timestamp>,
-    /// Anchor for the backup-steward sync re-send takeover: set when a backup
-    /// first sees an unanswered `ConversationSyncRequest`. A backup re-sends the
-    /// sync once this is older than the recovery window — the epoch steward
-    /// stayed silent. Cleared when a `ConversationSync` is observed or the
-    /// takeover no longer applies.
-    pub(crate) sync_resend_anchor: Option<Timestamp>,
-    /// Anchor for the reelection-silence watchdog: set when a poll tick finds
-    /// the conversation parked in `Reelection` with no election in flight. A
-    /// full silent window past it counts as a rejected election round (see
-    /// `drive_reelection_retry`). Cleared outside `Reelection`, while an
-    /// election is being voted on, and each time the ladder advances.
-    pub(crate) reelection_silence_anchor: Option<Timestamp>,
+    /// A backup steward saw an unanswered `ConversationSyncRequest`: set when
+    /// the request arrives (the epoch steward answers reactively instead),
+    /// cleared when a `ConversationSync` is observed. The app reads it via
+    /// [`Conversation::awaiting_sync_resend`] and calls
+    /// [`Conversation::share_conversation_sync`] to take over a silent primary.
+    pub(crate) sync_resend_pending: bool,
     /// A steward election landed while this conversation was parked in
     /// `Reelection`: the pending approved work is a recovery continuation. The
     /// app reads this via [`Conversation::in_recovery_posture`] to commit on the
@@ -130,9 +117,7 @@ impl Timing {
             pending_auto_votes: HashMap::new(),
             pending_consensus_timeouts: HashMap::new(),
             last_commit_round_progress: None,
-            buffered_propose_anchor: None,
-            sync_resend_anchor: None,
-            reelection_silence_anchor: None,
+            sync_resend_pending: false,
             reelection_recovered: false,
         }
     }
@@ -1400,29 +1385,28 @@ mod tests {
         );
     }
 
-    /// The epoch steward answers reactively, so it never arms the backup-takeover
-    /// anchor — any stale anchor is cleared.
+    /// The epoch steward answers reactively, so it never records a pending
+    /// backup takeover — any stale flag is cleared.
     #[test]
-    fn epoch_steward_request_clears_takeover_anchor() {
+    fn epoch_steward_request_clears_takeover_pending() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_steward(b"test-member-id"));
-        let now = conversation.clock.timestamp();
-        conversation.timing.sync_resend_anchor = Some(now);
+        conversation.timing.sync_resend_pending = true;
 
         conversation
             .on_conversation_sync_request(&provider, b"joiner", &signer)
             .expect("answer request");
 
         assert!(
-            conversation.timing.sync_resend_anchor.is_none(),
+            !conversation.timing.sync_resend_pending,
             "epoch steward answers now, leaving no pending takeover"
         );
         assert_eq!(conversation.drain_outbound().len(), 1);
     }
 
-    /// A non-steward can't answer, so it never arms the takeover.
+    /// A non-steward can't answer, so it never records a pending takeover.
     #[test]
-    fn non_steward_request_does_not_arm_takeover() {
+    fn non_steward_request_does_not_record_takeover() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_member());
 
@@ -1431,8 +1415,8 @@ mod tests {
             .expect("ignore request");
 
         assert!(
-            conversation.timing.sync_resend_anchor.is_none(),
-            "a non-steward never arms the takeover"
+            !conversation.timing.sync_resend_pending,
+            "a non-steward never records a takeover"
         );
         assert!(conversation.drain_outbound().is_empty());
     }

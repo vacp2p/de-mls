@@ -100,6 +100,33 @@ where
             || self.timing.reelection_recovered
     }
 
+    /// `true` when the conversation is parked in `Reelection` with no election
+    /// in flight — the round has gone silent. The app waits its own window and
+    /// calls [`Self::advance_election_retry`] to count the round rejected and
+    /// advance the retry ladder (de-mls no longer times this).
+    pub fn reelection_stalled(&self) -> bool {
+        self.current_state() == ConversationState::Reelection
+            && !self.queues.has_election_in_flight()
+    }
+
+    /// `true` when a backup steward has seen a `ConversationSyncRequest` the
+    /// epoch steward has not answered. The app waits its own window and calls
+    /// [`Self::share_conversation_sync`] to take over a silent primary.
+    pub fn awaiting_sync_resend(&self) -> bool {
+        self.timing.sync_resend_pending
+    }
+
+    /// Count of buffered membership updates still needing a proposal — an Add or
+    /// Remove a member recorded but no live proposal covers. The epoch steward
+    /// proposes these immediately; a backup takes over a silent primary via
+    /// [`Self::propose_buffered_updates`]. `0` on a transient MLS read error, so
+    /// the app simply retries the next cycle.
+    pub fn pending_buffered_updates(&self) -> usize {
+        self.actionable_buffered_updates()
+            .map(|updates| updates.len())
+            .unwrap_or(0)
+    }
+
     /// `true` if the local member is the **primary** steward designated for the
     /// current epoch — the one that should commit and sponsor joiners first.
     /// Unlike [`Self::is_steward`] (true for any member on the list, backups
