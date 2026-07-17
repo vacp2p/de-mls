@@ -767,8 +767,8 @@ impl Member {
                 return;
             };
             (
-                convo.reelection_stalled(),
-                convo.awaiting_sync_resend(),
+                convo.pending_reelection(),
+                convo.pending_sync_resend(),
                 convo.pending_buffered_updates() > 0,
                 convo.is_epoch_steward().unwrap_or(false),
                 convo.is_steward(),

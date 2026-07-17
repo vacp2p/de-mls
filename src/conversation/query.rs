@@ -104,7 +104,7 @@ where
     /// in flight — the round has gone silent. The app waits its own window and
     /// calls [`Self::advance_election_retry`] to count the round rejected and
     /// advance the retry ladder (de-mls no longer times this).
-    pub fn reelection_stalled(&self) -> bool {
+    pub fn pending_reelection(&self) -> bool {
         self.current_state() == ConversationState::Reelection
             && !self.queues.has_election_in_flight()
     }
@@ -112,7 +112,7 @@ where
     /// `true` when a backup steward has seen a `ConversationSyncRequest` the
     /// epoch steward has not answered. The app waits its own window and calls
     /// [`Self::share_conversation_sync`] to take over a silent primary.
-    pub fn awaiting_sync_resend(&self) -> bool {
+    pub fn pending_sync_resend(&self) -> bool {
         self.timing.sync_resend_pending
     }
 

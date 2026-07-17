@@ -97,7 +97,7 @@ pub(crate) struct Timing {
     /// A backup steward saw an unanswered `ConversationSyncRequest`: set when
     /// the request arrives (the epoch steward answers reactively instead),
     /// cleared when a `ConversationSync` is observed. The app reads it via
-    /// [`Conversation::awaiting_sync_resend`] and calls
+    /// [`Conversation::pending_sync_resend`] and calls
     /// [`Conversation::share_conversation_sync`] to take over a silent primary.
     pub(crate) sync_resend_pending: bool,
     /// A steward election landed while this conversation was parked in
