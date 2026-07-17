@@ -25,6 +25,7 @@ use tracing::info;
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
     PeerScoreStorage, ProposalKind, WallClock,
+    conversation::in_flight_target,
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
     self_leave_proposal_id,
     wall_clock::WallClockExt,
@@ -65,13 +66,10 @@ where
     /// shape and the integrator event.
     ///
     /// Errors when the state machine forbids new proposals (freeze phases,
-    /// partial freeze during an active emergency). On success the proposal
-    /// is on the wire and a consensus-timeout deadline is armed for
+    /// partial freeze during an active emergency). No-ops when a change for the
+    /// request's target member is already in flight locally. On success the
+    /// proposal is on the wire and a consensus-timeout deadline is armed for
     /// `tick_deadlines` to fire.
-    ///
-    /// Local ownership is recorded before any vote is cast: with a single
-    /// expected voter the bundled YES resolves the session synchronously,
-    /// and the outcome handler must already see us as the owner by then.
     pub fn initiate_proposal<Pr>(
         &mut self,
         provider: &Pr,
@@ -83,6 +81,21 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
+        // One in-flight change per member (local dedup): don't open a second
+        // session for a target already being voted on or approved here. A
+        // cross-node duplicate — two members proposing the same target — is
+        // caught later at approval by `has_approved_*`.
+        if let Some(target) = in_flight_target(&request)
+            && self.queues.active_proposal_targets().contains(target)
+        {
+            info!(
+                conversation = %self.conversation_id,
+                member = ?target,
+                "proposal skipped: a change for this member is already in flight"
+            );
+            return Ok(());
+        }
+
         let kind = ProposalKind::of(&request);
         let expected_voters = self.check_proposal_allowed(kind)?;
 
@@ -100,8 +113,7 @@ where
             },
         )?;
 
-        self.queues
-            .insert_voting_proposal(proposal_id, request.clone());
+        self.queues.track_voting_proposal(proposal_id, &request);
         if kind.is_emergency() {
             self.queues.insert_emergency(proposal_id);
         }
@@ -272,11 +284,9 @@ where
         let request = ConversationUpdateRequest::remove_member(self.self_member_id.to_vec());
         let proposal_id = self_leave_proposal_id(&self.self_member_id);
 
-        // Ownership must be recorded before the session opens: the bundled
-        // YES fires `ConsensusReached` synchronously, and the outcome
-        // handler needs `is_owner_of_proposal` to already be true.
-        self.queues
-            .insert_voting_proposal(proposal_id, request.clone());
+        // Track before the session opens: the bundled YES fires
+        // `ConsensusReached` synchronously.
+        self.queues.track_voting_proposal(proposal_id, &request);
 
         let submitted = self.submit_self_leave_proposal(ProposalParams {
             expected_voters: 1,

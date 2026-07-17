@@ -38,4 +38,4 @@ pub use messaging::Outbound;
 pub use poll::PollOutcome;
 pub use queues::{ConversationQueues, ProposalId};
 pub use state_machine::{ConversationState, ConversationStateMachine, OperatingMode};
-pub use util::{member_set, self_leave_proposal_id, target_member_id_of};
+pub use util::{in_flight_target, member_set, self_leave_proposal_id, target_member_id_of};

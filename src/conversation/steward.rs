@@ -402,32 +402,21 @@ where
             if !is_steward {
                 return Ok(());
             }
-            // Two dedup gates:
-            //   - `has_pending_removal` — there's an in-flight ECP for
-            //     this target (live consensus session).
-            //   - `has_approved_removal` — `RemoveMember(target)` is
-            //     already queued in `approved_proposals` waiting for
-            //     the next commit. Without this gate, a just-resolved
-            //     `ViolationType::SCORE_BELOW_THRESHOLD`ECP (which clears
-            //     `pending_removal_targets` on resolve, but leaves the
-            //     target in `approved_proposals` with their score still
-            //     ≤ threshold) would re-fire a duplicate ECP for the
-            //     same target before the RemoveMember commits.
+            // Skip a target that already has a removal in flight or approved.
+            // The in-flight index now includes score-removal ECPs, so this one
+            // check covers both a live ECP session and a queued RemoveMember —
+            // the target stays covered across the ECP's whole lifecycle, so no
+            // duplicate is filed.
+            let active = self.queues.active_proposal_targets();
             let self_id: &[u8] = &self_id_arc;
             let mut to_remove: Vec<(Vec<u8>, i64)> = Vec::new();
             for id in self.services.scoring.members_below_threshold()? {
-                if id.as_slice() == self_id
-                    || self.queues.has_pending_removal(&id)
-                    || self.queues.has_approved_removal(&id)
-                {
+                if id.as_slice() == self_id || active.contains(id.as_slice()) {
                     continue;
                 }
                 if let Some(score) = self.services.scoring.score_for(&id)? {
                     to_remove.push((id, score));
                 }
-            }
-            for (id, _) in &to_remove {
-                self.queues.insert_pending_removal(id.clone());
             }
             (epoch, to_remove, self_id_arc, self.conversation_id.clone())
         };
@@ -448,7 +437,6 @@ where
             // member must be removed. The steward's vote is YES by
             // protocol, so we bundle it at submit and skip the vote request.
             if let Err(e) = self.initiate_proposal(provider, request, CreatorVote::Yes, signer) {
-                self.queues.remove_pending_removal(&target_id);
                 error!(
                     conversation = %conversation_id,
                     target = ?target_id,

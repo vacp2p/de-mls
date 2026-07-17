@@ -1,6 +1,5 @@
 //! Per-conversation protocol-queue state: approved/voting proposal queues,
-//! commit-round candidate buffer, pending-update buffer, urgent-commit
-//! target, ECP dedup.
+//! commit-round candidate buffer, pending-update buffer, urgent-commit target.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -10,7 +9,8 @@ use indexmap::{IndexMap, IndexSet};
 use crate::{
     commit_round::{CommitHash, CommitRoundBuffer},
     conversation::util::{
-        is_auto_approved_entry, member_set, self_leave_proposal_id, target_member_id_of,
+        in_flight_target, is_auto_approved_entry, member_set, self_leave_proposal_id,
+        target_member_id_of,
     },
     proposal_kind::ProposalKind,
     protos::de_mls::messages::v1::{
@@ -20,6 +20,15 @@ use crate::{
 
 /// Consensus proposal identifier (assigned by the consensus service).
 pub type ProposalId = u32;
+
+/// What the queues need to reason about an in-flight proposal without holding
+/// the full request — consensus storage keeps that. Just who it targets and
+/// whether it is a steward election.
+#[derive(Clone, Debug)]
+struct VotingMeta {
+    target: Option<Vec<u8>>,
+    kind: ProposalKind,
+}
 
 /// Represents a pending membership update that may not yet be committed.
 ///
@@ -80,13 +89,16 @@ pub struct ConversationQueues {
     /// vector — library proposal IDs are content-derived hashes, so
     /// sort-by-id is not temporal.
     approved_proposals: IndexMap<ProposalId, ConversationUpdateRequest>,
-    /// Proposals waiting on consensus voting (created by this user).
-    voting_proposals: HashMap<ProposalId, ConversationUpdateRequest>,
+    /// Index of proposals in flight through consensus — ours and peers',
+    /// treated identically. The record that a change is already being voted on,
+    /// so the epoch steward doesn't re-propose it out of `pending_updates` (RFC
+    /// §Consensus Types: the steward collects and commits YES-voted proposals;
+    /// it does not re-create them). Holds only what the queues query; the full
+    /// request lives in consensus storage.
+    voting_proposals: HashMap<ProposalId, VotingMeta>,
     /// Active emergency criteria proposals not yet finalized by consensus.
     /// While non-empty, lower-priority proposals MUST be blocked (RFC §Partial Freeze).
     active_emergency_ids: HashSet<ProposalId>,
-    /// Members with pending score-based removal ECPs (dedup to prevent duplicates).
-    pending_removal_targets: HashSet<Vec<u8>>,
     /// Recent commit hashes for dedup.
     committed_batch_hashes: BoundedSet<CommitHash>,
     /// Commit-round candidate buffer for deterministic selection.
@@ -123,11 +135,6 @@ pub struct ConversationQueues {
     /// restores its authority and candidacy mid-recovery — and the whole set
     /// clears when a commit merges.
     unresponsive_stewards: HashSet<Vec<u8>>,
-    /// Steward-election proposals observed from peers and not yet resolved by
-    /// consensus. Folded into [`Self::has_election_in_flight`] so a member
-    /// waiting out a peer's election doesn't count the wait as reelection
-    /// silence and claim proposer authority over a vote already running.
-    observed_election_ids: HashSet<ProposalId>,
 }
 
 impl ConversationQueues {
@@ -137,7 +144,6 @@ impl ConversationQueues {
             approved_proposals: IndexMap::new(),
             voting_proposals: HashMap::new(),
             active_emergency_ids: HashSet::new(),
-            pending_removal_targets: HashSet::new(),
             committed_batch_hashes: BoundedSet::new(dedup_window),
             commit_round: CommitRoundBuffer::default(),
             pending_updates: HashMap::new(),
@@ -147,7 +153,6 @@ impl ConversationQueues {
             member_join_epoch: HashMap::new(),
             welcome_broadcast_hashes: BoundedSet::new(dedup_window),
             unresponsive_stewards: HashSet::new(),
-            observed_election_ids: HashSet::new(),
         }
     }
 
@@ -216,11 +221,15 @@ impl ConversationQueues {
     /// already approved. A buffered update whose target is in this set is
     /// already covered by a live proposal and must not be re-proposed.
     pub fn active_proposal_targets(&self) -> HashSet<&[u8]> {
-        self.voting_proposals
+        let voting = self
+            .voting_proposals
             .values()
-            .chain(self.approved_proposals.values())
-            .filter_map(target_member_id_of)
-            .collect()
+            .filter_map(|m| m.target.as_deref());
+        let approved = self
+            .approved_proposals
+            .values()
+            .filter_map(target_member_id_of);
+        voting.chain(approved).collect()
     }
 
     /// True iff `approved_proposals` carries any `RemoveMember(member_id)`,
@@ -233,6 +242,17 @@ impl ConversationQueues {
             .any(|req| removes_member(req, member_id))
     }
 
+    /// True iff `approved_proposals` already admits `member_id`. Mirrors
+    /// [`Self::has_approved_removal`]: an invitation and a sponsored join
+    /// request can admit the same member under different proposal ids, and
+    /// their key packages need not match — so MLS cannot collapse them into one
+    /// proposal and rejects the whole batch.
+    pub fn has_approved_invite(&self, member_id: &[u8]) -> bool {
+        self.approved_proposals
+            .values()
+            .any(|req| invites_member(req, member_id))
+    }
+
     /// True if `member_id` has a self-leave waiting for the next commit —
     /// an approved `RemoveMember(member_id)` under the deterministic
     /// self-leave ID. Used by live rotation to skip the leaver.
@@ -243,14 +263,7 @@ impl ConversationQueues {
             .is_some_and(|req| removes_member(req, member_id))
     }
 
-    /// Move a proposal from the voting queue into the approved queue.
-    pub fn mark_proposal_as_approved(&mut self, proposal_id: ProposalId) {
-        if let Some(proposal) = self.voting_proposals.remove(&proposal_id) {
-            self.approved_proposals.insert(proposal_id, proposal);
-        }
-    }
-
-    /// Insert a proposal straight into the approved queue (non-owner path).
+    /// Insert a proposal straight into the approved queue, staged for commit.
     pub fn insert_approved_proposal(
         &mut self,
         proposal_id: ProposalId,
@@ -295,51 +308,38 @@ impl ConversationQueues {
 
     // ─────────────────────────── Voting Proposals ───────────────────────────
 
-    /// True when this user created `proposal_id` (it's still in the voting queue).
-    pub fn is_owner_of_proposal(&self, proposal_id: ProposalId) -> bool {
+    /// Record `proposal_id` as in flight, whoever opened it. Idempotent: a
+    /// later sighting (e.g. a peer echo of our own proposal) leaves the first
+    /// entry untouched.
+    pub fn track_voting_proposal(
+        &mut self,
+        proposal_id: ProposalId,
+        proposal: &ConversationUpdateRequest,
+    ) {
+        self.voting_proposals
+            .entry(proposal_id)
+            .or_insert_with(|| VotingMeta {
+                target: in_flight_target(proposal).map(<[u8]>::to_vec),
+                kind: ProposalKind::of(proposal),
+            });
+    }
+
+    /// True while `proposal_id` is in flight (in the voting queue).
+    pub fn is_voting(&self, proposal_id: ProposalId) -> bool {
         self.voting_proposals.contains_key(&proposal_id)
     }
 
-    /// Add a newly-created proposal to the voting queue.
-    pub fn insert_voting_proposal(
-        &mut self,
-        proposal_id: ProposalId,
-        proposal: ConversationUpdateRequest,
-    ) {
-        self.voting_proposals.insert(proposal_id, proposal);
-    }
-
-    /// Drop a proposal from the voting queue (rejected or failed consensus).
+    /// Drop a proposal from the voting queue (resolved, rejected, or deduped).
     pub fn remove_voting_proposal(&mut self, proposal_id: ProposalId) {
         self.voting_proposals.remove(&proposal_id);
     }
 
-    /// Drop every entry in the voting queue.
-    pub fn clear_voting_proposals(&mut self) {
-        self.voting_proposals.clear();
-    }
-
     /// Cheap idempotence check for auto-retry: don't submit a second election
-    /// while a previous one — own or a peer's — is still being voted on.
-    /// Reads the local voting queue and the observed-election set — a
-    /// proposal-queue concern, not steward-list state.
+    /// while one — own or a peer's — is still being voted on.
     pub fn has_election_in_flight(&self) -> bool {
-        !self.observed_election_ids.is_empty()
-            || self
-                .voting_proposals
-                .values()
-                .any(|req| ProposalKind::of(req).is_steward_election())
-    }
-
-    /// Record a peer's steward-election proposal as in flight.
-    pub fn note_observed_election(&mut self, proposal_id: ProposalId) {
-        self.observed_election_ids.insert(proposal_id);
-    }
-
-    /// A consensus outcome landed for `proposal_id` — the election (if it was
-    /// one) is no longer in flight. No-op for other proposal kinds.
-    pub fn clear_observed_election(&mut self, proposal_id: ProposalId) {
-        self.observed_election_ids.remove(&proposal_id);
+        self.voting_proposals
+            .values()
+            .any(|m| m.kind.is_steward_election())
     }
 
     // ─────────────────────────── Unresponsive stewards ───────────────────────────
@@ -390,23 +390,6 @@ impl ConversationQueues {
     /// should be rejected under the current freeze state.
     pub fn partial_freeze_blocks(&self, kind: ProposalKind) -> bool {
         self.has_active_emergency() && kind < ProposalKind::Emergency
-    }
-
-    // ─────────────────────────── Removal Dedup ───────────────────────────
-
-    /// Record that a score-based removal ECP has been submitted for this member.
-    pub fn insert_pending_removal(&mut self, member_id: Vec<u8>) {
-        self.pending_removal_targets.insert(member_id);
-    }
-
-    /// Check if a removal ECP is already pending for this member.
-    pub fn has_pending_removal(&self, member_id: &[u8]) -> bool {
-        self.pending_removal_targets.contains(member_id)
-    }
-
-    /// Mark a removal ECP as finalized (resolved regardless of outcome).
-    pub fn remove_pending_removal(&mut self, member_id: &[u8]) {
-        self.pending_removal_targets.remove(member_id);
     }
 
     // ─────────────────────────── Committed-Hash Dedup ───────────────────────────
@@ -568,11 +551,6 @@ impl ConversationQueues {
                 _ => true,
             }
         });
-
-        // Drop removal-dedup entries for targets no longer present: a leaked
-        // entry (ECP that never resolved) would otherwise block them forever.
-        self.pending_removal_targets
-            .retain(|target| in_conversation.contains(target));
     }
 
     // ─────────────────────────── Urgent (ECP-driven) Commit Target ───────────────────────────
@@ -606,6 +584,14 @@ fn removes_member(req: &ConversationUpdateRequest, member_id: &[u8]) -> bool {
     matches!(
         req.payload.as_ref(),
         Some(conversation_update_request::Payload::RemoveMember(r)) if r.member_id == member_id
+    )
+}
+
+/// True when `req` admits `member_id`, whatever key package it carries.
+fn invites_member(req: &ConversationUpdateRequest, member_id: &[u8]) -> bool {
+    matches!(
+        req.payload.as_ref(),
+        Some(conversation_update_request::Payload::MemberInvite(m)) if m.member_id == member_id
     )
 }
 
@@ -862,52 +848,13 @@ mod tests {
         assert!(!conversation.has_pending_update(&prior));
     }
 
-    /// `clear_voting_proposals` empties the owner-side voting queue —
-    /// proposals the local node submitted but never reached consensus
-    /// must not survive into the next round.
+    /// A score-below-threshold removal is a live change for its target across
+    /// its whole lifecycle: while the ECP is still voting (via the in-flight
+    /// index) and after it resolves into a queued `RemoveMember` (via the
+    /// approved queue). `active_proposal_targets` sees it the whole time, so
+    /// the steward never files a duplicate.
     #[test]
-    fn clear_voting_proposals_empties_owner_queue() {
-        let mut conversation = ConversationQueues::new("reject-voting", 10);
-        conversation.insert_voting_proposal(1, ConversationUpdateRequest { payload: None });
-        conversation.insert_voting_proposal(2, ConversationUpdateRequest { payload: None });
-        assert!(conversation.is_owner_of_proposal(1));
-        assert!(conversation.is_owner_of_proposal(2));
-
-        conversation.clear_voting_proposals();
-
-        assert!(!conversation.is_owner_of_proposal(1));
-        assert!(!conversation.is_owner_of_proposal(2));
-    }
-
-    /// `observe → has → resolve` cycle for `pending_removal_targets`,
-    /// covering the idempotent re-observe path.
-    #[test]
-    fn pending_removal_target_observe_resolve_cycle() {
-        let mut conversation = ConversationQueues::new("dedup", 10);
-        let target = member(10);
-
-        assert!(!conversation.has_pending_removal(&target));
-
-        conversation.insert_pending_removal(target.clone());
-        assert!(conversation.has_pending_removal(&target));
-
-        conversation.insert_pending_removal(target.clone());
-        assert!(
-            conversation.has_pending_removal(&target),
-            "second observe is idempotent"
-        );
-
-        conversation.remove_pending_removal(&target);
-        assert!(!conversation.has_pending_removal(&target));
-    }
-
-    /// Once an ECP score-below-threshold YES has resolved into a queued
-    /// `RemoveMember`, `has_approved_removal` flips true (it's in the approved
-    /// queue) and `has_pending_removal` flips false (the in-flight ECP dedup
-    /// is cleared). Both gates together must keep the steward from
-    /// re-proposing for the same target.
-    #[test]
-    fn below_threshold_target_queued_for_removal_is_not_re_proposed() {
+    fn score_removal_target_stays_covered_through_its_lifecycle() {
         use crate::apply_consensus_result;
         use crate::protos::de_mls::messages::v1::ViolationEvidence;
 
@@ -919,20 +866,27 @@ mod tests {
             ViolationEvidence::score_below_threshold(target.clone(), 0, 0).with_creator(creator);
         let request = evidence.into_update_request().unwrap();
         let proposal_id = 300;
-        conversation.insert_voting_proposal(proposal_id, request.clone());
-        conversation.insert_pending_removal(target.clone());
 
-        apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
-        // Mirror the coordinator: clear the in-flight ECP dedup on resolution.
-        conversation.remove_pending_removal(&target);
-
+        // Voting: the ECP hasn't produced a RemoveMember yet, but the target is
+        // already covered — the blind spot the ECP-aware index closes.
+        conversation.track_voting_proposal(proposal_id, &request);
         assert!(
-            conversation.has_approved_removal(&target),
-            "RemoveMember should be queued in approved_proposals"
+            conversation
+                .active_proposal_targets()
+                .contains(target.as_slice()),
+            "the in-flight ECP already covers its target"
         );
+        assert!(!conversation.has_approved_removal(&target));
+
+        // Resolved: the ECP transforms into a queued RemoveMember, and the
+        // target stays covered with no gap.
+        apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
+        assert!(conversation.has_approved_removal(&target));
         assert!(
-            !conversation.has_pending_removal(&target),
-            "in-flight ECP dedup is cleared once the ECP resolves"
+            conversation
+                .active_proposal_targets()
+                .contains(target.as_slice()),
+            "the queued RemoveMember still covers the target"
         );
     }
 }

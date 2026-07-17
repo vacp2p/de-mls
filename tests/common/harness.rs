@@ -33,6 +33,7 @@ use de_mls::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
+    conversation_update_request,
 };
 use de_mls::{Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome};
 use de_mls::{ConversationError, ConversationEvent, ConversationState, MockClock, ScoringConfig};
@@ -144,6 +145,10 @@ pub struct Member {
     /// Config passed to `Conversation::join` when this member accepts a welcome
     /// (joiner path) or rejoins.
     pending_config: ConversationConfig,
+    /// When `false`, this member ignores every welcome addressed to it. Models
+    /// an invitee that is in the ratchet tree but has never run the protocol:
+    /// distinct from `mute`, which silences a member that did join.
+    accepts_welcome: bool,
 }
 
 impl Member {
@@ -181,6 +186,7 @@ impl Member {
             inbound_errors: Vec::new(),
             last_sync: None,
             pending_config: config,
+            accepts_welcome: true,
         }
     }
 
@@ -203,6 +209,7 @@ impl Member {
             inbound_errors: Vec::new(),
             last_sync: None,
             pending_config: config,
+            accepts_welcome: true,
         }
     }
 
@@ -423,6 +430,58 @@ impl Member {
             .collect()
     }
 
+    /// Distinct proposals this member has seen that admit `member_id` — its own
+    /// submissions plus peers' surfaced for a vote. Counts `MemberInvite` only:
+    /// a group that outgrows `sn_max` also votes on a steward election, and that
+    /// is not a duplicate invitation.
+    pub fn observed_invite_proposals(&self, member_id: &[u8]) -> Vec<u32> {
+        let invites_target = |req: &ConversationUpdateRequest| {
+            matches!(
+                req.payload.as_ref(),
+                Some(conversation_update_request::Payload::MemberInvite(im))
+                    if im.member_id == member_id
+            )
+        };
+        let mut ids: Vec<u32> = self
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                ConversationEvent::VoteRequested {
+                    proposal_id,
+                    request,
+                }
+                | ConversationEvent::OwnProposalSubmitted {
+                    proposal_id,
+                    request,
+                } if invites_target(request) => Some(*proposal_id),
+                _ => None,
+            })
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Member ids added by every commit this member applied, in commit order.
+    /// One entry per `MemberInvite` in the committed batch, so a member added
+    /// twice appears twice.
+    pub fn committed_adds(&self) -> Vec<Vec<u8>> {
+        self.events
+            .iter()
+            .filter_map(|e| match e {
+                ConversationEvent::CommitApplied(reqs) => Some(reqs),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|r| match r.payload.as_ref() {
+                Some(conversation_update_request::Payload::MemberInvite(im)) => {
+                    Some(im.member_id.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Count of commits this member has applied (membership batches landed).
     pub fn commits_applied(&self) -> usize {
         self.events
@@ -544,6 +603,13 @@ impl Member {
         self.integ.mint_key_package()
     }
 
+    /// Never open a welcome addressed to this member. Its key package still
+    /// mints and still lands in the ratchet tree, so peers count it as a full
+    /// member and a first-class voter — it simply never runs.
+    pub fn withhold_welcome(&mut self) {
+        self.accepts_welcome = false;
+    }
+
     /// Reset this member to a fresh prospective joiner of `conversation_id`
     /// (same identity / keys) — for rejoining after eviction. The conversation
     /// rebuilds from the next welcome.
@@ -621,7 +687,7 @@ impl Member {
     /// from the welcome + bundled sync); `false` for everyone else. Already-
     /// joined members ignore further welcomes.
     fn try_accept_welcome(&mut self, welcome: &MemberWelcome) -> bool {
-        if self.convo.is_some() {
+        if self.convo.is_some() || !self.accepts_welcome {
             return false;
         }
         // The integrator's reused provider holds the minted KP's private keys;
@@ -799,6 +865,29 @@ impl<const N: usize> TestHarness<N> {
         self.members.iter().all(Member::is_working)
     }
 
+    /// Whether every joined member can decrypt a message from `from`.
+    ///
+    /// This is the only available check that tells one group apart from two
+    /// that merely agree on the integers: [`Self::epochs_agree`] compares epoch
+    /// *numbers* and [`Self::membership_agrees`] compares member-id *sets*, and
+    /// both report `true` for members whose epoch secrets have diverged. MLS
+    /// exposes `epoch_authenticator` for exactly this purpose, but de-mls does
+    /// not surface it, so a chat round-trip stands in.
+    ///
+    /// Drives the bus (chat needs relaying), so call it as a terminal
+    /// assertion rather than inside a predicate.
+    pub fn secrets_agree(&mut self, from: usize, probe: &[u8]) -> bool {
+        self.members[from].send_message(probe.to_vec());
+        for _ in 0..20 {
+            self.process(Duration::from_millis(50));
+        }
+        self.members
+            .iter()
+            .enumerate()
+            .filter(|(i, m)| *i != from && m.convo.is_some())
+            .all(|(_, m)| m.got_chat(probe))
+    }
+
     /// Every member sees the same set of MLS members (order-independent).
     pub fn membership_agrees(&self) -> bool {
         let canonical = |m: &Member| {
@@ -845,8 +934,14 @@ impl<const N: usize> TestHarness<N> {
     /// welcome to its joiner.
     fn drain_and_route_welcomes(&mut self) {
         let mut welcomes = Vec::new();
-        for member in &mut self.members {
-            welcomes.append(&mut member.drain_events_collect_welcomes());
+        for (index, member) in self.members.iter_mut().enumerate() {
+            let minted = member.drain_events_collect_welcomes();
+            // A muted member's welcome is dropped like the rest of its
+            // outbound: a welcome is something a member *sends*, so routing it
+            // out of band would let a silenced steward keep seeding joiners.
+            if !self.muted[index] {
+                welcomes.extend(minted);
+            }
         }
         for welcome in &welcomes {
             for member in &mut self.members {

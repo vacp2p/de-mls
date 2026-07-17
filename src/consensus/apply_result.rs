@@ -58,8 +58,6 @@ pub enum ConsensusApplyResult {
 /// - **Removal dedup** — the same member can be removed by several paths
 ///   (self-leave, ban, below-threshold) under different proposal ids. Only the
 ///   first reaches the approved queue; MLS rejects a duplicate at commit time.
-/// - **Owner-only edits** — queue bookkeeping that assumes we opened the
-///   proposal locally runs only when `is_owner_of_proposal`.
 ///
 /// The caller decodes the request once and passes it in.
 pub fn apply_consensus_result(
@@ -68,18 +66,15 @@ pub fn apply_consensus_result(
     approved: bool,
     request: &ConversationUpdateRequest,
 ) -> Result<ConsensusApplyResult, ConversationError> {
-    let is_owner = conversation.is_owner_of_proposal(proposal_id);
+    // The outcome resolved this proposal, so it leaves the in-flight queue.
+    // On YES the approved queue becomes its record (below).
+    conversation.remove_voting_proposal(proposal_id);
+
     let evidence = extract_emergency_evidence(request).cloned();
     let is_emergency = evidence.is_some();
 
     if let Some(election) = extract_election_proposal(request).cloned() {
-        return Ok(apply_election_result(
-            conversation,
-            proposal_id,
-            approved,
-            election,
-            is_owner,
-        ));
+        return Ok(apply_election_result(approved, election));
     }
 
     // ── Emergency and regular proposals ──
@@ -104,13 +99,26 @@ pub fn apply_consensus_result(
     if let Some(target) = &removal_target
         && conversation.has_approved_removal(target)
     {
-        if is_owner {
-            conversation.remove_voting_proposal(proposal_id);
-        }
         info!(
             proposal_id,
             target = ?target,
             "removal proposal deduped — target already queued for removal"
+        );
+        return Ok(ConsensusApplyResult::NoAction);
+    }
+
+    // Two approved proposals can admit one member (an invitation racing a
+    // sponsored join) with different key packages MLS won't collapse into one.
+    // Drop the duplicate, like removals above, or the whole batch is rejected.
+    if approved
+        && let Some(conversation_update_request::Payload::MemberInvite(invite)) =
+            request.payload.as_ref()
+        && conversation.has_approved_invite(&invite.member_id)
+    {
+        info!(
+            proposal_id,
+            target = ?invite.member_id,
+            "invite proposal deduped — target already queued for admission"
         );
         return Ok(ConsensusApplyResult::NoAction);
     }
@@ -120,27 +128,13 @@ pub fn apply_consensus_result(
     let sbt_evidence = evidence.as_ref().filter(|_| transforms_to_removal);
 
     if approved {
-        if is_owner {
-            conversation.mark_proposal_as_approved(proposal_id);
-            if let Some(ev) = sbt_evidence {
-                // Replace ECP with RemoveMember in approved queue (reuse proposal_id).
-                let removal = removal_request_for(ev);
-                conversation.remove_approved_proposal(proposal_id);
-                conversation.insert_approved_proposal(proposal_id, removal);
-            } else if is_emergency {
-                // Other emergencies don't produce MLS operations.
-                conversation.remove_approved_proposal(proposal_id);
-            }
-        } else if let Some(ev) = sbt_evidence {
-            // Non-owner: insert RemoveMember directly (the ECP was never stored).
-            let removal = removal_request_for(ev);
-            conversation.insert_approved_proposal(proposal_id, removal);
+        if let Some(ev) = sbt_evidence {
+            // ECP below threshold becomes a RemoveMember.
+            conversation.insert_approved_proposal(proposal_id, removal_request_for(ev));
         } else if !is_emergency {
-            // Regular proposal: add to approved queue for the next commit.
             conversation.insert_approved_proposal(proposal_id, request.clone());
         }
-    } else if is_owner {
-        conversation.remove_voting_proposal(proposal_id);
+        // Other emergencies produce no MLS operation, so nothing to stage.
     }
 
     if let Some(ev) = evidence.as_ref() {
@@ -184,31 +178,20 @@ pub fn apply_consensus_result(
 }
 
 /// The election branch of [`apply_consensus_result`]. YES hands the proposed
-/// roster back for validation and install; NO drops our voting-queue entry.
+/// roster back for validation and install; NO just reports the rejection.
 fn apply_election_result(
-    conversation: &mut ConversationQueues,
-    proposal_id: u32,
     approved: bool,
     election: StewardElectionProposal,
-    is_owner: bool,
 ) -> ConsensusApplyResult {
     if approved {
-        if is_owner {
-            conversation.mark_proposal_as_approved(proposal_id);
-            conversation.remove_approved_proposal(proposal_id);
-        }
         info!(
-            proposal_id,
             epoch = election.election_epoch,
             stewards = election.proposed_stewards.len(),
             "steward election proposal accepted"
         );
         ConsensusApplyResult::ElectionAccepted(election)
     } else {
-        if is_owner {
-            conversation.remove_voting_proposal(proposal_id);
-        }
-        info!(proposal_id, "steward election proposal rejected");
+        info!("steward election proposal rejected");
         ConsensusApplyResult::ElectionRejected
     }
 }
@@ -295,7 +278,7 @@ mod tests {
     /// YES on an election the local node owns returns the accepted proposal
     /// and doesn't leave the proposal in the approved queue.
     #[test]
-    fn election_yes_owner_returns_outcome_and_clears_queue() {
+    fn election_yes_returns_outcome_and_clears_voting() {
         let config = StewardListConfig::new(2, 5).unwrap();
         let mut conversation = ConversationQueues::new("test-conversation", 10);
         let mems = members(&[1, 2, 3, 4, 5]);
@@ -304,7 +287,7 @@ mod tests {
         let request = election_request(list.members().to_vec(), 10);
 
         let proposal_id = 42;
-        conversation.insert_voting_proposal(proposal_id, request.clone());
+        conversation.track_voting_proposal(proposal_id, &request);
 
         let result =
             apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
@@ -314,7 +297,9 @@ mod tests {
         };
         assert_eq!(outcome.election_epoch, 10);
         assert_eq!(outcome.proposed_stewards.len(), 5);
+        // An election never stages into approved, and its voting entry clears.
         assert_eq!(conversation.approved_proposals_count(), 0);
+        assert!(!conversation.is_voting(proposal_id));
     }
 
     /// NO on an election returns `ElectionRejected` and leaves the approved
@@ -325,31 +310,12 @@ mod tests {
         let request = election_request(vec![member(1), member(2)], 10);
 
         let proposal_id = 43;
-        conversation.insert_voting_proposal(proposal_id, request.clone());
+        conversation.track_voting_proposal(proposal_id, &request);
 
         let result =
             apply_consensus_result(&mut conversation, proposal_id, false, &request).unwrap();
 
         assert!(matches!(result, ConsensusApplyResult::ElectionRejected));
-        assert_eq!(conversation.approved_proposals_count(), 0);
-    }
-
-    /// YES on an election the local node *doesn't* own still returns the outcome
-    /// (non-owner path), and doesn't touch any proposal queues.
-    #[test]
-    fn election_yes_nonowner_returns_outcome_without_queue_side_effects() {
-        let mut conversation = ConversationQueues::new("test-conversation", 10);
-        let request = election_request(vec![member(1), member(2), member(3)], 5);
-
-        let proposal_id = 44;
-        let result =
-            apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
-
-        let ConsensusApplyResult::ElectionAccepted(outcome) = result else {
-            panic!("expected ElectionAccepted, got {result:?}");
-        };
-        assert_eq!(outcome.election_epoch, 5);
-        assert_eq!(outcome.proposed_stewards.len(), 3);
         assert_eq!(conversation.approved_proposals_count(), 0);
     }
 
@@ -364,7 +330,7 @@ mod tests {
         let mut conversation = ConversationQueues::new("test-conversation", 10);
         let target = member(7);
 
-        // First removal — non-owner path inserts straight into approved.
+        // First removal stages into the approved queue.
         let first_id = 10;
         let request = remove_request(target.clone());
         let first_result =
@@ -390,10 +356,10 @@ mod tests {
         assert!(!conversation.approved_proposals().contains_key(&second_id));
     }
 
-    /// Owner-side dedup: the duplicate clears its voting-queue entry so the
-    /// queue does not retain an outcome we deliberately discarded.
+    /// Removal dedup clears the duplicate's voting-queue entry so the queue
+    /// does not retain an outcome we deliberately discarded.
     #[test]
-    fn removal_dedup_clears_owner_voting_entry() {
+    fn removal_dedup_clears_voting_entry() {
         let mut conversation = ConversationQueues::new("test-conversation", 10);
         let target = member(7);
 
@@ -402,19 +368,18 @@ mod tests {
         let pending = remove_request(target.clone());
         conversation.insert_approved_proposal(pending_id, pending);
 
-        // This user submits their own removal and it passes consensus.
-        let owner_id = 21;
-        let owner_request = remove_request(target.clone());
-        conversation.insert_voting_proposal(owner_id, owner_request.clone());
+        // A second removal for the same target passes consensus.
+        let dup_id = 21;
+        let dup_request = remove_request(target.clone());
+        conversation.track_voting_proposal(dup_id, &dup_request);
 
-        let result =
-            apply_consensus_result(&mut conversation, owner_id, true, &owner_request).unwrap();
+        let result = apply_consensus_result(&mut conversation, dup_id, true, &dup_request).unwrap();
 
         assert!(matches!(result, ConsensusApplyResult::NoAction));
         assert_eq!(conversation.approved_proposals_count(), 1);
         assert!(conversation.approved_proposals().contains_key(&pending_id));
         assert!(
-            !conversation.is_owner_of_proposal(owner_id),
+            !conversation.is_voting(dup_id),
             "duplicate must be cleared from voting queue"
         );
     }
@@ -509,7 +474,7 @@ mod tests {
         let request = remove_request(target.clone());
 
         let proposal_id = 70;
-        conversation.insert_voting_proposal(proposal_id, request.clone());
+        conversation.track_voting_proposal(proposal_id, &request);
 
         apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
 
@@ -532,7 +497,7 @@ mod tests {
             .unwrap();
 
         let proposal_id = 300;
-        conversation.insert_voting_proposal(proposal_id, request.clone());
+        conversation.track_voting_proposal(proposal_id, &request);
 
         apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
 
