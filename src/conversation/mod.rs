@@ -5,13 +5,14 @@
 //! transitions), `config` (durable timing/protocol config), and `util`
 //! (member-set helpers). `handle` defines the [`Conversation`] struct, and
 //! its sibling modules (`construct`, `poll`, `steward`, `messaging`, `query`,
-//! `display`, `inbound`) extend it with method bodies for proposal
+//! `display`, `inbound`, `driving`) extend it with method bodies for proposal
 //! submission, voting, inbound dispatch, freeze ticks, steward housekeeping,
-//! and query getters.
+//! query getters, and the app-facing driving API.
 
 mod config;
 mod construct;
 mod display;
+mod driving;
 mod handle;
 mod inbound;
 mod messaging;
