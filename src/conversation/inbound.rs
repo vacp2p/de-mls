@@ -33,7 +33,7 @@ use crate::{
     process_result::NoopReason,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, EventMembershipChange,
-        TimingConfig, TypeMembershipChange, app_message, conversation_update_request,
+        TypeMembershipChange, app_message, conversation_update_request,
     },
 };
 
@@ -704,17 +704,6 @@ fn validate_conversation_sync(
         return Ok(false);
     }
 
-    if let Some(timing) = &sync.timing
-        && let Some(zero_field) = first_zero_timing_field(timing)
-    {
-        info!(
-            conversation = conversation_id,
-            field = zero_field,
-            "conversation sync rejected: zero-valued timing field"
-        );
-        return Ok(false);
-    }
-
     if local_default_peer_score <= sync.threshold_peer_score {
         info!(
             conversation = conversation_id,
@@ -725,23 +714,6 @@ fn validate_conversation_sync(
         return Ok(false);
     }
     Ok(true)
-}
-
-/// Name of the first zero-valued field in `timing`, or `None` if all
-/// fields are non-zero. Zero in any timing field would short-circuit the
-/// timer it drives (consensus_timeout firing immediately, etc.).
-fn first_zero_timing_field(timing: &TimingConfig) -> Option<&'static str> {
-    if timing.freeze_duration_ms == 0 {
-        Some("freeze_duration_ms")
-    } else if timing.proposal_expiration_ms == 0 {
-        Some("proposal_expiration_ms")
-    } else if timing.consensus_timeout_ms == 0 {
-        Some("consensus_timeout_ms")
-    } else if timing.recovery_inactivity_duration_ms == 0 {
-        Some("recovery_inactivity_duration_ms")
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -831,11 +803,6 @@ mod conversation_sync_tests {
         }
     }
 
-    #[test]
-    fn nonzero_timing_passes() {
-        assert!(first_zero_timing_field(&nonzero_timing()).is_none());
-    }
-
     fn valid_sync_with(threshold: i64) -> ConversationSync {
         ConversationSync {
             steward_members: vec![b"alice".to_vec()],
@@ -878,44 +845,4 @@ mod conversation_sync_tests {
         assert!(!validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()], 50).unwrap());
     }
 
-    #[test]
-    fn each_zero_field_is_detected() {
-        let cases = [
-            (
-                "freeze_duration_ms",
-                TimingConfig {
-                    freeze_duration_ms: 0,
-                    ..nonzero_timing()
-                },
-            ),
-            (
-                "proposal_expiration_ms",
-                TimingConfig {
-                    proposal_expiration_ms: 0,
-                    ..nonzero_timing()
-                },
-            ),
-            (
-                "consensus_timeout_ms",
-                TimingConfig {
-                    consensus_timeout_ms: 0,
-                    ..nonzero_timing()
-                },
-            ),
-            (
-                "recovery_inactivity_duration_ms",
-                TimingConfig {
-                    recovery_inactivity_duration_ms: 0,
-                    ..nonzero_timing()
-                },
-            ),
-        ];
-        for (name, timing) in cases {
-            assert_eq!(
-                first_zero_timing_field(&timing),
-                Some(name),
-                "expected field {name} to be detected as zero"
-            );
-        }
-    }
 }
