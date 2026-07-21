@@ -799,7 +799,6 @@ mod conversation_sync_tests {
             freeze_duration_ms: 30_000,
             proposal_expiration_ms: 3_600_000,
             consensus_timeout_ms: 30_000,
-            recovery_inactivity_duration_ms: 5_000,
         }
     }
 

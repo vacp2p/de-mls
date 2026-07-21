@@ -101,9 +101,10 @@ where
     }
 
     /// `true` when the conversation is parked in `Reelection` with no election
-    /// in flight — the round has gone silent. The app waits its own window and
-    /// calls [`Self::advance_election_retry`] to count the round rejected and
-    /// advance the retry ladder (de-mls no longer times this).
+    /// in flight — the round has gone silent. de-mls advances the retry ladder
+    /// itself on the round window (the retry round re-seeds the shared steward
+    /// list, so it must advance in lockstep); this query is read-only status a
+    /// UI can surface.
     pub fn pending_reelection(&self) -> bool {
         self.current_state() == ConversationState::Reelection
             && !self.queues.has_election_in_flight()

@@ -9,11 +9,10 @@ use crate::wall_clock::Timestamp;
 /// machine and [`crate::ConversationConfig`] durations.
 #[derive(Debug, Clone, Default)]
 pub struct PhaseTimer {
-    /// Meaning depends on the orchestrator's intent at start time:
-    /// - Working: time the first approved proposal arrived
-    ///   (drives the steward-inactivity timer).
-    /// - Freezing: time the freeze window started.
-    /// - Other states: `None`.
+    /// Anchors the timed-phase start: the `Freezing` collection window (normal
+    /// or recovery, both against `freeze_duration`) or the `Reelection`
+    /// silent-round window (against `consensus_timeout`). `None` in every other
+    /// state.
     started_at: Option<Timestamp>,
 }
 
@@ -23,8 +22,7 @@ impl PhaseTimer {
     }
 
     /// Anchor the timer at `now`. Called by the orchestrator when entering
-    /// a phase whose timeout matters (Freezing, on first approved proposal
-    /// in Working).
+    /// `Freezing` — the only phase whose timeout the timer tracks.
     pub fn start(&mut self, now: Timestamp) {
         self.started_at = Some(now);
     }

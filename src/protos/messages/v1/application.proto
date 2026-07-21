@@ -164,11 +164,11 @@ message PeerScore {
 // in ConversationSync. Liveness delays (commit-inactivity, voting-inactivity)
 // are the app's to own and are deliberately absent.
 message TimingConfig {
-  reserved 1, 6; // were commit_inactivity_duration_ms, voting_inactivity_duration_ms
+  // 5 was recovery_inactivity_duration_ms — recovery now reuses freeze_duration.
+  reserved 1, 5, 6; // were commit_inactivity_duration_ms, recovery_inactivity_duration_ms, voting_inactivity_duration_ms
   uint64 freeze_duration_ms = 2;
   uint64 proposal_expiration_ms = 3;
   uint64 consensus_timeout_ms = 4;
-  uint64 recovery_inactivity_duration_ms = 5; // RFC §Inactivity Timer #2
 }
 
 enum Outcome {

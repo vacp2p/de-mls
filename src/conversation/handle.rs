@@ -534,13 +534,14 @@ where
         Some(earliest.saturating_duration_since(now))
     }
 
-    /// State-driven phase-timer deadline, if one is currently active. Only the
-    /// `Freezing` settle window is time-driven now; surface its wall-clock
-    /// target so an external scheduler can wake us when the window elapses.
+    /// State-driven phase-timer deadline, if one is currently active: the
+    /// `Freezing` settle window or the `Reelection` silent-round window. Surface
+    /// its wall-clock target so an external scheduler can wake us when it elapses.
     fn phase_deadline(&self) -> Option<Timestamp> {
         let anchor = self.timing.phase_timer.started_at()?;
         match self.current_state() {
             ConversationState::Freezing => Some(anchor + self.config.freeze_duration),
+            ConversationState::Reelection => Some(anchor + self.config.consensus_timeout),
             _ => None,
         }
     }
@@ -672,7 +673,8 @@ where
 
     pub(crate) fn start_reelection(&mut self) -> ConversationState {
         self.state_machine.start_reelection();
-        self.timing.phase_timer.clear();
+        // Anchor the round window: `poll` advances a silent round off this.
+        self.timing.phase_timer.start(self.clock.timestamp());
         info!(state = "Reelection", "state transition");
         ConversationState::Reelection
     }
@@ -1113,16 +1115,6 @@ mod tests {
     }
 
     #[test]
-    fn is_deadlock_proposer_true_for_sole_steward() {
-        let conversation =
-            make_conversation_with_steward(steward_service_steward(b"test-member-id")).0;
-        assert!(
-            conversation.is_deadlock_proposer().unwrap(),
-            "the sole steward is the deterministic deadlock proposer"
-        );
-    }
-
-    #[test]
     fn request_recovery_is_noop_while_in_recovery() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_steward(b"test-member-id"));
@@ -1138,7 +1130,7 @@ mod tests {
     fn recovery_with_empty_queue_exits_without_spinning() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_member());
-        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.config.freeze_duration = Duration::ZERO;
         // 0 would spin forever without the empty-queue exit.
         conversation.config.recovery_max_rounds = 0;
         conversation.enter_recovery_mode();
@@ -1170,7 +1162,7 @@ mod tests {
         // Zero-length windows so each poll resolves one commit-less round.
         // Real pending work but no committer: rounds produce no commit and stay
         // on the retry path.
-        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.config.freeze_duration = Duration::ZERO;
         conversation.config.recovery_max_rounds = 3;
         conversation.enter_recovery_mode();
         conversation.start_freezing();
@@ -1213,7 +1205,7 @@ mod tests {
     fn recovery_retries_forever_when_max_rounds_zero() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_member());
-        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.config.freeze_duration = Duration::ZERO;
         conversation.config.recovery_max_rounds = 0; // retry forever (default)
         conversation.enter_recovery_mode();
         conversation.start_freezing();
@@ -1248,7 +1240,7 @@ mod tests {
             make_conversation_with_steward(steward_service_member());
         // Pending work but no committer, with a 1-round stop line: the first
         // commit-less round must exhaust recovery.
-        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.config.freeze_duration = Duration::ZERO;
         conversation.config.recovery_max_rounds = 1;
         conversation.enter_recovery_mode();
         conversation.start_freezing();

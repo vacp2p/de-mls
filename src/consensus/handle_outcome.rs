@@ -101,9 +101,10 @@ where
                 self.advance_election_retry(provider, signer)?;
             }
             ConsensusApplyResult::RecoveryModeOpened => {
-                // Open the collection window and notify the integrator; who mints
-                // is its policy (manual `commit_in_recovery`, or the auto-fallback
-                // in `advance_freezing`). No internal mint here.
+                // Open the collection window and notify the integrator. Minting a
+                // recovery candidate is the app's call (`commit_in_recovery`);
+                // `advance_freezing` only selects among candidates already
+                // broadcast, so nothing is minted here.
                 self.enter_recovery_mode();
                 self.start_freezing_and_emit();
                 self.emit_event(ConversationEvent::RecoveryModeOpened);

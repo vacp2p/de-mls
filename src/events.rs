@@ -93,10 +93,16 @@ pub enum ConversationEvent {
 
     /// Layer-3 recovery opened: the steward list is deadlocked and the steward
     /// gate is relaxed so any member MAY commit. The integrator decides the
-    /// policy — call [`crate::Conversation::commit_in_recovery`] to mint now,
-    /// or leave it to the auto-fallback that mints on every online node after
-    /// `recovery_auto_commit_delay`.
+    /// policy and calls [`crate::Conversation::commit_in_recovery`] to mint —
+    /// de-mls never mints on its own.
     RecoveryModeOpened,
+
+    /// Steward reelection exhausted its retry rounds without electing a live
+    /// steward. de-mls does not escalate on its own — opening Layer-3 recovery
+    /// is the integrator's call ([`crate::Conversation::request_recovery`]),
+    /// since deciding a group is stuck is a liveness judgement. Never emitted
+    /// when `max_reelection_attempts` is `0` (retry disabled).
+    ReelectionExhausted,
 
     /// Layer-3 recovery gave up after `recovery_max_rounds` manual+auto rounds
     /// produced no commit. The conversation leaves recovery for `Working`; the

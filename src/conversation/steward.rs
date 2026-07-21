@@ -16,7 +16,7 @@ use crate::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
         StewardElectionProposal, TimingConfig, ViolationEvidence, conversation_update_request,
     },
-    scoring_member_diff, target_member_id_of,
+    scoring_member_diff, target_member_id_of, wall_clock::WallClockExt,
 };
 
 /// Outcome of reconciling the steward list to the current epoch — see
@@ -628,41 +628,18 @@ where
         Ok(())
     }
 
-    /// Whether this member is the deterministic proposer that should auto-file
-    /// the `Deadlock` ECP when re-election exhausts — the responsible proposer
-    /// for the current retry round, restricted to candidates that are
-    /// MLS-present, not queued for removal, and not locally observed as
-    /// unresponsive. Gates the automatic escalation so it doesn't file one ECP
-    /// per member.
-    pub(crate) fn is_deadlock_proposer(&self) -> Result<bool, ConversationError> {
-        let mls = self.mls();
-        let mls_members = mls.members()?;
-        let self_id: &[u8] = &self.self_member_id;
-        let mls_set: std::collections::HashSet<&[u8]> =
-            mls_members.iter().map(Vec::as_slice).collect();
-        let conversation_ref = &self.queues;
-        Ok(self
-            .services
-            .steward_list
-            .responsible_proposer(
-                self.services.steward_list.next_election_round(),
-                &mls_members,
-                |c: &[u8]| {
-                    mls_set.contains(c)
-                        && !conversation_ref.has_approved_removal(c)
-                        && !conversation_ref.is_unresponsive_steward(c)
-                },
-            )
-            .is_some_and(|proposer| proposer == self_id))
-    }
-
     /// Advance the election retry ladder after a failed round — an election
-    /// rejected by vote, or a reelection window that passed with no election
-    /// proposal observed at all. Bumps the retry round (which hands proposer
-    /// authority to the next candidate) and re-runs the election; once
-    /// retries are exhausted, the deterministic deadlock proposer escalates
-    /// to the `Deadlock` emergency proposal instead.
-    pub fn advance_election_retry<Pr>(
+    /// rejected by vote, or a silent round where no proposal was filed at all.
+    /// Bumps the retry round (which re-seeds the steward list and hands proposer
+    /// authority to the next candidate) and re-runs the election.
+    ///
+    /// de-mls owns this because the retry round re-seeds the shared list — every
+    /// member must advance in lockstep or they elect different lists. `poll`
+    /// drives it on the round window; the consensus layer drives it on a
+    /// rejection. On exhaustion it emits
+    /// [`ConversationEvent::ReelectionExhausted`] and stops — opening Layer-3
+    /// recovery is the integrator's liveness call, not an auto-escalation.
+    pub(crate) fn advance_election_retry<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
@@ -677,21 +654,15 @@ where
         if round > max {
             info!(
                 conversation = %self.conversation_id,
-                round, max, "election retries exhausted; escalating to Layer 3"
+                round, max, "election retries exhausted"
             );
-            // Only the deterministic proposer auto-files, so simultaneous
-            // exhaustion across members doesn't produce one ECP each.
-            if self.is_deadlock_proposer()?
-                && let Err(e) = self.request_recovery(provider, signer)
-            {
-                error!(conversation = %self.conversation_id, error = %e, "Deadlock ECP filing failed");
-                self.emit_event(ConversationEvent::Error {
-                    operation: "Reelection stuck".to_string(),
-                    message: e.to_string(),
-                });
-            }
+            // Stop the round timer and surface it; recovery is the app's call.
+            self.timing.phase_timer.clear();
+            self.emit_event(ConversationEvent::ReelectionExhausted);
             return Ok(());
         }
+        // Re-anchor the round window so the next silent round is timed afresh.
+        self.timing.phase_timer.start(self.clock.timestamp());
         info!(
             conversation = %self.conversation_id,
             round, max, "election round failed, retrying"

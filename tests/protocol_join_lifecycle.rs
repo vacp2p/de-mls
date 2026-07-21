@@ -98,7 +98,6 @@ fn backup_steward_resends_sync_when_epoch_steward_silent() {
     // member advances an epoch so the remaining joiners settle into stewards,
     // leaving an epoch steward and a backup.
     let cfg = ConversationConfig {
-        recovery_inactivity_duration: Duration::from_millis(100),
         ..fast_config()
     };
     let mut h = TestHarness::<3>::bootstrap(
@@ -131,20 +130,18 @@ fn backup_steward_resends_sync_when_epoch_steward_silent() {
     }
 
     // Within the window the backup holds off — the epoch steward owns the answer.
-    // de-mls no longer times this; the harness's takeover policy does.
+    // de-mls no longer times this; the harness's takeover policy does. Sync-resend
+    // is RFC §3: the short silent-steward window, not the commit+recovery wait.
     h.member_mut(backup).take_outbound();
     h.member_mut(backup).drive_takeover_policy();
     assert!(
         h.member_mut(backup).take_outbound().is_empty(),
-        "backup waits out the recovery window before covering"
+        "backup waits out the silent-steward window before covering"
     );
 
     // Past the window with no answer seen, the backup re-sends the sync.
-    h.member(backup).advance_clock(
-        common::harness::HARNESS_COMMIT_INACTIVITY
-            + cfg.recovery_inactivity_duration
-            + Duration::from_millis(50),
-    );
+    h.member(backup)
+        .advance_clock(common::harness::HARNESS_SILENT_STEWARD_WINDOW + Duration::from_millis(50));
     h.member_mut(backup).drive_takeover_policy();
     assert_eq!(
         h.member_mut(backup).take_outbound().len(),

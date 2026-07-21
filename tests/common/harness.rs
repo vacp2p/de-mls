@@ -68,12 +68,23 @@ pub fn fast_config() -> ConversationConfig {
     }
 }
 
-/// The app's commit-inactivity delay — how long the harness (standing in for a
-/// real integrator) lets the epoch steward sit on approved work before driving
-/// `commit_now`. de-mls no longer owns this liveness timing, so the reference
-/// app carries it. A backup's takeover window derives from it plus the
-/// de-mls-owned `recovery_inactivity_duration`.
+/// RFC §Inactivity Timer #1 (commit inactivity): how long the app lets the
+/// epoch steward sit on approved work before driving `commit_now`. de-mls no
+/// longer owns this liveness timing, so the reference app carries it. A backup's
+/// commit takeover waits this plus the app-owned `recovery_takeover` window.
 pub const HARNESS_COMMIT_INACTIVITY: Duration = Duration::from_millis(50);
+
+/// How long a backup waits before covering a silent epoch steward's in-epoch
+/// work — proposing a granted update, re-sending a sync — work the primary
+/// should have done immediately (RFC §Inactivity Timer #3, "voting inactivity").
+/// A short, ~Δ window, well under commit-inactivity: the work is already visible
+/// to everyone, so there's no need to wait out a commit cycle.
+pub const HARNESS_SILENT_STEWARD_WINDOW: Duration = Duration::from_millis(30);
+
+/// The app's recovery-takeover window: how long a backup waits before covering a
+/// silent primary's commit, and the delay a recovery-posture commit uses. de-mls
+/// no longer owns a recovery inactivity timer, so the reference app carries it.
+pub const HARNESS_RECOVERY_TAKEOVER: Duration = Duration::from_millis(50);
 
 /// Per-member integrator state: the member's credential + signer, the consensus
 /// backend, the seed configs, and the provider it mints a key package into while
@@ -162,11 +173,11 @@ pub struct Member {
     /// so the harness (the reference app) drives `commit_now` off this. `None`
     /// when there is nothing pending. See [`Member::drive_commit_policy`].
     commit_anchor: Option<Duration>,
-    /// Anchors for the backup-takeover policies de-mls no longer times: silent
-    /// reelection round, unanswered sync request, and unproposed buffered
-    /// updates. Each records when its condition was first seen; the harness acts
-    /// once the voting-inactivity window passes. See [`Member::drive_takeover_policy`].
-    reelection_anchor: Option<Duration>,
+    /// Anchors for the backup-takeover policies the app times: an unanswered
+    /// sync request and unproposed buffered updates. Each records when its
+    /// condition was first seen; the harness acts once the silent-steward window
+    /// passes. Reelection is de-mls-internal now. See
+    /// [`Member::drive_takeover_policy`].
     sync_resend_anchor: Option<Duration>,
     buffered_anchor: Option<Duration>,
     /// Recovery-commit policy: when `true` (the default), this member mints in
@@ -175,10 +186,19 @@ pub struct Member {
     /// A test flips it off (via [`TestHarness::set_recovery_auto_commit`]) to
     /// model a manual-only integrator that never presses the button.
     recovery_auto_commit: bool,
-    /// The app's commit-inactivity delay for this member (see
+    /// The app's commit-inactivity delay for this member (RFC #1, see
     /// [`HARNESS_COMMIT_INACTIVITY`]). de-mls no longer carries it; the harness
     /// does, and a test tunes it via [`TestHarness::set_commit_inactivity`].
     commit_inactivity: Duration,
+    /// The app's silent-steward window (RFC #3, see
+    /// [`HARNESS_SILENT_STEWARD_WINDOW`]): the short backup window for the
+    /// propose/sync takeovers, distinct from the commit and reelection windows.
+    silent_steward_window: Duration,
+    /// The app's recovery-takeover window: how long a backup waits before
+    /// covering a silent primary's commit, and the delay a recovery-posture
+    /// commit uses. de-mls no longer owns a recovery inactivity timer, so the
+    /// harness carries this liveness value.
+    recovery_takeover: Duration,
 }
 
 /// Arm `anchor` the first tick `active` holds and report whether `delay` has
@@ -235,11 +255,12 @@ impl Member {
             pending_config: config,
             accepts_welcome: true,
             commit_anchor: None,
-            reelection_anchor: None,
             sync_resend_anchor: None,
             buffered_anchor: None,
             recovery_auto_commit: true,
             commit_inactivity: HARNESS_COMMIT_INACTIVITY,
+            silent_steward_window: HARNESS_SILENT_STEWARD_WINDOW,
+            recovery_takeover: HARNESS_RECOVERY_TAKEOVER,
         }
     }
 
@@ -264,11 +285,12 @@ impl Member {
             pending_config: config,
             accepts_welcome: true,
             commit_anchor: None,
-            reelection_anchor: None,
             sync_resend_anchor: None,
             buffered_anchor: None,
             recovery_auto_commit: true,
             commit_inactivity: HARNESS_COMMIT_INACTIVITY,
+            silent_steward_window: HARNESS_SILENT_STEWARD_WINDOW,
+            recovery_takeover: HARNESS_RECOVERY_TAKEOVER,
         }
     }
 
@@ -685,7 +707,6 @@ impl Member {
         self.last_sync = None;
         self.pending_config = config;
         self.commit_anchor = None;
-        self.reelection_anchor = None;
         self.sync_resend_anchor = None;
         self.buffered_anchor = None;
     }
@@ -706,13 +727,12 @@ impl Member {
     /// reimplemented here as the harness's own liveness policy. Once this member
     /// holds approved work, wait a role-based delay off `commit_anchor`, then
     /// call `commit_now`: the epoch steward leads at `commit_inactivity` (the
-    /// app's own delay); every other member waits an extra
-    /// `recovery_inactivity_duration`. In the
-    /// normal case the primary's commit lands first and clears the work before
-    /// the longer delay fires; when the sole steward is silent, a non-steward's
-    /// freeze-entry produces a NoCandidate that escalates to reelection — the
-    /// path a group recovers by. Called once per member each `process` round,
-    /// after `poll`.
+    /// app's own delay); every other member waits an extra `recovery_takeover`.
+    /// In the normal case the primary's commit lands first and clears the work
+    /// before the longer delay fires; when the sole steward is silent, a
+    /// non-steward's freeze-entry produces a NoCandidate that escalates to
+    /// reelection — the path a group recovers by. Called once per member each
+    /// `process` round, after `poll`.
     pub fn drive_commit_policy(&mut self) {
         let (lead, recovering) = {
             let Some(convo) = self.convo.as_ref() else {
@@ -734,11 +754,11 @@ impl Member {
         // commits within the short recovery window rather than waiting out a
         // fresh full commit-inactivity epoch.
         let delay = if recovering {
-            self.pending_config.recovery_inactivity_duration
+            self.recovery_takeover
         } else if lead {
             self.commit_inactivity
         } else {
-            self.commit_inactivity + self.pending_config.recovery_inactivity_duration
+            self.commit_inactivity + self.recovery_takeover
         };
         if now.saturating_sub(anchor) < delay {
             return;
@@ -751,23 +771,20 @@ impl Member {
         }
     }
 
-    /// Reference backup-takeover policy — the three liveness timers de-mls no
-    /// longer keeps, reimplemented as the harness's own policy. Each fires after
-    /// the voting-inactivity window once its condition holds: a silent reelection
-    /// round advances the retry ladder; an unanswered sync request is re-sent by
-    /// a backup; and unproposed buffered updates are proposed — immediately by the
-    /// epoch steward, after the window by a backup. Called once per member each
-    /// `process` round, after `drive_commit_policy`.
+    /// Reference backup-takeover policy — the app-timed liveness covers de-mls
+    /// no longer keeps. Each fires after the silent-steward window once its
+    /// condition holds: an unanswered sync request is re-sent by a backup, and
+    /// unproposed buffered updates are proposed — immediately by the epoch
+    /// steward, after the window by a backup. (Reelection is de-mls-internal.)
+    /// Called once per member each `process` round, after `drive_commit_policy`.
     pub fn drive_takeover_policy(&mut self) {
-        let (reelection, sync_resend, buffered, is_epoch, is_steward) = {
+        let (sync_resend, buffered, is_epoch, is_steward) = {
             let Some(convo) = self.convo.as_ref() else {
-                self.reelection_anchor = None;
                 self.sync_resend_anchor = None;
                 self.buffered_anchor = None;
                 return;
             };
             (
-                convo.pending_reelection(),
                 convo.pending_sync_resend(),
                 convo.pending_buffered_updates() > 0,
                 convo.is_epoch_steward().unwrap_or(false),
@@ -775,23 +792,24 @@ impl Member {
             )
         };
         let now = self.integ.clock.now();
-        let window = self.commit_inactivity + self.pending_config.recovery_inactivity_duration;
+        // RFC §3: a short ~Δ window for covering a silent steward's in-epoch
+        // propose / sync-resend (the work is already visible to all).
+        let silent_window = self.silent_steward_window;
 
-        if window_elapsed(&mut self.reelection_anchor, now, reelection, window) {
-            self.reelection_anchor = None;
-            if let Some(convo) = self.convo.as_mut() {
-                let _ = convo.advance_election_retry(&self.integ.provider, &self.integ.signer);
-            }
-        }
-        if window_elapsed(&mut self.sync_resend_anchor, now, sync_resend, window) {
+        if window_elapsed(
+            &mut self.sync_resend_anchor,
+            now,
+            sync_resend,
+            silent_window,
+        ) {
             self.sync_resend_anchor = None;
             if let Some(convo) = self.convo.as_mut() {
                 let _ = convo.share_conversation_sync(&self.integ.provider, &self.integ.signer);
             }
         }
         // The epoch steward proposes buffered updates immediately; a backup waits
-        // out the window. Plain members never drain (window_elapsed clears when
-        // `buffered && is_steward` is false).
+        // out the short silent-steward window. Plain members never drain
+        // (window_elapsed clears when `buffered && is_steward` is false).
         let buffered_ready = if buffered && is_epoch {
             self.buffered_anchor = None;
             true
@@ -800,7 +818,7 @@ impl Member {
                 &mut self.buffered_anchor,
                 now,
                 buffered && is_steward,
-                window,
+                silent_window,
             )
         };
         if buffered_ready {
@@ -1036,6 +1054,15 @@ impl<const N: usize> TestHarness<N> {
     pub fn set_commit_inactivity(&mut self, delay: Duration) {
         for member in &mut self.members {
             member.commit_inactivity = delay;
+        }
+    }
+
+    /// Set every member's app voting-inactivity delay (see
+    /// [`HARNESS_SILENT_STEWARD_WINDOW`]) — the RFC §3 window a backup waits
+    /// before covering a silent steward's propose / sync-resend.
+    pub fn set_silent_steward_window(&mut self, delay: Duration) {
+        for member in &mut self.members {
+            member.silent_steward_window = delay;
         }
     }
 

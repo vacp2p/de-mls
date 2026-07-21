@@ -18,11 +18,6 @@ pub const DEFAULT_PROPOSAL_EXPIRATION: Duration = Duration::from_secs(600);
 /// vote can stay open. MUST be `> voting_delay`.
 pub const DEFAULT_CONSENSUS_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Inactivity window during Layer 2 / Layer 3 recovery
-/// (RFC §Inactivity Timer #2, "Recovery inactivity"). Typically shorter
-/// than `commit_inactivity_duration` so retries don't burn a full epoch.
-pub const DEFAULT_RECOVERY_INACTIVITY_DURATION: Duration = Duration::from_secs(5);
-
 /// Per-member window to cast a manual vote before the app auto-votes
 /// using `liveness_criteria_yes`. MUST be `< consensus_timeout`.
 pub const DEFAULT_VOTING_DELAY: Duration = Duration::from_secs(10);
@@ -62,9 +57,6 @@ pub struct ConversationConfig {
     /// commit round collects candidates. Every member must agree on it, so it
     /// is propagated to joiners in `ConversationSync`.
     pub freeze_duration: Duration,
-    /// RFC §Inactivity Timer #2: shorter inactivity window applied during
-    /// Layer 2 / Layer 3 recovery so retries don't burn a full epoch.
-    pub recovery_inactivity_duration: Duration,
     /// How long a proposal stays active before expiring (RFC §Creating Voting Proposal).
     pub proposal_expiration: Duration,
     pub consensus_timeout: Duration,
@@ -76,16 +68,13 @@ pub struct ConversationConfig {
     /// surfaces "reelection stuck". `0` disables retry entirely.
     pub max_reelection_attempts: u32,
     /// Per-member window to cast a manual vote before the app auto-casts
-    /// using `liveness_criteria_yes`. Relationship invariant:
-    /// `voting_delay < consensus_timeout < commit_inactivity_duration`. See
-    /// [`DEFAULT_VOTING_DELAY`].
+    /// using `liveness_criteria_yes`. See [`DEFAULT_VOTING_DELAY`].
     pub voting_delay: Duration,
     /// Auto-vote delay for steward-election proposals (see
     /// [`DEFAULT_ELECTION_VOTING_DELAY`]).
     pub election_voting_delay: Duration,
     /// Whether silent voters count as YES at `consensus_timeout` (RFC
     /// §Creating Voting Proposal). See [`DEFAULT_LIVENESS_CRITERIA_YES`].
-    /// Also used by the auto-vote timer as the cast value.
     pub liveness_criteria_yes: bool,
     /// Max consensus sessions retained per conversation before the oldest is
     /// evicted. See [`DEFAULT_MAX_CONSENSUS_SESSIONS`].
@@ -110,7 +99,6 @@ impl Default for ConversationConfig {
     fn default() -> Self {
         Self {
             freeze_duration: DEFAULT_FREEZE_DURATION,
-            recovery_inactivity_duration: DEFAULT_RECOVERY_INACTIVITY_DURATION,
             proposal_expiration: DEFAULT_PROPOSAL_EXPIRATION,
             consensus_timeout: DEFAULT_CONSENSUS_TIMEOUT,
             pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
@@ -142,10 +130,6 @@ impl ConversationConfig {
     /// (`liveness_criteria_yes`, `pending_update_max_epochs`) stay untouched.
     pub fn apply_timing(&mut self, timing: &TimingConfig) {
         apply_nonzero_ms(&mut self.freeze_duration, timing.freeze_duration_ms);
-        apply_nonzero_ms(
-            &mut self.recovery_inactivity_duration,
-            timing.recovery_inactivity_duration_ms,
-        );
         apply_nonzero_ms(&mut self.proposal_expiration, timing.proposal_expiration_ms);
         apply_nonzero_ms(&mut self.consensus_timeout, timing.consensus_timeout_ms);
     }
@@ -166,7 +150,6 @@ impl From<&ConversationConfig> for TimingConfig {
     fn from(config: &ConversationConfig) -> Self {
         Self {
             freeze_duration_ms: config.freeze_duration.as_millis() as u64,
-            recovery_inactivity_duration_ms: config.recovery_inactivity_duration.as_millis() as u64,
             proposal_expiration_ms: config.proposal_expiration.as_millis() as u64,
             consensus_timeout_ms: config.consensus_timeout.as_millis() as u64,
         }
@@ -181,7 +164,6 @@ mod tests {
     fn timing_config_round_trip() {
         let original = ConversationConfig {
             freeze_duration: Duration::from_millis(200),
-            recovery_inactivity_duration: Duration::from_millis(300),
             proposal_expiration: Duration::from_millis(400),
             consensus_timeout: Duration::from_millis(500),
             ..ConversationConfig::default()
@@ -190,10 +172,6 @@ mod tests {
         let mut applied = ConversationConfig::default();
         applied.apply_timing(&timing);
         assert_eq!(applied.freeze_duration, Duration::from_millis(200));
-        assert_eq!(
-            applied.recovery_inactivity_duration,
-            Duration::from_millis(300)
-        );
         assert_eq!(applied.proposal_expiration, Duration::from_millis(400));
         assert_eq!(applied.consensus_timeout, Duration::from_millis(500));
     }
@@ -208,7 +186,6 @@ mod tests {
         let timing = TimingConfig {
             consensus_timeout_ms: 0,
             freeze_duration_ms: 250,
-            recovery_inactivity_duration_ms: 0,
             proposal_expiration_ms: 0,
         };
         config.apply_timing(&timing);

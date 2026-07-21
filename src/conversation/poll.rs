@@ -70,9 +70,37 @@ where
             ),
         }
 
+        self.advance_reelection(provider, signer);
+
         PollOutcome {
             next_wakeup_in: self.next_wakeup_in(),
             leave_requested,
+        }
+    }
+
+    /// Advance a silent reelection round: if we're parked in `Reelection` with
+    /// no election in flight and the round window has elapsed, count the round
+    /// rejected and hand proposer authority to the next candidate. de-mls owns
+    /// this — the retry round re-seeds the shared steward list, so every member
+    /// must advance in lockstep or they elect different lists. A round with a
+    /// proposal in flight resolves through the consensus layer instead.
+    fn advance_reelection<Pr>(&mut self, provider: &Pr, signer: &impl Signer)
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if self.pending_reelection()
+            && self
+                .timing
+                .phase_timer
+                .elapsed_since_anchor(self.clock.timestamp(), self.config.consensus_timeout)
+            && let Err(e) = self.advance_election_retry(provider, signer)
+        {
+            warn!(
+                conversation = %self.conversation_id,
+                error = %e,
+                "reelection retry error in poll"
+            );
         }
     }
 
@@ -112,17 +140,9 @@ where
                 .current_list()
                 .is_some_and(|list| received >= list.len());
 
-        // Recovery reuses the shorter `recovery_inactivity_duration` as its
-        // collection settle, rather than the full `freeze_duration`. The app
-        // drives the commit itself (via `commit_in_recovery`) within it.
-        let window_elapsed = if in_recovery {
-            self.timing.phase_timer.elapsed_since_anchor(
-                self.clock.timestamp(),
-                self.config.recovery_inactivity_duration,
-            )
-        } else {
-            self.is_freeze_window_elapsed()
-        };
+        // Recovery reuses the same freeze collection window; the app drives the
+        // commit itself (via `commit_in_recovery`) within it.
+        let window_elapsed = self.is_freeze_window_elapsed();
 
         if !all_candidates_in && !window_elapsed {
             // Still freezing — surface candidate progress when it changes.
