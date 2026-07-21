@@ -375,17 +375,24 @@ where
         // creator's bundled YES already resolved the consensus session, so peers have
         // nothing to vote on.
         if expected_voters > 1 {
-            // A votable peer proposal always decodes as a
-            // `ConversationUpdateRequest`; an opaque payload can't be
-            // surfaced for a vote, so only the auto-vote drives it.
-            if let Some(request) = decoded {
-                self.emit_event(ConversationEvent::VoteRequested {
-                    proposal_id,
-                    request,
-                });
-            }
+            // A steward election is a deterministic valid/invalid check, not a
+            // human choice: recompute the list and vote that verdict now — no
+            // vote request to surface, and `voting_delay_for` gives it no delay.
+            // Every other proposal is surfaced for a manual vote and falls back
+            // to the liveness criterion after the window. An opaque payload
+            // can't be surfaced but still auto-votes.
+            let vote = if kind.is_steward_election() {
+                self.election_verdict(decoded.as_ref())?
+            } else {
+                if let Some(request) = decoded {
+                    self.emit_event(ConversationEvent::VoteRequested {
+                        proposal_id,
+                        request,
+                    });
+                }
+                self.config.liveness_criteria_yes
+            };
             let delay = self.config.voting_delay_for(kind);
-            let vote = self.config.liveness_criteria_yes;
             self.register_auto_vote(proposal_id, delay, vote);
             // The consensus library resolves a quorum short of real votes
             // only through `handle_consensus_timeout` (silent peers weighted
@@ -396,6 +403,29 @@ where
             self.register_consensus_timeout(proposal_id, self.config.consensus_timeout);
         }
         Ok(())
+    }
+
+    /// Verdict for a received steward-election proposal: YES only when the
+    /// proposed list is the correct deterministic ordering for its round — the
+    /// RFC's "detect a biased or unauthorized list", evaluated at vote time
+    /// rather than trusting the proposer. A payload that isn't a decodable
+    /// election is rejected (NO).
+    fn election_verdict(
+        &self,
+        decoded: Option<&ConversationUpdateRequest>,
+    ) -> Result<bool, ConversationError> {
+        let Some(election) = decoded.and_then(|req| match &req.payload {
+            Some(conversation_update_request::Payload::StewardElection(se)) => Some(se),
+            _ => None,
+        }) else {
+            return Ok(false);
+        };
+        self.services.steward_list.validate_proposed(
+            &election.proposed_stewards,
+            election.election_epoch,
+            &election.proposed_stewards,
+            election.retry_round,
+        )
     }
 
     /// We just joined via welcome. Runs after `assemble` already put the

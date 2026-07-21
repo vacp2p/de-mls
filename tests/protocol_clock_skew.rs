@@ -32,7 +32,6 @@ fn skew_config() -> ConversationConfig {
     ConversationConfig {
         freeze_duration: Duration::from_millis(20),
         voting_delay: Duration::from_millis(300),
-        election_voting_delay: Duration::from_millis(300),
         consensus_timeout: Duration::from_millis(500),
         proposal_expiration: EXPIRATION,
         ..ConversationConfig::default()
