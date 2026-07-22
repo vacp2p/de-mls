@@ -866,5 +866,4 @@ mod conversation_sync_tests {
         let sync = valid_sync_with(100);
         assert!(!validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()], 50).unwrap());
     }
-
 }

@@ -97,9 +97,7 @@ fn backup_steward_resends_sync_when_epoch_steward_silent() {
     // sn_max = 5 → the full settled roster is the steward list. Evicting one
     // member advances an epoch so the remaining joiners settle into stewards,
     // leaving an epoch steward and a backup.
-    let cfg = ConversationConfig {
-        ..fast_config()
-    };
+    let cfg = ConversationConfig { ..fast_config() };
     let mut h = TestHarness::<3>::bootstrap(
         [ALICE, BOB, CHARLIE],
         "sync-takeover",

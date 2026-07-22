@@ -16,7 +16,8 @@ use crate::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
         StewardElectionProposal, TimingConfig, ViolationEvidence, conversation_update_request,
     },
-    scoring_member_diff, target_member_id_of, wall_clock::WallClockExt,
+    scoring_member_diff, target_member_id_of,
+    wall_clock::WallClockExt,
 };
 
 /// Outcome of reconciling the steward list to the current epoch — see

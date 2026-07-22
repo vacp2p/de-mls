@@ -19,9 +19,7 @@ fn recovery_auto_mint_converges_on_one_commit() {
     // Short recovery settle. The harness's default recovery policy mints on
     // every online node as soon as recovery opens, so the test exercises the
     // multi-minter path.
-    let cfg = ConversationConfig {
-        ..fast_config()
-    };
+    let cfg = ConversationConfig { ..fast_config() };
     // sn_max = 1: a single steward, so muting it leaves no online committer and
     // the approved work can only land through recovery.
     let mut h = TestHarness::<3>::bootstrap(
@@ -94,9 +92,7 @@ fn recovery_auto_mint_converges_on_one_commit() {
 fn manual_only_recovery_does_not_auto_commit() {
     // Manual-only policy: recovery opens but no member calls commit_in_recovery,
     // so the stuck removal must not auto-commit on its own.
-    let cfg = ConversationConfig {
-        ..fast_config()
-    };
+    let cfg = ConversationConfig { ..fast_config() };
     let mut h = TestHarness::<3>::bootstrap(
         [ALICE, BOB, CHARLIE],
         "rn",
@@ -148,9 +144,7 @@ fn sole_steward_offline_recovers_and_commits_approved_add() {
     // already costs ~20 s, so the recovered steward must commit within the
     // short recovery window — waiting out a second full commit-inactivity
     // epoch would blow the budget.
-    let cfg = ConversationConfig {
-        ..fast_config()
-    };
+    let cfg = ConversationConfig { ..fast_config() };
     let mut h = TestHarness::<3>::start(
         [ALICE, BOB, CHARLIE],
         "sole",
