@@ -1,6 +1,8 @@
 //! Commit-round candidate buffer: the per-epoch set of commit candidates the
 //! round collects before selection, and the outcome of a buffering attempt.
 
+use prost::Message;
+
 use crate::{
     CommitHash, NoopReason, ProcessResult, compute_commit_hash,
     protos::de_mls::messages::v1::CommitCandidate,
@@ -59,9 +61,19 @@ impl CommitRoundBuffer {
     }
 
     /// Whether the buffer already holds our own (locally-minted) candidate —
-    /// used by the recovery auto-fallback to avoid minting twice.
+    /// used by `commit_in_recovery` to avoid minting twice.
     pub fn has_local_candidate(&self) -> bool {
         self.candidates.iter().any(|c| c.is_local_candidate)
+    }
+
+    /// Encoded bytes of our own candidate for this round, for re-broadcast, or
+    /// `None` when we hold none (nothing minted yet, or it already merged and
+    /// cleared the buffer).
+    pub fn local_candidate_bytes(&self) -> Option<Vec<u8>> {
+        self.candidates
+            .iter()
+            .find(|c| c.is_local_candidate)
+            .map(|c| c.candidate_msg.encode_to_vec())
     }
 
     /// Discard all buffered candidates.
@@ -114,5 +126,42 @@ impl CommitBufferOutcome {
             Self::DuplicateHash => ProcessResult::Noop(NoopReason::DuplicateBufferedHash),
             Self::CapReached => ProcessResult::Noop(NoopReason::CandidateBufferFull),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(commit_message: &[u8]) -> CommitCandidate {
+        CommitCandidate {
+            commit_message: commit_message.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    /// `local_candidate_bytes` returns only our own candidate, re-encoded to the
+    /// bytes it was buffered as — the payload `resend_commit` re-broadcasts.
+    #[test]
+    fn local_candidate_bytes_re_encodes_only_the_local_candidate() {
+        let mut buffer = CommitRoundBuffer::default();
+        assert!(
+            buffer.local_candidate_bytes().is_none(),
+            "empty buffer holds none"
+        );
+
+        buffer.add(candidate(b"remote"), false, None, Vec::new(), 1, 5);
+        assert!(
+            buffer.local_candidate_bytes().is_none(),
+            "a remote candidate is not ours to re-send"
+        );
+
+        let local = candidate(b"local");
+        buffer.add(local.clone(), true, None, Vec::new(), 1, 5);
+        assert_eq!(
+            buffer.local_candidate_bytes(),
+            Some(local.encode_to_vec()),
+            "the local candidate re-encodes to its buffered bytes"
+        );
     }
 }

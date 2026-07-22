@@ -70,41 +70,36 @@ where
             ),
         }
 
-        if let Err(e) = self.drive_buffered_proposals(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "buffered-proposal drive error in poll"
-            );
-        }
-
-        if let Err(e) = self.drive_sync_resend(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "sync-resend drive error in poll"
-            );
-        }
-
-        if let Err(e) = self.start_freeze_on_inactivity(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "inactivity-freeze error in poll"
-            );
-        }
-
-        if let Err(e) = self.drive_reelection_retry(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "reelection-retry drive error in poll"
-            );
-        }
+        self.advance_reelection(provider, signer);
 
         PollOutcome {
             next_wakeup_in: self.next_wakeup_in(),
             leave_requested,
+        }
+    }
+
+    /// While parked in `Reelection` with no proposal in flight, a full round
+    /// window (`consensus_timeout`) with nothing filed means the responsible
+    /// proposer is silent — count the round rejected and rotate authority to the
+    /// next candidate. de-mls drives this itself because bumping the retry round
+    /// re-seeds the shared list, so members must advance in lockstep.
+    fn advance_reelection<Pr>(&mut self, provider: &Pr, signer: &impl Signer)
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if self.pending_reelection()
+            && self
+                .timing
+                .phase_timer
+                .elapsed_since_anchor(self.clock.timestamp(), self.config.consensus_timeout)
+            && let Err(e) = self.advance_election_retry(provider, signer)
+        {
+            warn!(
+                conversation = %self.conversation_id,
+                error = %e,
+                "reelection retry error in poll"
+            );
         }
     }
 
@@ -131,11 +126,6 @@ where
         }
 
         let in_recovery = self.is_in_recovery_mode();
-        // Layer-3 auto-fallback: once the manual grace passes, every online node
-        // mints so a commit lands even if no member explicitly commits.
-        if in_recovery {
-            self.maybe_auto_commit_recovery(provider, signer);
-        }
 
         let (received, expected) = self.commit_candidate_count();
 
@@ -149,21 +139,9 @@ where
                 .current_list()
                 .is_some_and(|list| received >= list.len());
 
-        // Recovery reuses the shorter `recovery_inactivity_duration` as its
-        // collection settle (after the manual grace / auto-mint), rather than
-        // the full `freeze_duration`.
-        let window_elapsed = if in_recovery {
-            let window = self
-                .config
-                .recovery_auto_commit_delay
-                .unwrap_or(Duration::ZERO)
-                + self.config.recovery_inactivity_duration;
-            self.timing
-                .phase_timer
-                .elapsed_since_anchor(self.clock.timestamp(), window)
-        } else {
-            self.is_freeze_window_elapsed()
-        };
+        // Recovery reuses the same freeze collection window; the app drives the
+        // commit itself (via `commit_in_recovery`) within it.
+        let window_elapsed = self.is_freeze_window_elapsed();
 
         if !all_candidates_in && !window_elapsed {
             // Still freezing — surface candidate progress when it changes.
@@ -268,7 +246,7 @@ where
             CommitRoundOutcome::NoCandidate => {
                 // Recovery: no commit landed this round (manual-only with no
                 // press, or everyone offline). Do NOT fall back to re-election;
-                // Layer 3 is already past it. Retry the manual+auto cycle until
+                // Layer 3 is already past it. Retry the recovery cycle until
                 // the integrator's stop-line policy (`recovery_max_rounds`) says
                 // to give up — `0` retries forever.
                 if in_recovery {
@@ -385,36 +363,6 @@ where
         DispatchOutcome::Done
     }
 
-    /// Layer-3 auto-fallback: once `recovery_auto_commit_delay` has elapsed with
-    /// no local candidate (no member has committed yet), mint our own so a commit
-    /// can land. No-op when the policy is manual-only (`None`), before the grace,
-    /// or once we've already minted. Best-effort — build errors are logged, not
-    /// surfaced, so `poll` keeps driving.
-    fn maybe_auto_commit_recovery<Pr>(&mut self, provider: &Pr, signer: &impl Signer)
-    where
-        Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
-    {
-        let Some(delay) = self.config.recovery_auto_commit_delay else {
-            return;
-        };
-        if !self
-            .timing
-            .phase_timer
-            .elapsed_since_anchor(self.clock.timestamp(), delay)
-            || self.queues.commit_round.has_local_candidate()
-        {
-            return;
-        }
-        if let Err(e) = self.mint_and_broadcast_candidate(provider, signer) {
-            error!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "recovery auto-commit failed"
-            );
-        }
-    }
-
     /// Hand off the joiner welcome after a commit merged: attach the
     /// `ConversationSync`, broadcast for relay, and surface it locally. Never
     /// propagates — the commit merged, so a sync-build failure surfaces a
@@ -450,191 +398,5 @@ where
             minted_locally: true,
         });
         self.broadcast(broadcast_payload);
-    }
-
-    /// Drive the backup-steward proposal takeover. The epoch steward sponsors
-    /// announced joiners immediately; everyone else only buffers them. If the
-    /// epoch steward stays silent, the join would stall — so here a backup
-    /// steward drains the buffer once the recovery window passes, mirroring the
-    /// commit takeover (primary leads, backup follows after `recovery`).
-    ///
-    /// No-op outside `Working`; deferred while approved work is pending (the
-    /// commit path owns that, and the next epoch advance drains the buffer);
-    /// the epoch steward drains immediately; plain members never drain.
-    fn drive_buffered_proposals<Pr>(
-        &mut self,
-        provider: &Pr,
-        signer: &impl Signer,
-    ) -> Result<(), ConversationError>
-    where
-        Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
-    {
-        let idle = self.current_state() != ConversationState::Working
-            || self.queues.approved_proposals_count() > 0
-            || self.actionable_buffered_updates()?.is_empty();
-        if idle {
-            self.timing.buffered_propose_anchor = None;
-            return Ok(());
-        }
-
-        // The epoch steward is responsible now — propose without waiting.
-        if self.is_epoch_steward()? {
-            self.timing.buffered_propose_anchor = None;
-            return self.drain_buffered_updates(provider, signer);
-        }
-        // Only a steward can take over; a plain member just keeps its backup copy.
-        if !self.is_steward() {
-            return Ok(());
-        }
-
-        // Backup steward: give the epoch steward the recovery window first.
-        let now = self.clock.timestamp();
-        let anchor = match self.timing.buffered_propose_anchor {
-            Some(a) => a,
-            None => {
-                self.timing.buffered_propose_anchor = Some(now);
-                return Ok(());
-            }
-        };
-        let delay = self.config.voting_inactivity_window();
-        if now < anchor + delay {
-            return Ok(());
-        }
-        self.timing.buffered_propose_anchor = None;
-        info!(
-            conversation = %self.conversation_id,
-            "backup steward proposing buffered updates: epoch steward silent past recovery window"
-        );
-        self.drain_buffered_updates(provider, signer)
-    }
-
-    /// Backup-steward sync re-send takeover. The epoch steward answers a
-    /// `ConversationSyncRequest` reactively; a backup arms `sync_resend_anchor`
-    /// and re-sends here only if no `ConversationSync` was observed within the
-    /// recovery window — so an offline epoch steward can't strand a bootstrap-
-    /// less joiner. Only a backup steward drives it; the anchor clears otherwise.
-    fn drive_sync_resend<Pr>(
-        &mut self,
-        provider: &Pr,
-        signer: &impl Signer,
-    ) -> Result<(), ConversationError>
-    where
-        Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
-    {
-        let Some(anchor) = self.timing.sync_resend_anchor else {
-            return Ok(());
-        };
-        // Only a backup takes over: the epoch steward already answered, and a
-        // plain member can't. Either way the anchor no longer applies.
-        if self.is_epoch_steward()? || !self.is_steward() {
-            self.timing.sync_resend_anchor = None;
-            return Ok(());
-        }
-        if self.clock.timestamp() < anchor + self.config.voting_inactivity_window() {
-            return Ok(());
-        }
-        self.timing.sync_resend_anchor = None;
-        info!(
-            conversation = %self.conversation_id,
-            "backup steward re-sending conversation sync: epoch steward silent past recovery window"
-        );
-        self.share_conversation_sync(provider, signer)
-    }
-
-    /// Steward-inactivity freeze entry: once the inactivity timer fires with
-    /// approved work pending, start the commit round and transition into
-    /// `Freezing`. Stewards build their own commit candidate too;
-    /// candidate-build failure is logged and the freeze transition proceeds
-    /// (peers' candidates still get processed). No-ops outside `Working`
-    /// (via `check_steward_inactivity`) and while an election is in flight.
-    fn start_freeze_on_inactivity<Pr>(
-        &mut self,
-        provider: &Pr,
-        signer: &impl Signer,
-    ) -> Result<(), ConversationError>
-    where
-        Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
-    {
-        let proposal_count = self.queues.approved_proposals_count();
-        // Hold the freeze while an election is in flight — committing on
-        // the known-stale list would just produce a NoCandidate.
-        if self.queues.has_election_in_flight() {
-            return Ok(());
-        }
-        // Recovery uses the shorter retry inactivity window so we don't
-        // burn another full epoch waiting for a steward to commit. That
-        // covers open recovery mode, a bumped retry round, and the stretch
-        // between a recovery election landing and its commit merging.
-        let in_recovery = self.is_in_recovery_mode()
-            || self.services.steward_list.next_election_round() > 0
-            || self.timing.reelection_recovered;
-        let inactivity = if in_recovery {
-            self.config.recovery_inactivity_duration
-        } else if self.is_epoch_steward()? {
-            // The primary steward leads: it commits at the commit-inactivity
-            // deadline.
-            self.config.commit_inactivity_duration
-        } else {
-            // Backups (and non-stewards) wait an extra recovery window. In the
-            // normal case the primary's commit candidate pulls them into freeze
-            // first, so they never self-drive it; only a silent primary lets
-            // this longer deadline fire and a backup step in.
-            self.config.commit_inactivity_duration + self.config.recovery_inactivity_duration
-        };
-        let Some(event) = self.check_steward_inactivity(proposal_count, inactivity) else {
-            return Ok(());
-        };
-
-        info!(
-            conversation = %self.conversation_id,
-            approved = proposal_count,
-            "steward inactivity transition"
-        );
-        self.on_freeze_entered(provider, signer, event)?;
-        Ok(())
-    }
-
-    /// Reelection-silence watchdog: while parked in `Reelection` with no
-    /// election in flight, a full silent window counts as a rejected round —
-    /// [`Conversation::advance_election_retry`] bumps the retry ladder, which
-    /// hands proposer authority to the next candidate and, once retries are
-    /// exhausted, escalates to the `Deadlock` emergency proposal. Without
-    /// this, a responsible proposer that never submits (e.g. an offline sole
-    /// steward) would park the conversation in `Reelection` forever.
-    fn drive_reelection_retry<Pr>(
-        &mut self,
-        provider: &Pr,
-        signer: &impl Signer,
-    ) -> Result<(), ConversationError>
-    where
-        Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
-    {
-        if self.current_state() != ConversationState::Reelection
-            || self.queues.has_election_in_flight()
-        {
-            self.timing.reelection_silence_anchor = None;
-            return Ok(());
-        }
-        let now = self.clock.timestamp();
-        let anchor = match self.timing.reelection_silence_anchor {
-            Some(a) => a,
-            None => {
-                self.timing.reelection_silence_anchor = Some(now);
-                return Ok(());
-            }
-        };
-        if now < anchor + self.config.voting_inactivity_window() {
-            return Ok(());
-        }
-        self.timing.reelection_silence_anchor = None;
-        info!(
-            conversation = %self.conversation_id,
-            "no election proposal observed within the reelection window: counting a rejected round"
-        );
-        self.advance_election_retry(provider, signer)
     }
 }

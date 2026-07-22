@@ -72,6 +72,58 @@ where
         self.services.steward_list.is_steward(&self.self_member_id)
     }
 
+    /// Size of the approved batch [`commit_now`](Conversation::commit_now) would
+    /// commit right now, or `None` when it would be a no-op (not in `Working`, no
+    /// approved work, or an election in flight).
+    pub fn pending_commit_work(&self) -> Option<usize> {
+        if self.current_state() != ConversationState::Working
+            || self.queues.has_election_in_flight()
+        {
+            return None;
+        }
+        let count = self.queues.approved_proposals_count();
+        (count > 0).then_some(count)
+    }
+
+    /// `true` when the conversation is in a recovery posture: Layer-3 recovery
+    /// is open, a steward-election retry round is in progress, or an election
+    /// just landed while parked in `Reelection` (a recovery continuation). The
+    /// app reads this alongside [`Self::pending_commit_work`] to commit the
+    /// pending batch on the short recovery window rather than a fresh full
+    /// commit-inactivity wait.
+    pub fn in_recovery_posture(&self) -> bool {
+        self.is_in_recovery_mode()
+            || self.services.steward_list.next_election_round() > 0
+            || self.timing.reelection_recovered
+    }
+
+    /// `true` when the conversation is parked in `Reelection` with no election
+    /// in flight — the round has gone silent. de-mls advances the retry ladder
+    /// itself on the round window (the retry round re-seeds the shared steward
+    /// list, so it must advance in lockstep); this query is read-only status a
+    /// UI can surface.
+    pub fn pending_reelection(&self) -> bool {
+        self.current_state() == ConversationState::Reelection
+            && !self.queues.has_election_in_flight()
+    }
+
+    /// `true` when a backup steward has seen a `ConversationSyncRequest` the
+    /// epoch steward has not answered. The app waits its own window and calls
+    /// [`Self::share_conversation_sync`] to take over a silent primary.
+    pub fn pending_sync_resend(&self) -> bool {
+        self.timing.sync_resend_pending
+    }
+
+    /// Count of buffered membership updates still needing a proposal. The epoch steward
+    /// MUST proposes these immediately; a backup takes over a silent primary via
+    /// [`Self::propose_buffered_updates`]. `0` on a transient MLS read error, so
+    /// the app simply retries the next cycle.
+    pub fn pending_buffered_updates(&self) -> usize {
+        self.actionable_buffered_updates()
+            .map(|updates| updates.len())
+            .unwrap_or(0)
+    }
+
     /// `true` if the local member is the **primary** steward designated for the
     /// current epoch — the one that should commit and sponsor joiners first.
     /// Unlike [`Self::is_steward`] (true for any member on the list, backups

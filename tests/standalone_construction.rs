@@ -123,10 +123,8 @@ fn create_builds_a_working_steward_session_without_user() {
 /// inactivity commit land within a few polling rounds.
 fn fast_config() -> de_mls::ConversationConfig {
     de_mls::ConversationConfig {
-        commit_inactivity_duration: Duration::from_millis(50),
         freeze_duration: Duration::from_millis(20),
         voting_delay: Duration::from_millis(30),
-        election_voting_delay: Duration::from_millis(30),
         consensus_timeout: Duration::from_millis(150),
         proposal_expiration: Duration::from_millis(2000),
         ..Default::default()
@@ -173,6 +171,9 @@ fn join_completes_in_one_call() {
         alice.clock.advance(Duration::from_millis(30));
         bob.clock.advance(Duration::from_millis(30));
         creator.poll(&alice.provider, &alice.signer);
+        // de-mls no longer self-times the commit; the app (this test) drives it
+        // once the add is approved. A no-op until there is approved work.
+        let _ = creator.commit_now(&alice.provider, &alice.signer);
         for event in creator.drain_events() {
             if let ConversationEvent::WelcomeReady {
                 welcome: w,

@@ -40,11 +40,17 @@ where
 {
     /// Buffer a chat message for broadcast. The conversation never sends — the
     /// message is enqueued and the integrator drains it via
-    /// [`Conversation::drain_outbound`]. Blocked in `Freezing` and `Selection`
-    /// (epoch rotation in flight — the message might not decrypt on peers who
-    /// already merged the next commit). Governance traffic has its own gate
-    /// (`check_proposal_allowed`). `signer` is the local member's MLS signer,
-    /// used to authenticate the outbound message.
+    /// [`Conversation::drain_outbound`]. Blocked in `Freezing` and `Selection`.
+    ///
+    /// This block stays in de-mls because it guards an MLS mechanical
+    /// constraint, not an app policy: a steward mid-round holds a pending
+    /// commit, and MLS refuses to build a message while one is staged. Allowing
+    /// sends would let members without a pending commit chat while the steward
+    /// cannot — an asymmetric, confusing state. (The winning commit is also
+    /// undecided, so a message built now might not decrypt on peers that already
+    /// merged it.) Governance traffic has its own gate (`check_proposal_allowed`).
+    /// `signer` is the local member's MLS signer, used to authenticate the
+    /// outbound message.
     pub fn send_message<Pr>(
         &mut self,
         provider: &Pr,
@@ -78,9 +84,9 @@ where
     /// Ask a steward to re-send the `ConversationSync` after a
     /// [`crate::ConversationEvent::ConversationSyncMissing`];
     /// [`crate::ConversationEvent::ConversationSyncApplied`] signals when to
-    /// stop. MLS-encrypted, so only a steward can answer. Don't re-request
-    /// faster than `recovery_inactivity_duration` — that's the window a backup
-    /// steward waits before covering for a silent epoch steward.
+    /// stop. MLS-encrypted, so only a steward can answer. The integrator paces
+    /// its own re-request cadence — a backup steward covers a silent epoch
+    /// steward after the integrator's takeover window.
     pub fn request_conversation_sync<Pr>(
         &mut self,
         provider: &Pr,

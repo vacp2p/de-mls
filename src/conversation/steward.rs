@@ -17,6 +17,7 @@ use crate::{
         StewardElectionProposal, TimingConfig, ViolationEvidence, conversation_update_request,
     },
     scoring_member_diff, target_member_id_of,
+    wall_clock::WallClockExt,
 };
 
 /// Outcome of reconciling the steward list to the current epoch — see
@@ -226,6 +227,33 @@ where
             return Ok(());
         }
         self.drain_buffered_updates(provider, signer)
+    }
+
+    /// Propose every actionable buffered membership update now. de-mls no longer
+    /// times this — the app calls it when its liveness policy decides to act:
+    /// the epoch steward drains immediately, a backup takes over a silent
+    /// primary. Returns `Ok(true)` if a drain ran, `Ok(false)` when there is
+    /// nothing to do — not in `Working`, approved work already pending, not a
+    /// steward, or the buffer holds nothing actionable. Read
+    /// [`Self::pending_buffered_updates`] to decide when to call it.
+    pub fn propose_buffered_updates<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<bool, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if self.current_state() != ConversationState::Working
+            || self.queues.approved_proposals_count() > 0
+            || !self.is_steward()
+            || self.actionable_buffered_updates()?.is_empty()
+        {
+            return Ok(false);
+        }
+        self.drain_buffered_updates(provider, signer)?;
+        Ok(true)
     }
 
     /// Buffered membership updates still needing a proposal: not already
@@ -451,15 +479,34 @@ where
 
     // ── Crate-internal ───────────────────────────────────────────────
 
+    /// Recompute the steward list from our own settled roster and check
+    /// `proposed` matches it, so a proposer can't slip in a biased list — we
+    /// trust our own membership view, not the payload. Using the current roster
+    /// is safe: no commit can land mid-election, so it hasn't moved since the
+    /// proposer built the list.
+    pub(crate) fn validate_election_list(
+        &self,
+        election: &StewardElectionProposal,
+    ) -> Result<bool, ConversationError> {
+        let epoch = election.election_epoch;
+        let members = self.mls().members()?;
+        let pool: Vec<Vec<u8>> = members
+            .iter()
+            .filter(|m| self.queues.is_settled(m, epoch))
+            .cloned()
+            .collect();
+        self.services.steward_list.validate_proposed(
+            &election.proposed_stewards,
+            epoch,
+            &pool,
+            election.retry_round,
+        )
+    }
+
     /// Submit a steward-election proposal. Only the deterministic responsible
-    /// proposer actually submits; others no-op, so this is safe to call from
-    /// every poll tick without double-proposing.
-    ///
-    /// `recovery = true` bypasses the list-exhaustion gate and filters
-    /// queued-removal targets out of the candidate pool — those entries are
-    /// already in `approved_proposals` thanks to
-    /// [`crate::apply_consensus_result`], so `has_approved_removal`
-    /// catches them without an explicit exclude.
+    /// proposer actually submits; others no-op, so this is safe to call every
+    /// poll tick without double-proposing. `recovery = true` bypasses the
+    /// list-exhaustion gate to force an election.
     pub(crate) fn initiate_steward_election<Pr>(
         &mut self,
         provider: &Pr,
@@ -482,19 +529,13 @@ where
                 return Ok(());
             }
 
-            // Build the candidate pool: settled MLS members minus queued
-            // removals and locally-observed unresponsive stewards (recovery
-            // only — non-recovery elections trust the current MLS roster).
-            // Unsettled (just-joined) members are excluded — they may not
-            // have attached MLS and can't serve as stewards yet.
+            // Candidate pool: settled MLS members only — the list is a pure
+            // rotation of that roster by `retry_round`, so every member derives
+            // the same one. Unsettled (just-joined) members are excluded: they
+            // may not have attached MLS yet.
             let candidate_pool: Vec<Vec<u8>> = mls_members
                 .iter()
                 .filter(|m| self.queues.is_settled(m, epoch))
-                .filter(|m| {
-                    !(recovery
-                        && (self.queues.has_approved_removal(m)
-                            || self.queues.is_unresponsive_steward(m)))
-                })
                 .cloned()
                 .collect();
             let pool_set: std::collections::HashSet<&[u8]> =
@@ -601,40 +642,17 @@ where
         Ok(())
     }
 
-    /// Whether this member is the deterministic proposer that should auto-file
-    /// the `Deadlock` ECP when re-election exhausts — the responsible proposer
-    /// for the current retry round, restricted to candidates that are
-    /// MLS-present, not queued for removal, and not locally observed as
-    /// unresponsive. Gates the automatic escalation so it doesn't file one ECP
-    /// per member.
-    pub(crate) fn is_deadlock_proposer(&self) -> Result<bool, ConversationError> {
-        let mls = self.mls();
-        let mls_members = mls.members()?;
-        let self_id: &[u8] = &self.self_member_id;
-        let mls_set: std::collections::HashSet<&[u8]> =
-            mls_members.iter().map(Vec::as_slice).collect();
-        let conversation_ref = &self.queues;
-        Ok(self
-            .services
-            .steward_list
-            .responsible_proposer(
-                self.services.steward_list.next_election_round(),
-                &mls_members,
-                |c: &[u8]| {
-                    mls_set.contains(c)
-                        && !conversation_ref.has_approved_removal(c)
-                        && !conversation_ref.is_unresponsive_steward(c)
-                },
-            )
-            .is_some_and(|proposer| proposer == self_id))
-    }
-
     /// Advance the election retry ladder after a failed round — an election
-    /// rejected by vote, or a reelection window that passed with no election
-    /// proposal observed at all. Bumps the retry round (which hands proposer
-    /// authority to the next candidate) and re-runs the election; once
-    /// retries are exhausted, the deterministic deadlock proposer escalates
-    /// to the `Deadlock` emergency proposal instead.
+    /// rejected by vote, or a silent round where no proposal was filed at all.
+    /// Bumps the retry round (which re-seeds the steward list and hands proposer
+    /// authority to the next candidate) and re-runs the election.
+    ///
+    /// de-mls owns this because the retry round re-seeds the shared list — every
+    /// member must advance in lockstep or they elect different lists. `poll`
+    /// drives it on the round window; the consensus layer drives it on a
+    /// rejection. On exhaustion it emits
+    /// [`ConversationEvent::ReelectionExhausted`] and stops — opening Layer-3
+    /// recovery is the integrator's liveness call, not an auto-escalation.
     pub(crate) fn advance_election_retry<Pr>(
         &mut self,
         provider: &Pr,
@@ -650,21 +668,15 @@ where
         if round > max {
             info!(
                 conversation = %self.conversation_id,
-                round, max, "election retries exhausted; escalating to Layer 3"
+                round, max, "election retries exhausted"
             );
-            // Only the deterministic proposer auto-files, so simultaneous
-            // exhaustion across members doesn't produce one ECP each.
-            if self.is_deadlock_proposer()?
-                && let Err(e) = self.request_recovery(provider, signer)
-            {
-                error!(conversation = %self.conversation_id, error = %e, "Deadlock ECP filing failed");
-                self.emit_event(ConversationEvent::Error {
-                    operation: "Reelection stuck".to_string(),
-                    message: e.to_string(),
-                });
-            }
+            // Stop the round timer and surface it; recovery is the app's call.
+            self.timing.phase_timer.clear();
+            self.emit_event(ConversationEvent::ReelectionExhausted);
             return Ok(());
         }
+        // Re-anchor the round window so the next silent round is timed afresh.
+        self.timing.phase_timer.start(self.clock.timestamp());
         info!(
             conversation = %self.conversation_id,
             round, max, "election round failed, retrying"

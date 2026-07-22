@@ -101,9 +101,10 @@ where
                 self.advance_election_retry(provider, signer)?;
             }
             ConsensusApplyResult::RecoveryModeOpened => {
-                // Open the collection window and notify the integrator; who mints
-                // is its policy (manual `commit_in_recovery`, or the auto-fallback
-                // in `advance_freezing`). No internal mint here.
+                // Open the collection window and notify the integrator. Minting a
+                // recovery candidate is the app's call (`commit_in_recovery`);
+                // `advance_freezing` only selects among candidates already
+                // broadcast, so nothing is minted here.
                 self.enter_recovery_mode();
                 self.start_freezing_and_emit();
                 self.emit_event(ConversationEvent::RecoveryModeOpened);
@@ -185,14 +186,9 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        // The proposal carries no separate candidate pool: `proposed_stewards`
-        // is the full set the proposer sorted.
-        let is_valid = self.services.steward_list.validate_proposed(
-            &election.proposed_stewards,
-            election.election_epoch,
-            &election.proposed_stewards,
-            election.retry_round,
-        )?;
+        // Recompute the list from our own membership view, not the payload, so a
+        // biased or tampered list is rejected (RFC anti-bias).
+        let is_valid = self.validate_election_list(&election)?;
         if !is_valid {
             info!(
                 conversation = %self.conversation_id,
@@ -210,10 +206,11 @@ where
         self.exit_recovery_mode();
         let resumed_from_reelection = if self.current_state() == ConversationState::Reelection {
             // The approved work this conversation froze over is a recovery
-            // continuation: keep the short recovery window until its commit
-            // merges. `retry_round > 0` covers only bumped rounds — a
-            // round-0 recovery election would otherwise wait out a fresh
-            // full commit-inactivity epoch.
+            // continuation: flag it so the app commits on the short recovery
+            // window (via `in_recovery_posture`) rather than a fresh full
+            // commit-inactivity epoch. `retry_round > 0` covers only bumped
+            // rounds — a round-0 recovery election would otherwise wait a full
+            // commit-inactivity epoch.
             self.timing.reelection_recovered = true;
             Some(self.start_working())
         } else {

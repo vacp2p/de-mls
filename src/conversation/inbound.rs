@@ -33,9 +33,8 @@ use crate::{
     process_result::NoopReason,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, EventMembershipChange,
-        TimingConfig, TypeMembershipChange, app_message, conversation_update_request,
+        TypeMembershipChange, app_message, conversation_update_request,
     },
-    wall_clock::WallClockExt,
 };
 
 use crate::{Conversation, ConversationError, ConversationState};
@@ -376,17 +375,24 @@ where
         // creator's bundled YES already resolved the consensus session, so peers have
         // nothing to vote on.
         if expected_voters > 1 {
-            // A votable peer proposal always decodes as a
-            // `ConversationUpdateRequest`; an opaque payload can't be
-            // surfaced for a vote, so only the auto-vote drives it.
-            if let Some(request) = decoded {
-                self.emit_event(ConversationEvent::VoteRequested {
-                    proposal_id,
-                    request,
-                });
-            }
+            // A steward election is a deterministic valid/invalid check, not a
+            // human choice: recompute the list and vote that verdict now — no
+            // vote request to surface, and `voting_delay_for` gives it no delay.
+            // Every other proposal is surfaced for a manual vote and falls back
+            // to the liveness criterion after the window. An opaque payload
+            // can't be surfaced but still auto-votes.
+            let vote = if kind.is_steward_election() {
+                self.election_verdict(decoded.as_ref())?
+            } else {
+                if let Some(request) = decoded {
+                    self.emit_event(ConversationEvent::VoteRequested {
+                        proposal_id,
+                        request,
+                    });
+                }
+                self.config.liveness_criteria_yes
+            };
             let delay = self.config.voting_delay_for(kind);
-            let vote = self.config.liveness_criteria_yes;
             self.register_auto_vote(proposal_id, delay, vote);
             // The consensus library resolves a quorum short of real votes
             // only through `handle_consensus_timeout` (silent peers weighted
@@ -397,6 +403,22 @@ where
             self.register_consensus_timeout(proposal_id, self.config.consensus_timeout);
         }
         Ok(())
+    }
+
+    /// Vote YES only if the proposed steward list is valid for its round (via
+    /// `validate_election_list`); a payload that isn't a decodable election is
+    /// rejected (NO).
+    fn election_verdict(
+        &self,
+        decoded: Option<&ConversationUpdateRequest>,
+    ) -> Result<bool, ConversationError> {
+        let Some(election) = decoded.and_then(|req| match &req.payload {
+            Some(conversation_update_request::Payload::StewardElection(se)) => Some(se),
+            _ => None,
+        }) else {
+            return Ok(false);
+        };
+        self.validate_election_list(election)
     }
 
     /// We just joined via welcome. Runs after `assemble` already put the
@@ -445,7 +467,7 @@ where
         // The commit merged, so advance to Working FIRST: the bookkeeping below
         // is best-effort and must not be able to strand the state machine in
         // Selection. reset_retry too — this commit ended any retry cycle, and
-        // the unresponsive-steward accusations and recovery window with it.
+        // the unresponsive-steward accusations and recovery posture with it.
         self.services.steward_list.reset_retry();
         self.queues.clear_unresponsive_stewards();
         self.timing.reelection_recovered = false;
@@ -544,9 +566,9 @@ where
     /// (not the full MLS set — the list may have been generated before we
     /// existed), then applies list + protocol flags + timing + peer scores.
     fn on_conversation_sync(&mut self, sync: ConversationSync) -> Result<(), ConversationError> {
-        // A sync is on the wire — the request round is answered, so disarm any
+        // A sync is on the wire — the request round is answered, so clear any
         // pending backup takeover before the list-present guard returns.
-        self.timing.sync_resend_anchor = None;
+        self.timing.sync_resend_pending = false;
         if self.services.steward_list.current_list().is_some() {
             return Ok(());
         }
@@ -582,9 +604,10 @@ where
     }
 
     /// Answer a sync re-send request. The epoch steward responds now; a backup
-    /// arms `sync_resend_anchor` and takes over from `poll` only if the epoch
-    /// steward stays silent. The list-present guard in `on_conversation_sync`
-    /// means only the degraded requester adopts the broadcast.
+    /// records the request (`sync_resend_pending`) so the app can take over via
+    /// `share_conversation_sync` if the epoch steward stays silent. The
+    /// list-present guard in `on_conversation_sync` means only the degraded
+    /// requester adopts the broadcast.
     pub(crate) fn on_conversation_sync_request<Pr>(
         &mut self,
         provider: &Pr,
@@ -596,7 +619,7 @@ where
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
         if self.is_epoch_steward()? {
-            self.timing.sync_resend_anchor = None;
+            self.timing.sync_resend_pending = false;
             tracing::debug!(
                 conversation = %self.conversation_id,
                 requester = ?requester,
@@ -604,9 +627,10 @@ where
             );
             return self.share_conversation_sync(provider, signer);
         }
-        // A backup arms the takeover timer; a plain member can't answer.
-        if self.is_steward() && self.timing.sync_resend_anchor.is_none() {
-            self.timing.sync_resend_anchor = Some(self.clock.timestamp());
+        // A backup records the unanswered request; the app times the takeover
+        // and calls `share_conversation_sync`. A plain member can't answer.
+        if self.is_steward() {
+            self.timing.sync_resend_pending = true;
         }
         Ok(())
     }
@@ -703,17 +727,6 @@ fn validate_conversation_sync(
         return Ok(false);
     }
 
-    if let Some(timing) = &sync.timing
-        && let Some(zero_field) = first_zero_timing_field(timing)
-    {
-        info!(
-            conversation = conversation_id,
-            field = zero_field,
-            "conversation sync rejected: zero-valued timing field"
-        );
-        return Ok(false);
-    }
-
     if local_default_peer_score <= sync.threshold_peer_score {
         info!(
             conversation = conversation_id,
@@ -724,26 +737,6 @@ fn validate_conversation_sync(
         return Ok(false);
     }
     Ok(true)
-}
-
-/// Name of the first zero-valued field in `timing`, or `None` if all
-/// fields are non-zero. Zero in any timing field would short-circuit the
-/// timer it drives (consensus_timeout firing immediately,
-/// commit_inactivity breaking the inactivity tracker, etc.).
-fn first_zero_timing_field(timing: &TimingConfig) -> Option<&'static str> {
-    if timing.commit_inactivity_duration_ms == 0 {
-        Some("commit_inactivity_duration_ms")
-    } else if timing.freeze_duration_ms == 0 {
-        Some("freeze_duration_ms")
-    } else if timing.proposal_expiration_ms == 0 {
-        Some("proposal_expiration_ms")
-    } else if timing.consensus_timeout_ms == 0 {
-        Some("consensus_timeout_ms")
-    } else if timing.recovery_inactivity_duration_ms == 0 {
-        Some("recovery_inactivity_duration_ms")
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -826,18 +819,10 @@ mod conversation_sync_tests {
 
     fn nonzero_timing() -> TimingConfig {
         TimingConfig {
-            commit_inactivity_duration_ms: 60_000,
             freeze_duration_ms: 30_000,
             proposal_expiration_ms: 3_600_000,
             consensus_timeout_ms: 30_000,
-            recovery_inactivity_duration_ms: 5_000,
-            voting_inactivity_duration_ms: 65_000,
         }
-    }
-
-    #[test]
-    fn nonzero_timing_passes() {
-        assert!(first_zero_timing_field(&nonzero_timing()).is_none());
     }
 
     fn valid_sync_with(threshold: i64) -> ConversationSync {
@@ -880,53 +865,5 @@ mod conversation_sync_tests {
     fn validate_rejects_default_below_threshold() {
         let sync = valid_sync_with(100);
         assert!(!validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()], 50).unwrap());
-    }
-
-    #[test]
-    fn each_zero_field_is_detected() {
-        let cases = [
-            (
-                "commit_inactivity_duration_ms",
-                TimingConfig {
-                    commit_inactivity_duration_ms: 0,
-                    ..nonzero_timing()
-                },
-            ),
-            (
-                "freeze_duration_ms",
-                TimingConfig {
-                    freeze_duration_ms: 0,
-                    ..nonzero_timing()
-                },
-            ),
-            (
-                "proposal_expiration_ms",
-                TimingConfig {
-                    proposal_expiration_ms: 0,
-                    ..nonzero_timing()
-                },
-            ),
-            (
-                "consensus_timeout_ms",
-                TimingConfig {
-                    consensus_timeout_ms: 0,
-                    ..nonzero_timing()
-                },
-            ),
-            (
-                "recovery_inactivity_duration_ms",
-                TimingConfig {
-                    recovery_inactivity_duration_ms: 0,
-                    ..nonzero_timing()
-                },
-            ),
-        ];
-        for (name, timing) in cases {
-            assert_eq!(
-                first_zero_timing_field(&timing),
-                Some(name),
-                "expected field {name} to be detected as zero"
-            );
-        }
     }
 }

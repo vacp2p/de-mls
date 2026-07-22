@@ -35,7 +35,9 @@ use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
     conversation_update_request,
 };
-use de_mls::{Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome};
+use de_mls::{
+    Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome, WallClock,
+};
 use de_mls::{ConversationError, ConversationEvent, ConversationState, MockClock, ScoringConfig};
 use hashgraph_like_consensus::error::ConsensusError;
 
@@ -53,19 +55,35 @@ pub type TestConversation =
 /// production-scale values instead of the 0..2s band.
 pub const HARNESS_EPOCH: Duration = Duration::from_secs(1_750_000_000);
 
-/// Fast sub-second timing so the virtual-clock polling loop converges in a
-/// handful of rounds.
+/// Fast sub-second agreement/settle timing (the de-mls-owned config) so the
+/// virtual-clock polling loop converges in a handful of rounds.
 pub fn fast_config() -> ConversationConfig {
     ConversationConfig {
-        commit_inactivity_duration: Duration::from_millis(50),
         freeze_duration: Duration::from_millis(20),
         voting_delay: Duration::from_millis(30),
-        election_voting_delay: Duration::from_millis(30),
         consensus_timeout: Duration::from_millis(150),
         proposal_expiration: Duration::from_millis(2000),
         ..ConversationConfig::default()
     }
 }
+
+/// RFC §Inactivity Timer #1 (commit inactivity): how long the app lets the
+/// epoch steward sit on approved work before driving `commit_now`. de-mls no
+/// longer owns this liveness timing, so the reference app carries it. A backup's
+/// commit takeover waits this plus the app-owned `recovery_takeover` window.
+pub const HARNESS_COMMIT_INACTIVITY: Duration = Duration::from_millis(50);
+
+/// How long a backup waits before covering a silent epoch steward's in-epoch
+/// work — proposing a granted update, re-sending a sync — work the primary
+/// should have done immediately (RFC §Inactivity Timer #3, "voting inactivity").
+/// A short, ~Δ window, well under commit-inactivity: the work is already visible
+/// to everyone, so there's no need to wait out a commit cycle.
+pub const HARNESS_SILENT_STEWARD_WINDOW: Duration = Duration::from_millis(30);
+
+/// The app's recovery-takeover window: how long a backup waits before covering a
+/// silent primary's commit, and the delay a recovery-posture commit uses. de-mls
+/// no longer owns a recovery inactivity timer, so the reference app carries it.
+pub const HARNESS_RECOVERY_TAKEOVER: Duration = Duration::from_millis(50);
 
 /// Per-member integrator state: the member's credential + signer, the consensus
 /// backend, the seed configs, and the provider it mints a key package into while
@@ -149,6 +167,54 @@ pub struct Member {
     /// an invitee that is in the ratchet tree but has never run the protocol:
     /// distinct from `mute`, which silences a member that did join.
     accepts_welcome: bool,
+    /// Virtual-time anchor for the harness's commit-inactivity policy: when this
+    /// member first saw approved work to commit. de-mls no longer times commits,
+    /// so the harness (the reference app) drives `commit_now` off this. `None`
+    /// when there is nothing pending. See [`Member::drive_commit_policy`].
+    commit_anchor: Option<Duration>,
+    /// Anchors for the backup-takeover policies the app times: an unanswered
+    /// sync request and unproposed buffered updates. Each records when its
+    /// condition was first seen; the harness acts once the silent-steward window
+    /// passes. Reelection is de-mls-internal now. See
+    /// [`Member::drive_takeover_policy`].
+    sync_resend_anchor: Option<Duration>,
+    buffered_anchor: Option<Duration>,
+    /// Recovery-commit policy: when `true` (the default), this member mints in
+    /// Layer-3 recovery via `commit_in_recovery` each round it's open. de-mls no
+    /// longer auto-mints; this is the harness standing in for that policy.
+    /// A test flips it off (via [`TestHarness::set_recovery_auto_commit`]) to
+    /// model a manual-only integrator that never presses the button.
+    recovery_auto_commit: bool,
+    /// The app's commit-inactivity delay for this member (RFC #1, see
+    /// [`HARNESS_COMMIT_INACTIVITY`]). de-mls no longer carries it; the harness
+    /// does, and a test tunes it via [`TestHarness::set_commit_inactivity`].
+    commit_inactivity: Duration,
+    /// The app's silent-steward window (RFC #3, see
+    /// [`HARNESS_SILENT_STEWARD_WINDOW`]): the short backup window for the
+    /// propose/sync takeovers, distinct from the commit and reelection windows.
+    silent_steward_window: Duration,
+    /// The app's recovery-takeover window: how long a backup waits before
+    /// covering a silent primary's commit, and the delay a recovery-posture
+    /// commit uses. de-mls no longer owns a recovery inactivity timer, so the
+    /// harness carries this liveness value.
+    recovery_takeover: Duration,
+}
+
+/// Arm `anchor` the first tick `active` holds and report whether `delay` has
+/// since elapsed; clear it when `active` goes false. The shared shape behind
+/// every harness takeover policy.
+fn window_elapsed(
+    anchor: &mut Option<Duration>,
+    now: Duration,
+    active: bool,
+    delay: Duration,
+) -> bool {
+    if !active {
+        *anchor = None;
+        return false;
+    }
+    let start = *anchor.get_or_insert(now);
+    now.saturating_sub(start) >= delay
 }
 
 impl Member {
@@ -187,6 +253,13 @@ impl Member {
             last_sync: None,
             pending_config: config,
             accepts_welcome: true,
+            commit_anchor: None,
+            sync_resend_anchor: None,
+            buffered_anchor: None,
+            recovery_auto_commit: true,
+            commit_inactivity: HARNESS_COMMIT_INACTIVITY,
+            silent_steward_window: HARNESS_SILENT_STEWARD_WINDOW,
+            recovery_takeover: HARNESS_RECOVERY_TAKEOVER,
         }
     }
 
@@ -210,6 +283,13 @@ impl Member {
             last_sync: None,
             pending_config: config,
             accepts_welcome: true,
+            commit_anchor: None,
+            sync_resend_anchor: None,
+            buffered_anchor: None,
+            recovery_auto_commit: true,
+            commit_inactivity: HARNESS_COMMIT_INACTIVITY,
+            silent_steward_window: HARNESS_SILENT_STEWARD_WINDOW,
+            recovery_takeover: HARNESS_RECOVERY_TAKEOVER,
         }
     }
 
@@ -625,6 +705,9 @@ impl Member {
         self.convo = None;
         self.last_sync = None;
         self.pending_config = config;
+        self.commit_anchor = None;
+        self.sync_resend_anchor = None;
+        self.buffered_anchor = None;
     }
 
     /// Advance this member's timers/state machine one tick, returning the
@@ -636,6 +719,127 @@ impl Member {
                 next_wakeup_in: None,
                 leave_requested: false,
             },
+        }
+    }
+
+    /// Reference commit-inactivity policy — the timing de-mls no longer keeps,
+    /// reimplemented here as the harness's own liveness policy. Once this member
+    /// holds approved work, wait a role-based delay off `commit_anchor`, then
+    /// call `commit_now`: the epoch steward leads at `commit_inactivity` (the
+    /// app's own delay); every other member waits an extra `recovery_takeover`.
+    /// In the normal case the primary's commit lands first and clears the work
+    /// before the longer delay fires; when the sole steward is silent, a
+    /// non-steward's freeze-entry produces a NoCandidate that escalates to
+    /// reelection — the path a group recovers by. Called once per member each
+    /// `process` round, after `poll`.
+    pub fn drive_commit_policy(&mut self) {
+        let (lead, recovering) = {
+            let Some(convo) = self.convo.as_ref() else {
+                self.commit_anchor = None;
+                return;
+            };
+            if convo.pending_commit_work().is_none() {
+                self.commit_anchor = None;
+                return;
+            }
+            (
+                convo.is_epoch_steward().unwrap_or(false),
+                convo.in_recovery_posture(),
+            )
+        };
+        let now = self.integ.clock.now();
+        let anchor = *self.commit_anchor.get_or_insert(now);
+        // A recovery continuation (open recovery mode or a bumped retry round)
+        // commits within the short recovery window rather than waiting out a
+        // fresh full commit-inactivity epoch.
+        let delay = if recovering {
+            self.recovery_takeover
+        } else if lead {
+            self.commit_inactivity
+        } else {
+            self.commit_inactivity + self.recovery_takeover
+        };
+        if now.saturating_sub(anchor) < delay {
+            return;
+        }
+        self.commit_anchor = None;
+        // Best-effort, like the poll step it replaces: a transient mint failure
+        // leaves the work pending and surfaces as non-convergence in the test.
+        if let Some(convo) = self.convo.as_mut() {
+            let _ = convo.commit_now(&self.integ.provider, &self.integ.signer);
+        }
+    }
+
+    /// Reference backup-takeover policy — the app-timed liveness covers de-mls
+    /// no longer keeps. Each fires after the silent-steward window once its
+    /// condition holds: an unanswered sync request is re-sent by a backup, and
+    /// unproposed buffered updates are proposed — immediately by the epoch
+    /// steward, after the window by a backup. (Reelection is de-mls-internal.)
+    /// Called once per member each `process` round, after `drive_commit_policy`.
+    pub fn drive_takeover_policy(&mut self) {
+        let (sync_resend, buffered, is_epoch, is_steward) = {
+            let Some(convo) = self.convo.as_ref() else {
+                self.sync_resend_anchor = None;
+                self.buffered_anchor = None;
+                return;
+            };
+            (
+                convo.pending_sync_resend(),
+                convo.pending_buffered_updates() > 0,
+                convo.is_epoch_steward().unwrap_or(false),
+                convo.is_steward(),
+            )
+        };
+        let now = self.integ.clock.now();
+        // RFC §3: a short ~Δ window for covering a silent steward's in-epoch
+        // propose / sync-resend (the work is already visible to all).
+        let silent_window = self.silent_steward_window;
+
+        if window_elapsed(
+            &mut self.sync_resend_anchor,
+            now,
+            sync_resend,
+            silent_window,
+        ) {
+            self.sync_resend_anchor = None;
+            if let Some(convo) = self.convo.as_mut() {
+                let _ = convo.share_conversation_sync(&self.integ.provider, &self.integ.signer);
+            }
+        }
+        // The epoch steward proposes buffered updates immediately; a backup waits
+        // out the short silent-steward window. Plain members never drain
+        // (window_elapsed clears when `buffered && is_steward` is false).
+        let buffered_ready = if buffered && is_epoch {
+            self.buffered_anchor = None;
+            true
+        } else {
+            window_elapsed(
+                &mut self.buffered_anchor,
+                now,
+                buffered && is_steward,
+                silent_window,
+            )
+        };
+        if buffered_ready {
+            self.buffered_anchor = None;
+            if let Some(convo) = self.convo.as_mut() {
+                let _ = convo.propose_buffered_updates(&self.integ.provider, &self.integ.signer);
+            }
+        }
+    }
+
+    /// Reference Layer-3 recovery-commit policy — the auto-mint de-mls no longer
+    /// keeps. While recovery is open, mint via `commit_in_recovery` each round
+    /// (idempotent: a no-op once a local candidate exists). A member with the
+    /// policy off never presses the button, modelling a manual-only integrator.
+    pub fn drive_recovery_policy(&mut self) {
+        if !self.recovery_auto_commit {
+            return;
+        }
+        if let Some(convo) = self.convo.as_mut()
+            && convo.is_in_recovery_mode()
+        {
+            let _ = convo.commit_in_recovery(&self.integ.provider, &self.integ.signer);
         }
     }
 
@@ -835,6 +1039,32 @@ impl<const N: usize> TestHarness<N> {
         self.muted[index] = false;
     }
 
+    /// Set every member's recovery-commit policy (see
+    /// [`Member::drive_recovery_policy`]). `false` models a manual-only
+    /// integrator that opens recovery but never calls `commit_in_recovery`.
+    pub fn set_recovery_auto_commit(&mut self, enabled: bool) {
+        for member in &mut self.members {
+            member.recovery_auto_commit = enabled;
+        }
+    }
+
+    /// Set every member's app commit-inactivity delay (see
+    /// [`HARNESS_COMMIT_INACTIVITY`]) — the timing de-mls no longer owns.
+    pub fn set_commit_inactivity(&mut self, delay: Duration) {
+        for member in &mut self.members {
+            member.commit_inactivity = delay;
+        }
+    }
+
+    /// Set every member's app voting-inactivity delay (see
+    /// [`HARNESS_SILENT_STEWARD_WINDOW`]) — the RFC §3 window a backup waits
+    /// before covering a silent steward's propose / sync-resend.
+    pub fn set_silent_steward_window(&mut self, delay: Duration) {
+        for member in &mut self.members {
+            member.silent_steward_window = delay;
+        }
+    }
+
     /// Deliver a key-package announcement to every member (self-echoes drop
     /// inside `deliver_key_package`).
     pub fn deliver_key_package_all(&mut self, packet: &Outbound) {
@@ -926,6 +1156,9 @@ impl<const N: usize> TestHarness<N> {
         }
         for member in &mut self.members {
             let _ = member.poll();
+            member.drive_commit_policy();
+            member.drive_takeover_policy();
+            member.drive_recovery_policy();
         }
         self.drain_and_route_welcomes();
         self.relay_outbound();

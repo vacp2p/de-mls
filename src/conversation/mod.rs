@@ -5,13 +5,14 @@
 //! transitions), `config` (durable timing/protocol config), and `util`
 //! (member-set helpers). `handle` defines the [`Conversation`] struct, and
 //! its sibling modules (`construct`, `poll`, `steward`, `messaging`, `query`,
-//! `display`, `inbound`) extend it with method bodies for proposal
+//! `display`, `inbound`, `driving`) extend it with method bodies for proposal
 //! submission, voting, inbound dispatch, freeze ticks, steward housekeeping,
-//! and query getters.
+//! query getters, and the app-facing driving API.
 
 mod config;
 mod construct;
 mod display;
+mod driving;
 mod handle;
 mod inbound;
 mod messaging;
@@ -23,12 +24,10 @@ mod steward;
 mod util;
 
 pub use config::{
-    ConversationConfig, DEFAULT_COMMIT_BATCH_MAX, DEFAULT_COMMIT_INACTIVITY_DURATION,
-    DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_DEDUP_WINDOW, DEFAULT_ELECTION_VOTING_DELAY,
-    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_CONSENSUS_SESSIONS,
-    DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
-    DEFAULT_RECOVERY_AUTO_COMMIT_DELAY, DEFAULT_RECOVERY_INACTIVITY_DURATION,
-    DEFAULT_RECOVERY_MAX_ROUNDS, DEFAULT_VOTING_DELAY,
+    ConversationConfig, DEFAULT_COMMIT_BATCH_MAX, DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_DEDUP_WINDOW,
+    DEFAULT_FREEZE_DURATION, DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_CONSENSUS_SESSIONS,
+    DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION, DEFAULT_RECOVERY_MAX_ROUNDS,
+    DEFAULT_VOTING_DELAY,
 };
 pub use display::{MemberRole, MessageType, message_types};
 pub(crate) use handle::ConversationServices;

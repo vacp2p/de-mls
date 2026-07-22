@@ -89,10 +89,7 @@ fn backup_steward_proposes_buffered_joiner_when_epoch_steward_silent() {
     // sn_max = 5 ≥ membership at every size here, so the steward list is always
     // the full roster and growing back to 3 fires no subset election — the test
     // isolates the backup *proposal* takeover, not election.
-    let cfg = ConversationConfig {
-        recovery_inactivity_duration: Duration::from_millis(100),
-        ..fast_config()
-    };
+    let cfg = ConversationConfig { ..fast_config() };
     let mut h = TestHarness::<3>::bootstrap(
         [ALICE, BOB, CHARLIE],
         "bk",
