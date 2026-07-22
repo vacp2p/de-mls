@@ -20,8 +20,10 @@ use hashgraph_like_consensus::{events::ConsensusEventBus, service::ConsensusServ
 use crate::{
     ConsensusPlugin, Conversation, ConversationConfig, ConversationError, ConversationEvent,
     ConversationQueues, ConversationServices, ConversationStateMachine, PeerScoreStorage,
-    PeerScoringService, StewardListService, WallClock, consensus::outcome_bus::OutcomeBus,
-    mls_crypto::MlsService,
+    PeerScoringService, StewardListService, WallClock,
+    consensus::outcome_bus::OutcomeBus,
+    mls_crypto::{MlsCommitInput, MlsService},
+    protos::de_mls::messages::v1::MemberWelcome,
 };
 
 impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
@@ -74,6 +76,122 @@ where
             true,
             member_id,
         )
+    }
+
+    /// Create a conversation you steward, seeded with an initial set of members
+    /// at genesis. Like [`Self::create`], but the founders' key packages are
+    /// admitted in one commit at creation: the group opens at epoch 1 already
+    /// holding every founder, and their single welcome is emitted as a
+    /// [`ConversationEvent::WelcomeReady`] for the caller to drain and deliver.
+    /// Unlike a later `add_member`, this needs no consensus round and no
+    /// commit-inactivity wait — genesis is the creator's unilateral seed — and
+    /// the founders are settled from epoch 1, so they can steward it.
+    ///
+    /// `founders` are `(member_id, key_package_bytes)` pairs the caller already
+    /// holds; each founder's private keys must live in the provider it later
+    /// borrows to open its welcome.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_members<Pr>(
+        conversation_id: &str,
+        member_id: &[u8],
+        provider: &Pr,
+        credential: CredentialWithKey,
+        group_config: &MlsGroupCreateConfig,
+        signer: &impl Signer,
+        consensus: &Cp,
+        scoring: PeerScoringService<Sc>,
+        clock: Wc,
+        app_id: Arc<[u8]>,
+        config: ConversationConfig,
+        founders: &[(&[u8], &[u8])],
+    ) -> Result<Self, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let mut conversation = Self::create(
+            conversation_id,
+            member_id,
+            provider,
+            credential,
+            group_config,
+            signer,
+            consensus,
+            scoring,
+            clock,
+            app_id,
+            config,
+        )?;
+        conversation.seed_founders(provider, signer, founders)?;
+        Ok(conversation)
+    }
+
+    /// Admit the founders in one genesis commit: build the batched add, merge it
+    /// inline (no proposal, vote, or freeze), install the steward list over the
+    /// new settled roster, and deliver the single welcome. Founders' join epochs
+    /// are left unrecorded, so they are settled — and steward-eligible — from
+    /// epoch 1.
+    fn seed_founders<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+        founders: &[(&[u8], &[u8])],
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if founders.is_empty() {
+            return Ok(());
+        }
+        let updates: Vec<MlsCommitInput> = founders
+            .iter()
+            .map(|(_, kp)| MlsCommitInput::Add(kp.to_vec()))
+            .collect();
+        let joiner_identities: Vec<Vec<u8>> = founders.iter().map(|(id, _)| id.to_vec()).collect();
+
+        // Genesis is the creator's unilateral seed: build the batched add-commit
+        // and merge it inline, skipping the consensus/freeze lifecycle.
+        let artifacts = self
+            .services
+            .mls
+            .create_commit_candidate(provider, signer, &updates)?;
+        self.services.mls.merge_own_commit(provider)?;
+
+        // Score the founders and install the steward list over the settled
+        // roster at the merged epoch. `install_list` sorts and takes the top-sn,
+        // so this handles a subset founding group deterministically too.
+        for (id, _) in founders {
+            self.services.scoring.add_member(id)?;
+        }
+        let (epoch, members) = {
+            let mls = self.mls();
+            (mls.current_epoch()?, mls.members()?)
+        };
+        let settled = self.queues.settled_members(&members, epoch);
+        let sn = self
+            .services
+            .steward_list
+            .config()
+            .compute_list_size(settled.len());
+        self.services
+            .steward_list
+            .install_list(epoch, &settled, sn, 0)?;
+
+        // Deliver the single welcome: attach the ConversationSync, emit
+        // WelcomeReady, and broadcast it for relay.
+        if let Some(welcome_bytes) = artifacts.welcome {
+            self.deliver_welcome(
+                provider,
+                signer,
+                MemberWelcome {
+                    welcome_bytes,
+                    conversation_sync_bytes: Vec::new(),
+                    joiner_identities,
+                },
+            );
+        }
+        Ok(())
     }
 
     /// Build a fully-joined conversation from a welcome: the library opens the
