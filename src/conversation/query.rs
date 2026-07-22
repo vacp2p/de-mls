@@ -72,12 +72,9 @@ where
         self.services.steward_list.is_steward(&self.self_member_id)
     }
 
-    /// Size of the approved batch the local member would commit if it called
-    /// [`Conversation::commit_now`] right now, or `None` when there is nothing
-    /// to commit: not in `Working`, no approved proposals, or an election is in
-    /// flight (committing on a stale steward list only produces a NoCandidate).
-    /// The app polls this on its own cadence to drive the commit timing de-mls
-    /// no longer keeps — pair it with [`Conversation::commit_now`].
+    /// Size of the approved batch [`commit_now`](Conversation::commit_now) would
+    /// commit right now, or `None` when it would be a no-op (not in `Working`, no
+    /// approved work, or an election in flight).
     pub fn pending_commit_work(&self) -> Option<usize> {
         if self.current_state() != ConversationState::Working
             || self.queues.has_election_in_flight()
@@ -117,9 +114,8 @@ where
         self.timing.sync_resend_pending
     }
 
-    /// Count of buffered membership updates still needing a proposal — an Add or
-    /// Remove a member recorded but no live proposal covers. The epoch steward
-    /// proposes these immediately; a backup takes over a silent primary via
+    /// Count of buffered membership updates still needing a proposal. The epoch steward
+    /// MUST proposes these immediately; a backup takes over a silent primary via
     /// [`Self::propose_buffered_updates`]. `0` on a transient MLS read error, so
     /// the app simply retries the next cycle.
     pub fn pending_buffered_updates(&self) -> usize {

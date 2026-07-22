@@ -1,26 +1,40 @@
 //! The app-facing driving API — how an integrator advances a [`Conversation`]
 //! over time.
 //!
-//! de-mls keeps no liveness timers. Each polling cycle the app:
-//! 1. calls [`Conversation::poll`] (agreement deadlines + freeze progression),
-//! 2. reads the condition queries to see what liveness action is available, and
-//! 3. pulls the matching trigger once its own timer/signal says to act.
+//! de-mls keeps no liveness timers. Each polling cycle:
+//! 1. call [`Conversation::poll`] — it resolves votes, advances any in-flight
+//!    commit round, and drives reelection internally;
+//! 2. pull a trigger when your own timer or signal says to act.
 //!
-//! Condition queries (in `query.rs`):
-//! - [`Conversation::pending_commit_work`] — approved batch waiting to commit
-//! - [`Conversation::in_recovery_posture`] — commit on the short recovery window
-//! - [`Conversation::pending_reelection`] — a silent reelection round
-//! - [`Conversation::pending_sync_resend`] — an unanswered sync request (backup)
-//! - [`Conversation::pending_buffered_updates`] — buffered joins/removes to propose
+//! **Triggers self-gate — the queries are optional.** Every trigger is a no-op
+//! when there's nothing to do ([`commit_now`](Conversation::commit_now) returns
+//! `Ok(false)` outside `Working`, with no approved work, or with an election in
+//! flight). So the simplest integrator just calls the trigger each cycle. The
+//! paired query lets you *peek without acting* — to run a delay before the
+//! trigger, or show a "N pending" count in a UI:
 //!
-//! Triggers — the levers the app pulls:
-//! - [`Conversation::commit_now`] — start the commit round now (this module)
-//! - [`Conversation::resend_commit`] — re-broadcast a held candidate (this module)
-//! - [`Conversation::commit_in_recovery`] — mint in open Layer-3 recovery (this module)
-//! - [`Conversation::advance_election_retry`] — count a silent reelection round rejected (`steward.rs`)
-//! - [`Conversation::share_conversation_sync`] — re-send the sync as a backup (`steward.rs`)
-//! - [`Conversation::propose_buffered_updates`] — drain the buffer as a backup (`steward.rs`)
-//! - [`Conversation::request_recovery`] — open Layer-3 recovery (`steward.rs`)
+//! ```ignore
+//! // Immediate: commit as soon as there's work (the call no-ops otherwise).
+//! convo.commit_now(&provider, &signer)?;
+//!
+//! // Delayed: peek, then batch proposals over your own commit-inactivity window.
+//! if convo.pending_commit_work().is_some() && my_commit_timer.elapsed() {
+//!     convo.commit_now(&provider, &signer)?;
+//! }
+//! ```
+//!
+//! Query → trigger pairs (the query is the optional peek):
+//! - [`pending_commit_work`](Conversation::pending_commit_work) → [`commit_now`](Conversation::commit_now) — approved batch to commit
+//! - [`pending_buffered_updates`](Conversation::pending_buffered_updates) → [`propose_buffered_updates`](Conversation::propose_buffered_updates) — buffered joins/removes (backup)
+//! - [`pending_sync_resend`](Conversation::pending_sync_resend) → [`share_conversation_sync`](Conversation::share_conversation_sync) — unanswered sync request (backup)
+//! - [`in_recovery_posture`](Conversation::in_recovery_posture) → [`commit_in_recovery`](Conversation::commit_in_recovery) — mint in open Layer-3 recovery
+//! - [`ConversationEvent::ReelectionExhausted`](crate::ConversationEvent) → [`request_recovery`](Conversation::request_recovery) — open Layer-3 when reelection can't elect a steward
+//! - *(hold a candidate)* → [`resend_commit`](Conversation::resend_commit) — re-broadcast it
+//!
+//! Reelection is **not** an app trigger: `poll()` advances the retry ladder
+//! itself (the round re-seeds the shared steward list, so it must move in
+//! lockstep). [`pending_reelection`](Conversation::pending_reelection) is
+//! read-only status a UI can surface.
 
 use std::error::Error as StdError;
 
@@ -38,16 +52,17 @@ where
     Sc: PeerScoreStorage,
     Wc: WallClock,
 {
-    /// Start the commit round now instead of waiting out a commit-inactivity
-    /// timer: enter `Freezing` and, if we're a steward, mint our candidate from
-    /// the approved batch. de-mls no longer keeps this timer — the app calls
-    /// this when its own liveness policy decides the epoch steward has sat on
-    /// approved work long enough, or when a backup takes over a silent primary.
+    /// Start the commit round now: enter `Freezing` and, if we're a steward,
+    /// mint our candidate from the approved batch. Call it when your liveness
+    /// policy decides the epoch steward has sat on approved work long enough, or
+    /// when a backup takes over a silent primary.
     ///
-    /// `Ok(true)` when the freeze was entered, `Ok(false)` when there is nothing
-    /// to do: not in `Working`, no approved work, or an election in flight
-    /// (committing on a stale steward list only produces a NoCandidate). Mirrors
-    /// the guards of [`Self::pending_commit_work`].
+    /// Self-gating, so it's safe to call every cycle: `Ok(false)` when there's
+    /// nothing to do (not in `Working`, no approved work, or an election in
+    /// flight — committing on a stale list only yields a NoCandidate), `Ok(true)`
+    /// once the freeze is entered. Pair with
+    /// [`pending_commit_work`](Self::pending_commit_work) only when you want to
+    /// *wait* (a commit-inactivity delay) before firing.
     pub fn commit_now<Pr>(
         &mut self,
         provider: &Pr,
@@ -74,8 +89,7 @@ where
     /// its broadcast (only valid in recovery, where the steward gate is relaxed).
     /// `Ok(true)` if a candidate was produced, `Ok(false)` if there was nothing
     /// to commit or we already hold a local candidate this round — so the app
-    /// can call it every cycle in recovery without minting duplicates. de-mls no
-    /// longer auto-mints; the app owns the recovery-commit timing.
+    /// can call it every cycle in recovery without minting duplicates.
     pub fn commit_in_recovery<Pr>(
         &mut self,
         provider: &Pr,
@@ -94,13 +108,9 @@ where
         self.mint_and_broadcast_candidate(provider, signer)
     }
 
-    /// Re-broadcast our commit candidate for the current round, so members that
-    /// dropped the original receive it and apply it — the steward's alternative
-    /// to survivors minting a competing commit, which forks. `Ok(true)` if a
+    /// Re-broadcast our commit candidate for the current round. `Ok(true)` if a
     /// candidate was re-sent, `Ok(false)` when we hold none for this round
-    /// (nothing minted yet, or it already merged and cleared the buffer). de-mls
-    /// does not time this; the app calls it when its liveness policy judges the
-    /// commit was likely dropped.
+    /// (nothing minted yet, or it already merged and cleared the buffer).
     pub fn resend_commit(&self) -> Result<bool, ConversationError> {
         match self.queues.commit_round.local_candidate_bytes() {
             Some(payload) => {

@@ -83,36 +83,47 @@ direct arguments — is in
 ## Driving & timing
 
 de-mls carries no liveness timers. Each cycle the app: calls `poll()` (resolves
-votes + advances any in-flight commit round), reads the **condition queries** to
-see what's actionable, and pulls the matching **trigger** when its own timer or
-signal says to. The full surface is indexed in
+votes, advances any in-flight commit round, and drives reelection internally),
+reads the **condition queries** to see what's actionable, and pulls the matching
+**trigger** when its own timer or signal says to. The full surface is indexed in
 [`src/conversation/driving.rs`](src/conversation/driving.rs):
 
-| Condition query | Trigger | Meaning |
-|---|---|---|
-| `pending_commit_work()` | `commit_now()` | approved batch waiting to commit |
-| `pending_buffered_updates()` | `propose_buffered_updates()` | buffered joins/removes to propose |
-| `pending_sync_resend()` | `share_conversation_sync()` | unanswered sync request (backup) |
-| `pending_reelection()` | `advance_election_retry()` | a silent reelection round |
-| *(recovery open)* | `commit_in_recovery()` / `request_recovery()` | Layer-3 recovery |
-| *(commit dropped)* | `resend_commit()` | re-broadcast a held candidate |
+| Condition query              | Trigger                      | Meaning                                            |
+| ---------------------------- | ---------------------------- | -------------------------------------------------- |
+| `pending_commit_work()`      | `commit_now()`               | approved batch waiting to commit                   |
+| `pending_buffered_updates()` | `propose_buffered_updates()` | buffered joins/removes to propose                  |
+| `pending_sync_resend()`      | `share_conversation_sync()`  | unanswered sync request (backup)                   |
+| `ReelectionExhausted` event  | `request_recovery()`         | open Layer-3 when reelection can't elect a steward |
+| *(recovery open)*            | `commit_in_recovery()`       | mint in Layer-3 recovery                           |
+| *(commit dropped)*           | `resend_commit()`            | re-broadcast a held candidate                      |
+
+The triggers **self-gate** — each is a no-op when there's nothing to do — so the
+simplest integrator just calls the trigger every cycle. The paired query is an
+optional *peek* (observe without acting): use it to run a delay before the
+trigger — e.g. a commit-inactivity window that batches proposals into one commit —
+or to drive a UI.
+
+**Reelection is de-mls's, not yours.** A silent reelection round advances
+internally on `poll()` — the retry round re-seeds the shared steward list, so it
+must move in lockstep. Once it exhausts `max_reelection_attempts`, de-mls emits
+`ReelectionExhausted` and *you* decide whether to open Layer-3 recovery.
 
 **Two kinds of timing.** de-mls owns the **agreement/settle** durations on
 `ConversationConfig` — every member must agree on them, so they ride in
 `ConversationSync` to joiners:
 
-- `voting_delay` / `election_voting_delay` — grace for a manual vote before the auto-vote fires
-- `consensus_timeout` — how long a vote session stays open
-- `freeze_duration` — commit-round candidate-collection window
-- `recovery_inactivity_duration` — the shorter settle window during recovery
+- `voting_delay` — grace for a manual vote before the auto-vote fires (steward elections auto-validate with no delay)
+- `consensus_timeout` — how long a vote session stays open, and the silent-reelection-round window
+- `freeze_duration` — commit-round candidate-collection window (reused during recovery)
 - `proposal_expiration`
+- `max_reelection_attempts` — retry cap before Layer-3 escalation
 
 The **liveness** durations — how long *you* wait before driving `commit_now`, a
 backup takeover, or recovery — are yours; keep them in your own config.
 
 **How they depend on each other.** Respect, per member:
 
-```
+``` text
 voting_delay  <  consensus_timeout  <  your commit-inactivity  <  your takeover window
 ```
 
