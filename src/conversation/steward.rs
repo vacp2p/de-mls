@@ -478,15 +478,34 @@ where
 
     // ── Crate-internal ───────────────────────────────────────────────
 
+    /// Recompute the steward list from our own settled roster and check
+    /// `proposed` matches it, so a proposer can't slip in a biased list — we
+    /// trust our own membership view, not the payload. Using the current roster
+    /// is safe: no commit can land mid-election, so it hasn't moved since the
+    /// proposer built the list.
+    pub(crate) fn validate_election_list(
+        &self,
+        election: &StewardElectionProposal,
+    ) -> Result<bool, ConversationError> {
+        let epoch = election.election_epoch;
+        let members = self.mls().members()?;
+        let pool: Vec<Vec<u8>> = members
+            .iter()
+            .filter(|m| self.queues.is_settled(m, epoch))
+            .cloned()
+            .collect();
+        self.services.steward_list.validate_proposed(
+            &election.proposed_stewards,
+            epoch,
+            &pool,
+            election.retry_round,
+        )
+    }
+
     /// Submit a steward-election proposal. Only the deterministic responsible
-    /// proposer actually submits; others no-op, so this is safe to call from
-    /// every poll tick without double-proposing.
-    ///
-    /// `recovery = true` bypasses the list-exhaustion gate and filters
-    /// queued-removal targets out of the candidate pool — those entries are
-    /// already in `approved_proposals` thanks to
-    /// [`crate::apply_consensus_result`], so `has_approved_removal`
-    /// catches them without an explicit exclude.
+    /// proposer actually submits; others no-op, so this is safe to call every
+    /// poll tick without double-proposing. `recovery = true` bypasses the
+    /// list-exhaustion gate to force an election.
     pub(crate) fn initiate_steward_election<Pr>(
         &mut self,
         provider: &Pr,
@@ -509,19 +528,13 @@ where
                 return Ok(());
             }
 
-            // Build the candidate pool: settled MLS members minus queued
-            // removals and locally-observed unresponsive stewards (recovery
-            // only — non-recovery elections trust the current MLS roster).
-            // Unsettled (just-joined) members are excluded — they may not
-            // have attached MLS and can't serve as stewards yet.
+            // Candidate pool: settled MLS members only — the list is a pure
+            // rotation of that roster by `retry_round`, so every member derives
+            // the same one. Unsettled (just-joined) members are excluded: they
+            // may not have attached MLS yet.
             let candidate_pool: Vec<Vec<u8>> = mls_members
                 .iter()
                 .filter(|m| self.queues.is_settled(m, epoch))
-                .filter(|m| {
-                    !(recovery
-                        && (self.queues.has_approved_removal(m)
-                            || self.queues.is_unresponsive_steward(m)))
-                })
                 .cloned()
                 .collect();
             let pool_set: std::collections::HashSet<&[u8]> =

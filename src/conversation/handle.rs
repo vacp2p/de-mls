@@ -1127,6 +1127,34 @@ mod tests {
     }
 
     #[test]
+    fn validate_election_list_recomputes_from_local_roster() {
+        use crate::protos::de_mls::messages::v1::StewardElectionProposal;
+        let conversation = make_conversation_working();
+        let epoch = conversation.mls().current_epoch().unwrap();
+        // A list naming the real settled member validates.
+        let honest = StewardElectionProposal {
+            proposed_stewards: vec![b"test-member-id".to_vec()],
+            election_epoch: epoch,
+            retry_round: 0,
+        };
+        assert!(
+            conversation.validate_election_list(&honest).unwrap(),
+            "the honest list matches the local roster"
+        );
+        // A list naming someone not in the roster is rejected — the list is
+        // recomputed locally, not trusted from the payload.
+        let forged = StewardElectionProposal {
+            proposed_stewards: vec![b"not-a-member".to_vec()],
+            election_epoch: epoch,
+            retry_round: 0,
+        };
+        assert!(
+            !conversation.validate_election_list(&forged).unwrap(),
+            "a list off the local roster is rejected"
+        );
+    }
+
+    #[test]
     fn recovery_with_empty_queue_exits_without_spinning() {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_member());

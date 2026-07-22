@@ -405,11 +405,9 @@ where
         Ok(())
     }
 
-    /// Verdict for a received steward-election proposal: YES only when the
-    /// proposed list is the correct deterministic ordering for its round — the
-    /// RFC's "detect a biased or unauthorized list", evaluated at vote time
-    /// rather than trusting the proposer. A payload that isn't a decodable
-    /// election is rejected (NO).
+    /// Vote YES only if the proposed steward list is valid for its round (via
+    /// `validate_election_list`); a payload that isn't a decodable election is
+    /// rejected (NO).
     fn election_verdict(
         &self,
         decoded: Option<&ConversationUpdateRequest>,
@@ -420,12 +418,7 @@ where
         }) else {
             return Ok(false);
         };
-        self.services.steward_list.validate_proposed(
-            &election.proposed_stewards,
-            election.election_epoch,
-            &election.proposed_stewards,
-            election.retry_round,
-        )
+        self.validate_election_list(election)
     }
 
     /// We just joined via welcome. Runs after `assemble` already put the

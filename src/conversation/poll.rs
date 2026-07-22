@@ -78,12 +78,11 @@ where
         }
     }
 
-    /// Advance a silent reelection round: if we're parked in `Reelection` with
-    /// no election in flight and the round window has elapsed, count the round
-    /// rejected and hand proposer authority to the next candidate. de-mls owns
-    /// this — the retry round re-seeds the shared steward list, so every member
-    /// must advance in lockstep or they elect different lists. A round with a
-    /// proposal in flight resolves through the consensus layer instead.
+    /// While parked in `Reelection` with no proposal in flight, a full round
+    /// window (`consensus_timeout`) with nothing filed means the responsible
+    /// proposer is silent — count the round rejected and rotate authority to the
+    /// next candidate. de-mls drives this itself because bumping the retry round
+    /// re-seeds the shared list, so members must advance in lockstep.
     fn advance_reelection<Pr>(&mut self, provider: &Pr, signer: &impl Signer)
     where
         Pr: OpenMlsProvider,

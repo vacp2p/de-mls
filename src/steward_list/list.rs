@@ -142,13 +142,20 @@ impl StewardList {
         config: &StewardListConfig,
         retry_round: u32,
     ) -> Result<bool, ConversationError> {
-        let sn = proposed.len();
-        config.check_generation_inputs(member_ids, sn)?;
+        if member_ids.is_empty() {
+            return Err(ConversationError::EmptyMembersList);
+        }
+        // The list must be the canonical size for this roster (the max
+        // `compute_list_size` picks), not merely in-range — otherwise a proposer
+        // could shrink the steward set within bounds.
+        if proposed.len() != config.compute_list_size(member_ids.len()) {
+            return Ok(false);
+        }
         let ordered =
             sorted_steward_indices(election_epoch, retry_round, conversation_id, member_ids);
         Ok(ordered
             .iter()
-            .take(sn)
+            .take(proposed.len())
             .zip(proposed.iter())
             .all(|(&i, want)| &member_ids[i] == want))
     }
@@ -460,7 +467,7 @@ mod tests {
 
     #[test]
     fn test_validate_correct_list() {
-        let config = StewardListConfig::new(2, 5).unwrap();
+        let config = StewardListConfig::new(2, 3).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
         let list = StewardList::generate(0, b"conversation", &mems, 3, config.clone(), 0).unwrap();
@@ -471,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_validate_tampered_list() {
-        let config = StewardListConfig::new(2, 5).unwrap();
+        let config = StewardListConfig::new(2, 3).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
         let mut list =
@@ -620,7 +627,8 @@ mod tests {
         let mems = members(&[1, 2, 3, 4, 5]);
         let empty: Vec<Vec<u8>> = vec![];
 
-        assert!(StewardList::validate(&empty, 0, b"conversation", &mems, &config, 0).is_err());
+        // An empty (non-canonical-size) proposed list is rejected, not errored.
+        assert!(!StewardList::validate(&empty, 0, b"conversation", &mems, &config, 0).unwrap());
     }
 
     #[test]
@@ -642,6 +650,37 @@ mod tests {
         for steward in list.members() {
             assert!(mems.contains(steward));
         }
+    }
+
+    #[test]
+    fn validate_rejects_biased_subset_and_wrong_count() {
+        let cid = b"cid";
+        // sn_max = 3 with 5 members: the canonical list is a real 3-of-5 subset.
+        let config = StewardListConfig::new(1, 3).unwrap();
+        let mems = members(&[1, 2, 3, 4, 5]);
+        let correct = StewardList::generate(0, cid, &mems, 3, config.clone(), 0)
+            .unwrap()
+            .members()
+            .to_vec();
+        assert!(
+            StewardList::validate(&correct, 0, cid, &mems, &config, 0).unwrap(),
+            "the honest top-3 validates"
+        );
+        // Right size, wrong membership: swap in a member the sort excluded.
+        let excluded = mems.iter().find(|m| !correct.contains(m)).unwrap().clone();
+        let mut biased = correct.clone();
+        *biased.last_mut().unwrap() = excluded;
+        assert!(
+            !StewardList::validate(&biased, 0, cid, &mems, &config, 0).unwrap(),
+            "a biased subset is rejected"
+        );
+        // Wrong count: a shorter but in-range list (2 < canonical 3) — a proposer
+        // can't quietly shrink the steward set.
+        let shrunk = correct[..2].to_vec();
+        assert!(
+            !StewardList::validate(&shrunk, 0, cid, &mems, &config, 0).unwrap(),
+            "an in-range but non-canonical count is rejected"
+        );
     }
 
     #[test]
