@@ -211,7 +211,7 @@ where
 
     /// On epoch advance, the new live epoch steward drains the pending-update
     /// buffer into voting proposals. A backup steward reaches the same drain
-    /// from `poll` once the recovery window passes (see
+    /// from `poll` once `backup_takeover_window` passes (see
     /// [`Self::drain_buffered_updates`]).
     pub(crate) fn process_buffered_updates<Pr>(
         &mut self,
@@ -258,7 +258,7 @@ where
     /// Promote every actionable buffered update to a voting proposal
     /// (`CreatorVote::Deferred` — the proposer relays peer intent, it doesn't
     /// endorse). Callers gate *who* drains: the epoch steward immediately via
-    /// [`Self::process_buffered_updates`], a backup after the recovery window
+    /// [`Self::process_buffered_updates`], a backup after `backup_takeover_window`
     /// via `poll`. This just performs the drain.
     pub(crate) fn drain_buffered_updates<Pr>(
         &mut self,

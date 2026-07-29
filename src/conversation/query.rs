@@ -72,13 +72,11 @@ where
         self.services.steward_list.is_steward(&self.self_member_id)
     }
 
-    /// `true` if the local member is the **primary** steward designated for the
-    /// current epoch — the one that should commit and sponsor joiners first.
-    /// Unlike [`Self::is_steward`] (true for any member on the list, backups
-    /// included), this is true for exactly one member per epoch, so it gates the
-    /// single-actor paths: backups defer to the primary and only step in after
-    /// the recovery window. Eligibility is the same live rotation
-    /// [`Self::member_roles`] uses, so all members agree on who it is.
+    /// Returns `true` if this member is the main (primary) steward for the current epoch.
+    /// Only one member is the primary at a time; others are backups.
+    /// The primary handles joiners and runs certain actions first.
+    /// Backups wait their turn and only take over if the primary is silent for a while.
+    /// Use [`Self::is_steward`] if you want to know if you are any steward (primary or backup).
     pub fn is_epoch_steward(&self) -> Result<bool, ConversationError> {
         let mls = self.mls();
         let epoch = mls.current_epoch()?;

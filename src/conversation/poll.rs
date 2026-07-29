@@ -149,7 +149,7 @@ where
                 .current_list()
                 .is_some_and(|list| received >= list.len());
 
-        // Recovery reuses the shorter `recovery_inactivity_duration` as its
+        // Recovery reuses the shorter `retry_window` as its
         // collection settle (after the manual grace / auto-mint), rather than
         // the full `freeze_duration`.
         let window_elapsed = if in_recovery {
@@ -157,7 +157,7 @@ where
                 .config
                 .recovery_auto_commit_delay
                 .unwrap_or(Duration::ZERO)
-                + self.config.recovery_inactivity_duration;
+                + self.config.retry_window;
             self.timing
                 .phase_timer
                 .elapsed_since_anchor(self.clock.timestamp(), window)
@@ -446,7 +446,7 @@ where
     /// Drive the backup-steward proposal takeover. The epoch steward sponsors
     /// announced joiners immediately; everyone else only buffers them. If the
     /// epoch steward stays silent, the join would stall — so here a backup
-    /// steward drains the buffer once the recovery window passes, mirroring the
+    /// steward drains the buffer once `backup_takeover_window` passes, mirroring the
     /// commit takeover (primary leads, backup follows after `recovery`).
     ///
     /// No-op outside `Working`; deferred while approved work is pending (the
@@ -479,7 +479,7 @@ where
             return Ok(());
         }
 
-        // Backup steward: give the epoch steward the recovery window first.
+        // Backup steward: give the epoch steward `backup_takeover_window` first.
         let now = self.clock.timestamp();
         let anchor = match self.timing.buffered_propose_anchor {
             Some(a) => a,
@@ -488,22 +488,21 @@ where
                 return Ok(());
             }
         };
-        let delay = self.config.voting_inactivity_window();
-        if now < anchor + delay {
+        if now < anchor + self.config.backup_takeover_window {
             return Ok(());
         }
         self.timing.buffered_propose_anchor = None;
         info!(
             conversation = %self.conversation_id,
-            "backup steward proposing buffered updates: epoch steward silent past recovery window"
+            "backup steward proposing buffered updates: epoch steward silent past backup_takeover_window"
         );
         self.drain_buffered_updates(provider, signer)
     }
 
     /// Backup-steward sync re-send takeover. The epoch steward answers a
     /// `ConversationSyncRequest` reactively; a backup arms `sync_resend_anchor`
-    /// and re-sends here only if no `ConversationSync` was observed within the
-    /// recovery window — so an offline epoch steward can't strand a bootstrap-
+    /// and re-sends here only if no `ConversationSync` was observed within
+    /// `backup_takeover_window` — so an offline epoch steward can't strand a bootstrap-
     /// less joiner. Only a backup steward drives it; the anchor clears otherwise.
     fn drive_sync_resend<Pr>(
         &mut self,
@@ -523,13 +522,13 @@ where
             self.timing.sync_resend_anchor = None;
             return Ok(());
         }
-        if self.clock.timestamp() < anchor + self.config.voting_inactivity_window() {
+        if self.clock.timestamp() < anchor + self.config.backup_takeover_window {
             return Ok(());
         }
         self.timing.sync_resend_anchor = None;
         info!(
             conversation = %self.conversation_id,
-            "backup steward re-sending conversation sync: epoch steward silent past recovery window"
+            "backup steward re-sending conversation sync: epoch steward silent past backup_takeover_window"
         );
         self.share_conversation_sync(provider, signer)
     }
@@ -563,9 +562,9 @@ where
             || self.services.steward_list.next_election_round() > 0
             || self.timing.reelection_recovered;
         let inactivity = if in_recovery {
-            self.config.recovery_inactivity_duration
+            self.config.retry_window
         } else {
-            self.config.commit_inactivity_duration
+            self.config.commit_batch_window
         };
         let Some(event) = self.check_steward_inactivity(proposal_count, inactivity) else {
             return Ok(());
@@ -610,7 +609,7 @@ where
                 return Ok(());
             }
         };
-        if now < anchor + self.config.voting_inactivity_window() {
+        if now < anchor + self.config.retry_window {
             return Ok(());
         }
         self.timing.reelection_silence_anchor = None;

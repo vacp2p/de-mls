@@ -91,14 +91,14 @@ fn bootstrap_joiner_reports_sync_applied() {
 }
 
 /// A backup steward covers for a silent epoch steward: it re-sends the sync only
-/// after the recovery window, not before.
+/// after `backup_takeover_window`, not before.
 #[test]
 fn backup_steward_resends_sync_when_epoch_steward_silent() {
     // sn_max = 5 → the full settled roster is the steward list. Evicting one
     // member advances an epoch so the remaining joiners settle into stewards,
     // leaving an epoch steward and a backup.
     let cfg = ConversationConfig {
-        recovery_inactivity_duration: Duration::from_millis(100),
+        backup_takeover_window: Duration::from_millis(100),
         ..fast_config()
     };
     let mut h = TestHarness::<3>::bootstrap(
@@ -135,12 +135,12 @@ fn backup_steward_resends_sync_when_epoch_steward_silent() {
     h.member_mut(backup).poll();
     assert!(
         h.member_mut(backup).take_outbound().is_empty(),
-        "backup waits out the recovery window before covering"
+        "backup waits out backup_takeover_window before covering"
     );
 
     // Past the window with no answer seen, the backup re-sends the sync.
     h.member(backup)
-        .advance_clock(cfg.voting_inactivity_window() + Duration::from_millis(50));
+        .advance_clock(cfg.backup_takeover_window + Duration::from_millis(50));
     h.member_mut(backup).poll();
     assert_eq!(
         h.member_mut(backup).take_outbound().len(),

@@ -20,7 +20,7 @@ const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b786
 /// votes rather than by timing out.
 fn manual_vote_config() -> ConversationConfig {
     ConversationConfig {
-        commit_inactivity_duration: Duration::from_secs(2),
+        commit_batch_window: Duration::from_secs(2),
         freeze_duration: Duration::from_millis(20),
         voting_delay: Duration::from_millis(300),
         consensus_timeout: Duration::from_secs(5),

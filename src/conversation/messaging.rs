@@ -79,7 +79,7 @@ where
     /// [`crate::ConversationEvent::ConversationSyncMissing`];
     /// [`crate::ConversationEvent::ConversationSyncApplied`] signals when to
     /// stop. MLS-encrypted, so only a steward can answer. Don't re-request
-    /// faster than `recovery_inactivity_duration` — that's the window a backup
+    /// faster than `retry_window` — that's the window a backup
     /// steward waits before covering for a silent epoch steward.
     pub fn request_conversation_sync<Pr>(
         &mut self,
@@ -134,7 +134,7 @@ where
     /// immediately, so a single Add proposal is opened per joiner. Every other
     /// member records the announcement in the pending-update buffer instead —
     /// a backup proposes it from there if the epoch steward stays silent past
-    /// the recovery window (drained by `poll`), so an offline epoch steward
+    /// `backup_takeover_window` (drained by `poll`), so an offline epoch steward
     /// doesn't strand the join. No-op outside `Working`.
     ///
     /// See [`Self::add_member`] for the endorsing out-of-band invite.

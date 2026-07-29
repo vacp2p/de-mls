@@ -90,7 +90,7 @@ fn backup_steward_proposes_buffered_joiner_when_epoch_steward_silent() {
     // the full roster and growing back to 3 fires no subset election — the test
     // isolates the backup *proposal* takeover, not election.
     let cfg = ConversationConfig {
-        recovery_inactivity_duration: Duration::from_millis(100),
+        backup_takeover_window: Duration::from_millis(100),
         ..fast_config()
     };
     let mut h = TestHarness::<3>::bootstrap(
@@ -119,7 +119,7 @@ fn backup_steward_proposes_buffered_joiner_when_epoch_steward_silent() {
     // The joiner announces, but only the backup observes it — the epoch steward
     // never sees the announcement, so it never sponsors. Without the backup
     // takeover the join would stall forever; with it, the backup proposes the
-    // buffered Add after the recovery window and the live epoch steward commits.
+    // buffered Add after `backup_takeover_window` and the live epoch steward commits.
     h.member_mut(target).rejoin("bk", cfg.clone());
     let announcement = h.member_mut(target).announce_key_package("bk");
     h.deliver_key_package_to(backup, &announcement);

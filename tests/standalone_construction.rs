@@ -24,6 +24,7 @@ use common::{
     wallet::WalletMemberId,
 };
 
+use crate::common::harness::fast_config;
 use crate::common::test_mls_group_config;
 
 /// Per-conversation stack the standalone tests build, on virtual time.
@@ -121,16 +122,6 @@ fn create_builds_a_working_steward_session_without_user() {
 
 /// Sub-second timers so the solo creator's bundled-YES consensus and the
 /// inactivity commit land within a few polling rounds.
-fn fast_config() -> de_mls::ConversationConfig {
-    de_mls::ConversationConfig {
-        commit_inactivity_duration: Duration::from_millis(50),
-        freeze_duration: Duration::from_millis(20),
-        voting_delay: Duration::from_millis(30),
-        consensus_timeout: Duration::from_millis(150),
-        proposal_expiration: Duration::from_millis(2000),
-        ..Default::default()
-    }
-}
 
 #[test]
 fn join_completes_in_one_call() {
