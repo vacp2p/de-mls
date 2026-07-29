@@ -1,5 +1,5 @@
-//! Running the follow-up once a proposal resolves: installing an elected
-//! roster, retrying or escalating a failed election, entering freeze for a
+//! Running the follow-up once a proposal resolves: installing an elected steward
+//! list, retrying or escalating a failed election, entering freeze for a
 //! commit, and applying emergency score changes.
 
 use std::error::Error as StdError;

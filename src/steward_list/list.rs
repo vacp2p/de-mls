@@ -1,7 +1,7 @@
 //! The deterministic steward list — who serves as steward, and in what order.
 //!
 //! [`StewardListConfig`] fixes the size bounds (`sn_min`/`sn_max`);
-//! [`StewardList`] is one elected, ordered roster. Stewards are chosen by
+//! [`StewardList`] is one elected, ordered steward list. Stewards are chosen by
 //! ascending `SHA256(election_epoch || retry_round || member_id ||
 //! conversation_id)`, keeping the first `sn` — the same key every member
 //! computes, so the list is reproducible and unbiased (RFC §"Steward list
@@ -24,7 +24,7 @@ pub struct StewardListConfig {
     /// must vote on who serves.
     pub sn_max: usize,
     /// Whether an election may draw candidates from a subset of members rather
-    /// than the full roster. Read by the coordinator; not used in generation.
+    /// than the full member set. Read by the coordinator; not used in generation.
     pub allow_subset_candidates: bool,
 }
 
@@ -71,7 +71,7 @@ impl StewardListConfig {
         }
     }
 
-    /// Reject inputs `generate`/`validate` can't honor: an empty roster, or an `sn`
+    /// Reject inputs `generate`/`validate` can't honor: an empty member set, or an `sn`
     /// outside the config's valid range for this membership.
     pub fn check_generation_inputs(
         &self,
@@ -88,7 +88,7 @@ impl StewardListConfig {
     }
 }
 
-/// One elected, ordered steward roster, serving epochs
+/// One elected, ordered steward list, serving epochs
 /// `[election_epoch, election_epoch + len)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StewardList {
@@ -105,7 +105,7 @@ pub struct StewardList {
 impl StewardList {
     /// Elect `sn` stewards: sort `member_ids` by ascending steward hash and keep
     /// the first `sn`. Deterministic — every member derives the same list.
-    /// Errors on an empty roster or an `sn` outside the config bounds.
+    /// Errors on an empty member set or an `sn` outside the config bounds.
     pub fn generate(
         election_epoch: u64,
         conversation_id: &[u8],

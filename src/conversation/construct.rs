@@ -110,7 +110,7 @@ where
             .create_commit_candidate(provider, signer, &updates)?;
         self.services.mls.merge_own_commit(provider)?;
 
-        // Score the members and install the steward list over the settled roster
+        // Score the members and install the steward list over the settled members
         // at the merged epoch. `install_list` sorts and takes the top-sn, so this
         // handles an initial set larger than `sn_max` (a real subset) too.
         for (id, _) in initial_members {
@@ -225,7 +225,7 @@ where
         steward_list.set_conversation_id(conversation_id.as_bytes());
         steward_list.set_max_retries(config.max_reelection_attempts);
         // Creator path: bootstrap the list with self as sole steward at
-        // epoch 0. Joiner path leaves the roster empty until `ConversationSync`.
+        // epoch 0. Joiner path leaves the member set empty until `ConversationSync`.
         if is_creation {
             steward_list.install_list(0, std::slice::from_ref(&self_member_id_bytes), 1, 0)?;
             scoring.add_member(&self_member_id_bytes)?;

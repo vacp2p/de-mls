@@ -7,7 +7,7 @@
 //! - `storage` — `PeerScoreStorage` trait (integrator-supplied backend).
 //! - `service` — `PeerScoringService`, the library-owned scoring logic.
 //! - `helpers` — pure functions: `scoring_member_diff` (scoring-table vs.
-//!   MLS-roster diff) and `emergency_score_ops` (emergency-vote → score ops).
+//!   member-set diff) and `emergency_score_ops` (emergency-vote → score ops).
 
 mod helpers;
 mod service;

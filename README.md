@@ -41,7 +41,7 @@ use de_mls::defaults::{DefaultConsensusPlugin, InMemoryPeerScoreStorage};
 // The first generic is the consensus backend, the second the peer-score
 // *storage* backend. `consensus` is a `ConsensusPlugin` instance you hold and
 // pass by reference; `scoring` is a `PeerScoringService` built over the storage
-// (see `de_mls::defaults::DefaultPeerScoring`). The steward roster is
+// (see `de_mls::defaults::DefaultPeerScoring`). The steward list is
 // library-owned — you set its size bounds on `config` (a `ConversationConfig`).
 // The third generic is the time source: a `WallClock` impl you provide —
 // wrap `SystemTime` in production, use `MockClock` for virtual-time tests.
@@ -112,14 +112,14 @@ write.
 
 ## Steward list
 
-Who may commit each epoch — the steward roster and its epoch/backup rotation —
+Who may commit each epoch — the steward list and its epoch/backup rotation —
 is fully library-owned. You set only its size bounds (`sn_min` / `sn_max`, the
 `steward_list` field on `ConversationConfig`); de-mls generates the list,
 validates election proposals, runs the election through consensus, and rotates
 the epoch steward.
 
 Generation is deterministic and normative: every member derives the identical
-roster by sorting on `SHA256(epoch ‖ retry_round ‖ member_id ‖
+steward list by sorting on `SHA256(epoch ‖ retry_round ‖ member_id ‖
 conversation_id)`, and a proposal that doesn't reproduce it is rejected by all
 peers (RFC §"Steward list creation"). There is nothing to override — a
 divergent generator would fork the group — so, unlike consensus and scoring,

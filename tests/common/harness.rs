@@ -879,7 +879,7 @@ impl<const N: usize> TestHarness<N> {
     ///
     /// [`Self::epochs_agree`] compares epoch *numbers* and
     /// [`Self::membership_agrees`] compares member-id *sets*, and both report
-    /// `true` across a forked group whose branches share an epoch and roster
+    /// `true` across a forked group whose branches share an epoch and member set
     /// but hold different epoch secrets. The authenticator is the value that
     /// tells them apart, so this is the check that actually detects a fork.
     pub fn converged(&self) -> bool {

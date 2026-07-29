@@ -94,7 +94,7 @@ fn bootstrap_joiner_reports_sync_applied() {
 /// after `backup_takeover_window`, not before.
 #[test]
 fn backup_steward_resends_sync_when_epoch_steward_silent() {
-    // sn_max = 5 → the full settled roster is the steward list. Evicting one
+    // sn_max = 5 → the full settled members is the steward list. Evicting one
     // member advances an epoch so the remaining joiners settle into stewards,
     // leaving an epoch steward and a backup.
     let cfg = ConversationConfig {

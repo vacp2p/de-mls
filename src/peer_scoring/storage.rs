@@ -37,7 +37,7 @@ pub trait PeerScoreStorage {
     fn remove(&mut self, member_id: &[u8]) -> Result<(), Self::Error>;
 
     /// Every tracked member paired with its score. Must be **complete** — the
-    /// library derives the below-threshold set and the scoring/roster diff
+    /// library derives the below-threshold set and the scoring/member-set diff
     /// from this — but order is irrelevant.
     fn all_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, Self::Error>;
 }

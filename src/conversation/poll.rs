@@ -140,7 +140,7 @@ where
         let (received, expected) = self.commit_candidate_count();
 
         // Early selection: skip remaining freeze time if all expected stewards
-        // have submitted. Not in recovery — there's no fixed roster to count
+        // have submitted. Not in recovery — there's no fixed member set to count
         // against (any member may commit), so we wait out the window.
         let all_candidates_in = !in_recovery
             && self

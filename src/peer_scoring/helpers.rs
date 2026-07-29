@@ -1,4 +1,4 @@
-//! Pure helpers: scoring/member-roster diff and ECP score-op derivation.
+//! Pure helpers: scoring/member-set diff and ECP score-op derivation.
 
 use std::collections::HashSet;
 
@@ -9,7 +9,7 @@ use crate::{
     {ScoreEvent, ScoreOp, ScoringMemberDiff},
 };
 
-/// Diff between a scoring table snapshot and an MLS member roster.
+/// Diff between a scoring table snapshot and an MLS member set.
 /// Caller applies the diff to its own [`crate::PeerScoringService`].
 pub fn scoring_member_diff(scored: &[Vec<u8>], mls_members: &[Vec<u8>]) -> ScoringMemberDiff {
     let scored_set: HashSet<&[u8]> = scored.iter().map(Vec::as_slice).collect();

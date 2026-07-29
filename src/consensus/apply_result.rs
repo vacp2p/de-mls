@@ -23,7 +23,7 @@ pub enum ConsensusApplyResult {
     /// Nothing left to do. "No follow-up", not "no change" — some of these
     /// paths still adjusted the approved queue.
     NoAction,
-    /// The election passed. Validate the proposed roster, install it, and
+    /// The election passed. Validate the proposed list, install it, and
     /// leave Reelection.
     ElectionAccepted(StewardElectionProposal),
     /// The election failed. Retry it, or escalate once retries are spent.
@@ -177,8 +177,8 @@ pub fn apply_consensus_result(
     Ok(ConsensusApplyResult::NoAction)
 }
 
-/// The election branch of [`apply_consensus_result`]. YES hands the proposed
-/// roster back for validation and install; NO just reports the rejection.
+/// The election branch of [`apply_consensus_result`]. YES hands the proposed steward
+/// list back for validation and install; NO just reports the rejection.
 fn apply_election_result(
     approved: bool,
     election: StewardElectionProposal,
