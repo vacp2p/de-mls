@@ -564,16 +564,8 @@ where
             || self.timing.reelection_recovered;
         let inactivity = if in_recovery {
             self.config.recovery_inactivity_duration
-        } else if self.is_epoch_steward()? {
-            // The primary steward leads: it commits at the commit-inactivity
-            // deadline.
-            self.config.commit_inactivity_duration
         } else {
-            // Backups (and non-stewards) wait an extra recovery window. In the
-            // normal case the primary's commit candidate pulls them into freeze
-            // first, so they never self-drive it; only a silent primary lets
-            // this longer deadline fire and a backup step in.
-            self.config.commit_inactivity_duration + self.config.recovery_inactivity_duration
+            self.config.commit_inactivity_duration
         };
         let Some(event) = self.check_steward_inactivity(proposal_count, inactivity) else {
             return Ok(());
