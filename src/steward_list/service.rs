@@ -11,9 +11,11 @@ use std::fmt::{Display, Formatter};
 use crate::error::ConversationError;
 use crate::steward_list::list::{StewardList, StewardListConfig};
 
-/// Steward-election retries *after* the initial attempt, before `Deadlock`
-/// escalation. So `1` = two attempts (rounds 0 and 1) total.
-pub const DEFAULT_MAX_RETRIES: u32 = 1;
+/// Default steward-election retry cap before `Deadlock` escalation (`2` = three
+/// rounds). Offline stewards are rotated past by `retry_round`, so the ladder
+/// needs room to reach a live one before Layer 3. The app sets this per group
+/// via `ConversationConfig.max_reelection_attempts`.
+pub const DEFAULT_MAX_RETRIES: u32 = 2;
 
 /// Result of [`StewardListService::propose_election`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -424,6 +426,7 @@ mod tests {
     #[test]
     fn bump_retry_increments_round_past_max() {
         let mut p = StewardListService::empty(config());
+        p.set_max_retries(1);
         p.bump_retry();
         assert_eq!(p.next_election_round(), 1);
         assert!(p.next_election_round() <= p.max_retries());

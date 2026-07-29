@@ -284,23 +284,20 @@ where
                     }
                     return Ok(self.retry_or_exhaust_recovery());
                 }
-                // `accuse_target` is `Some` only when we had approved proposals
-                // go unanswered *and* can attribute the miss to a live steward
-                // other than ourselves. Self-penalties are skipped — the
-                // node that failed to commit observes its own state directly
-                // and doesn't need to record a ScoreOp against itself.
-                let (transition_event, accused_steward) = if has_proposals {
+                // `score_target` is `Some` only when approved proposals went
+                // unanswered and the miss attributes to a live steward other
+                // than ourselves. Self-penalties are skipped — the node that
+                // failed to commit sees its own state and needn't score itself.
+                let (transition_event, scored_steward) = if has_proposals {
                     // Approved batch (and in-flight votes) survive so
                     // the recovered steward commits the same proposals
                     // once the next election lands.
                     let event = self.start_reelection();
 
-                    // Local observation → direct peer-score penalty,
-                    // no ECP round-trip. Each honest member records
-                    // the same event independently; threshold-crossing
-                    // removal still goes through SCORE_BELOW_THRESHOLD
-                    // consensus in steward.rs.
-                    let accuse_target = {
+                    // Local observation → direct peer-score penalty, recorded
+                    // the same by every honest member; a threshold crossing
+                    // still removes through SCORE_BELOW_THRESHOLD consensus.
+                    let score_target = {
                         let mls = self.mls();
                         let violation_epoch = mls.current_epoch()?;
                         let members = mls.members()?;
@@ -312,28 +309,22 @@ where
                             .filter(|id| !id.is_empty() && *id != self_member_id)
                             .map(|id| id.to_vec())
                     };
-                    let accused = accuse_target.is_some();
-                    if let Some(steward_id) = accuse_target {
-                        // Also strip the accused of recovery proposer
-                        // authority — an offline steward must not stay the
-                        // only member authorized to elect its replacement.
-                        self.queues.note_unresponsive_steward(steward_id.clone());
+                    let scored = score_target.is_some();
+                    if let Some(steward_id) = score_target {
                         self.services.scoring.apply_op(&ScoreOp {
                             member_id: steward_id,
                             event: ScoreEvent::CensorshipInactivity,
                         })?;
                     }
 
-                    (event, accused)
+                    (event, scored)
                 } else {
                     self.queues.commit_round.clear();
                     let event = self.start_working();
                     (event, false)
                 };
 
-                // A recorded censorship penalty may push the steward below
-                // threshold; sweep `members_below_threshold` to act on it.
-                if accused_steward
+                if scored_steward
                     && let Err(e) = self.check_and_initiate_score_removals(provider, signer)
                 {
                     error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze timeout)");

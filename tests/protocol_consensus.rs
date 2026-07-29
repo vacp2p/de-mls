@@ -23,7 +23,6 @@ fn manual_vote_config() -> ConversationConfig {
         commit_inactivity_duration: Duration::from_secs(2),
         freeze_duration: Duration::from_millis(20),
         voting_delay: Duration::from_millis(300),
-        election_voting_delay: Duration::from_millis(300),
         consensus_timeout: Duration::from_secs(5),
         proposal_expiration: Duration::from_secs(60),
         ..ConversationConfig::default()

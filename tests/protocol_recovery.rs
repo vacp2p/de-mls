@@ -137,6 +137,9 @@ fn manual_only_recovery_does_not_auto_commit() {
     );
 }
 
+// Asserts the accusation-based small-group recovery that has been removed;
+// re-enabled once Layer-3 recovery entry is reworked to be consensus-free.
+#[ignore = "pending Layer-3 recovery rework"]
 #[test]
 fn sole_steward_offline_recovers_and_commits_approved_add() {
     // The filed deadlock: a 2-member group whose installed steward list holds

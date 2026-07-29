@@ -3,7 +3,6 @@
 use std::time::Duration;
 
 use crate::DEFAULT_MAX_RETRIES;
-use crate::ProposalKind;
 use crate::StewardListConfig;
 use crate::protos::de_mls::messages::v1::TimingConfig;
 
@@ -27,10 +26,6 @@ pub const DEFAULT_RECOVERY_INACTIVITY_DURATION: Duration = Duration::from_secs(5
 /// Per-member window to cast a manual vote before the app auto-votes
 /// using `liveness_criteria_yes`. MUST be `< consensus_timeout`.
 pub const DEFAULT_VOTING_DELAY: Duration = Duration::from_secs(10);
-
-/// Auto-vote delay for steward-election proposals. Shorter than
-/// `DEFAULT_VOTING_DELAY` so recovery elections converge fast.
-pub const DEFAULT_ELECTION_VOTING_DELAY: Duration = Duration::from_secs(5);
 
 pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 
@@ -95,9 +90,6 @@ pub struct ConversationConfig {
     /// `voting_delay < consensus_timeout < commit_inactivity_duration`. See
     /// [`DEFAULT_VOTING_DELAY`].
     pub voting_delay: Duration,
-    /// Auto-vote delay for steward-election proposals (see
-    /// [`DEFAULT_ELECTION_VOTING_DELAY`]).
-    pub election_voting_delay: Duration,
     /// Whether silent voters count as YES at `consensus_timeout` (RFC
     /// §Creating Voting Proposal). See [`DEFAULT_LIVENESS_CRITERIA_YES`].
     /// Also used by the auto-vote timer as the cast value.
@@ -139,7 +131,6 @@ impl Default for ConversationConfig {
             pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
             max_reelection_attempts: DEFAULT_MAX_RETRIES,
             voting_delay: DEFAULT_VOTING_DELAY,
-            election_voting_delay: DEFAULT_ELECTION_VOTING_DELAY,
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
             max_consensus_sessions: DEFAULT_MAX_CONSENSUS_SESSIONS,
             commit_batch_max: DEFAULT_COMMIT_BATCH_MAX,
@@ -160,15 +151,6 @@ impl ConversationConfig {
             self.commit_inactivity_duration + self.recovery_inactivity_duration
         } else {
             self.voting_inactivity_duration
-        }
-    }
-
-    /// Auto-vote delay for the given proposal kind.
-    pub fn voting_delay_for(&self, kind: ProposalKind) -> Duration {
-        if kind.is_steward_election() {
-            self.election_voting_delay
-        } else {
-            self.voting_delay
         }
     }
 
@@ -293,22 +275,5 @@ mod tests {
         assert_eq!(config.commit_inactivity_duration, Duration::from_secs(60));
         // Non-zero field is applied.
         assert_eq!(config.freeze_duration, Duration::from_millis(250));
-    }
-
-    #[test]
-    fn voting_delay_dispatch_on_proposal_kind() {
-        let config = ConversationConfig {
-            voting_delay: Duration::from_secs(7),
-            election_voting_delay: Duration::from_secs(3),
-            ..ConversationConfig::default()
-        };
-        assert_eq!(
-            config.voting_delay_for(ProposalKind::Commit),
-            Duration::from_secs(7)
-        );
-        assert_eq!(
-            config.voting_delay_for(ProposalKind::StewardElection),
-            Duration::from_secs(3)
-        );
     }
 }

@@ -101,7 +101,7 @@ where
 
         let liveness_criteria_yes = self.config.liveness_criteria_yes;
         let consensus_timeout = self.config.consensus_timeout;
-        let voting_delay = self.config.voting_delay_for(kind);
+        let voting_delay = self.config.voting_delay;
 
         let (proposal_id, unbundled) = self.submit_proposal(
             &request,
@@ -308,14 +308,9 @@ where
 
     /// Feed a peer's vote into the local consensus session.
     ///
-    /// Late arrivals are swallowed (logged, `Ok`) so inbound dispatch keeps
-    /// draining. A vote that passes signature validation is authenticated
-    /// liveness proof for its owner, so it lifts any local unresponsive-
-    /// steward accusation — a member that comes back mid-recovery regains
-    /// proposer authority and steward candidacy.
+    /// Late arrivals are swallowed (logged, `Ok`) so inbound dispatch keeps draining.
     pub(crate) fn forward_incoming_vote(&mut self, vote: Vote) -> Result<(), ConversationError> {
         let proposal_id = vote.proposal_id;
-        let vote_owner = vote.vote_owner.clone();
         let outcome_applied_locally = self.queues.is_consensus_outcome_applied(proposal_id);
         let scope = self.conversation_id.clone();
         let now = self.clock.now().as_secs();
@@ -324,14 +319,8 @@ where
             .consensus
             .process_incoming_vote(&scope, vote, now)
         {
-            Ok(()) => {
-                self.queues.clear_unresponsive_steward(&vote_owner);
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(ConsensusError::SessionNotActive) => {
-                // Signature validation ran before the session-state check, so
-                // even a late vote proves its owner is back.
-                self.queues.clear_unresponsive_steward(&vote_owner);
                 tracing::debug!(
                     conversation = %self.conversation_id,
                     proposal_id,
@@ -361,16 +350,9 @@ where
 
     // ── Private ──────────────────────────────────────────────────────
 
-    /// Gate a new proposal on the current state and return the expected
-    /// voter count: the member set minus locally-observed unresponsive
-    /// stewards. Counting an accused-silent member as an expected voter
-    /// would make the recovery ladder's own consensus rounds unresolvable
-    /// in small groups (with two expected voters the consensus library
-    /// requires both real votes, so one offline member vetoes by silence).
-    /// The stamped count travels with the proposal, so every peer's session
-    /// runs the same math. During `Reelection` only emergency and election
-    /// proposals pass; an active emergency partial-freezes everything below
-    /// its priority.
+    /// Checks if this proposal can happen right now, and returns the number of voters.
+    /// In Reelection, only elections and emergencies are allowed;
+    /// emergencies can also block lower-priority proposals.
     fn check_proposal_allowed(&self, kind: ProposalKind) -> Result<u32, ConversationError> {
         let state = self.current_state();
 
@@ -393,11 +375,7 @@ where
             }
         }
 
-        let members = self.mls().members()?;
-        let expected = members
-            .iter()
-            .filter(|m| !self.queues.is_unresponsive_steward(m))
-            .count();
+        let expected = self.mls().members()?.len();
         Ok(expected as u32)
     }
 

@@ -15,6 +15,7 @@
 //!   the consensus scope.
 
 use std::error::Error as StdError;
+use std::time::Duration;
 
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
@@ -372,28 +373,24 @@ where
                 _ => {}
             }
         }
-        // Skip the vote request + auto-vote for fast-path proposals: the
-        // creator's bundled YES already resolved the consensus session, so peers have
-        // nothing to vote on.
+
         if expected_voters > 1 {
-            // A votable peer proposal always decodes as a
-            // `ConversationUpdateRequest`; an opaque payload can't be
-            // surfaced for a vote, so only the auto-vote drives it.
-            if let Some(request) = decoded {
-                self.emit_event(ConversationEvent::VoteRequested {
-                    proposal_id,
-                    request,
-                });
+            if let Some(conversation_update_request::Payload::StewardElection(election)) =
+                decoded.as_ref().and_then(|r| r.payload.as_ref())
+            {
+                let verdict = self.validate_election_list(election)?;
+                self.register_auto_vote(proposal_id, Duration::ZERO, verdict);
+            } else {
+                if let Some(request) = decoded {
+                    self.emit_event(ConversationEvent::VoteRequested {
+                        proposal_id,
+                        request,
+                    });
+                }
+                let delay = self.config.voting_delay;
+                let vote = self.config.liveness_criteria_yes;
+                self.register_auto_vote(proposal_id, delay, vote);
             }
-            let delay = self.config.voting_delay_for(kind);
-            let vote = self.config.liveness_criteria_yes;
-            self.register_auto_vote(proposal_id, delay, vote);
-            // The consensus library resolves a quorum short of real votes
-            // only through `handle_consensus_timeout` (silent peers weighted
-            // by the liveness criteria), and it expects the application to
-            // arm that deadline for every session — not just its own
-            // proposals. Without this, a session whose quorum needs
-            // silent-peer weighting resolves on the proposer alone.
             self.register_consensus_timeout(proposal_id, self.config.consensus_timeout);
         }
         Ok(())
@@ -442,26 +439,12 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        // The commit merged, so advance to Working FIRST: the bookkeeping below
-        // is best-effort and must not be able to strand the state machine in
-        // Selection. reset_retry too — this commit ended any retry cycle, and
-        // the unresponsive-steward accusations and recovery window with it.
         self.services.steward_list.reset_retry();
-        self.queues.clear_unresponsive_stewards();
         self.timing.reelection_recovered = false;
-        let state = self.current_state();
-        if matches!(
-            state,
-            ConversationState::Working
-                | ConversationState::Freezing
-                | ConversationState::Selection
-                | ConversationState::Reelection
-        ) {
-            let event = self.start_working();
-            self.emit_event(ConversationEvent::PhaseChange(event));
-        }
+        let event = self.start_working();
+        self.emit_event(ConversationEvent::PhaseChange(event));
 
-        let mls_members = self.mls().members().unwrap_or_default();
+        let mls_members = self.mls().members()?;
         self.sync_scoring_members(&mls_members)?;
         self.prune_pending_updates_after_commit()?;
         self.steward_list_housekeeping(provider, signer)?;

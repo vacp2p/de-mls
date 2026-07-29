@@ -1010,6 +1010,31 @@ mod tests {
         assert!(conversation.drain_events().is_empty());
     }
 
+    #[test]
+    fn validate_election_list_recomputes_from_local_members() {
+        use crate::protos::de_mls::messages::v1::StewardElectionProposal;
+        let conversation = make_conversation_working();
+        let epoch = conversation.mls().current_epoch().unwrap();
+        let honest = StewardElectionProposal {
+            proposed_stewards: vec![b"test-member-id".to_vec()],
+            election_epoch: epoch,
+            retry_round: 0,
+        };
+        assert!(
+            conversation.validate_election_list(&honest).unwrap(),
+            "the honest list matches the local members"
+        );
+        let forged = StewardElectionProposal {
+            proposed_stewards: vec![b"not-a-member".to_vec()],
+            election_epoch: epoch,
+            retry_round: 0,
+        };
+        assert!(
+            !conversation.validate_election_list(&forged).unwrap(),
+            "a list off the local members is rejected"
+        );
+    }
+
     /// `register_auto_vote` is idempotent — re-registering the same
     /// `proposal_id` replaces the previous entry rather than stacking.
     /// Caller relies on this when re-anchoring an auto-vote on a `Deferred`
