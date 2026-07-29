@@ -17,7 +17,7 @@ use openmls_basic_credential::SignatureKeyPair;
 
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
 use de_mls::{Conversation, ConversationState, MockClock};
-use de_mls::{ConversationEvent, ScoringConfig};
+use de_mls::{ConversationEvent, ScoringConfig, StewardListConfig};
 
 use common::{
     MintedKeyPackage, TestProvider, make_scoring, mint_key_package, test_credential,
@@ -32,6 +32,8 @@ type TestConversation = Conversation<DefaultConsensusPlugin, InMemoryPeerScoreSt
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+const CHARLIE: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
+const DAVE: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";
 
 /// The shared, conversation-agnostic state an integrator keeps once: its
 /// credential + signer, the consensus backend, the identity, and one OpenMLS
@@ -98,6 +100,7 @@ fn create_builds_a_working_steward_session_without_user() {
         integrator.clock.clone(),
         integrator.app_id(),
         de_mls::ConversationConfig::default(),
+        &[],
     )
     .expect("create");
 
@@ -140,6 +143,7 @@ fn join_completes_in_one_call() {
         alice.clock.clone(),
         alice.app_id(),
         fast_config(),
+        &[],
     )
     .expect("create");
 
@@ -221,4 +225,176 @@ fn join_completes_in_one_call() {
     assert_eq!(joined.members().expect("members").len(), 2);
     let (epoch, _) = joined.epoch_and_retry().expect("epoch");
     assert_eq!(epoch, 1, "joiner lands on the post-add epoch");
+}
+
+#[test]
+fn create_with_members_seeds_initial_members_at_genesis() {
+    let alice = Integrator::new();
+    let bob = Integrator::with_key(BOB);
+    let charlie = Integrator::with_key(CHARLIE);
+
+    // The initial members mint their key packages into their own providers and
+    // hand the bytes to the creator.
+    let bob_kp = bob.mint_key_package();
+    let charlie_kp = charlie.mint_key_package();
+
+    let config = de_mls::ConversationConfig {
+        steward_list: StewardListConfig::new(1, 5).unwrap(),
+        ..fast_config()
+    };
+
+    let creator: TestConversation = Conversation::create(
+        "genesis",
+        alice.member_id.member_id_bytes(),
+        &alice.provider,
+        alice.credential.clone(),
+        &test_mls_group_config(),
+        &alice.signer,
+        &alice.consensus,
+        alice.scoring(),
+        alice.clock.clone(),
+        alice.app_id(),
+        config.clone(),
+        &[
+            (bob_kp.member_id(), bob_kp.as_bytes()),
+            (charlie_kp.member_id(), charlie_kp.as_bytes()),
+        ],
+    )
+    .expect("create with members");
+
+    // Genesis is immediate: at epoch 1 with all three members, no polling.
+    let (epoch, _) = creator.epoch_and_retry().expect("epoch");
+    assert_eq!(epoch, 1, "the genesis commit landed at creation");
+    assert_eq!(creator.members().expect("members").len(), 3);
+    assert_eq!(creator.state(), ConversationState::Working);
+    assert!(
+        creator.is_steward(),
+        "the creator stewards the genesis epoch"
+    );
+
+    // Exactly one welcome, addressing both initial members.
+    let welcome = creator
+        .drain_events()
+        .into_iter()
+        .find_map(|e| match e {
+            ConversationEvent::WelcomeReady {
+                welcome,
+                minted_locally: true,
+            } => Some(welcome),
+            _ => None,
+        })
+        .expect("genesis mints one welcome");
+    assert_eq!(
+        welcome.joiner_identities.len(),
+        2,
+        "one welcome admits both initial members"
+    );
+
+    // Each initial member opens the single welcome and lands at epoch 1, Working,
+    // and a steward — the property genesis beats the incremental baseline on.
+    for member in [&bob, &charlie] {
+        let joined: TestConversation = Conversation::join(
+            member.member_id.member_id_bytes(),
+            &member.provider,
+            &member.signer,
+            &welcome.welcome_bytes,
+            &welcome.conversation_sync_bytes,
+            &member.consensus,
+            member.scoring(),
+            member.clock.clone(),
+            member.app_id(),
+            config.clone(),
+        )
+        .expect("join")
+        .expect("welcome addresses the member");
+        assert_eq!(joined.id(), "genesis");
+        assert_eq!(joined.state(), ConversationState::Working);
+        assert_eq!(joined.members().expect("members").len(), 3);
+        let (e, _) = joined.epoch_and_retry().expect("epoch");
+        assert_eq!(e, 1, "member lands on the genesis epoch");
+        assert!(joined.is_steward(), "an initial member stewards genesis");
+    }
+}
+
+#[test]
+fn create_with_members_founds_a_subset_steward_group() {
+    let alice = Integrator::new();
+    let bob = Integrator::with_key(BOB);
+    let charlie = Integrator::with_key(CHARLIE);
+    let dave = Integrator::with_key(DAVE);
+
+    let bob_kp = bob.mint_key_package();
+    let charlie_kp = charlie.mint_key_package();
+    let dave_kp = dave.mint_key_package();
+
+    // sn_max = 2 with 4 members → the steward list is a genuine 2-of-4 subset.
+    let config = de_mls::ConversationConfig {
+        steward_list: StewardListConfig::new(1, 2).unwrap(),
+        ..fast_config()
+    };
+
+    let creator: TestConversation = Conversation::create(
+        "genesis-subset",
+        alice.member_id.member_id_bytes(),
+        &alice.provider,
+        alice.credential.clone(),
+        &test_mls_group_config(),
+        &alice.signer,
+        &alice.consensus,
+        alice.scoring(),
+        alice.clock.clone(),
+        alice.app_id(),
+        config.clone(),
+        &[
+            (bob_kp.member_id(), bob_kp.as_bytes()),
+            (charlie_kp.member_id(), charlie_kp.as_bytes()),
+            (dave_kp.member_id(), dave_kp.as_bytes()),
+        ],
+    )
+    .expect("create with members");
+
+    let (epoch, _) = creator.epoch_and_retry().expect("epoch");
+    assert_eq!(epoch, 1);
+    assert_eq!(creator.members().expect("members").len(), 4);
+
+    let welcome = creator
+        .drain_events()
+        .into_iter()
+        .find_map(|e| match e {
+            ConversationEvent::WelcomeReady {
+                welcome,
+                minted_locally: true,
+            } => Some(welcome),
+            _ => None,
+        })
+        .expect("genesis mints one welcome");
+    assert_eq!(welcome.joiner_identities.len(), 3);
+
+    let mut convos = vec![creator];
+    for member in [&bob, &charlie, &dave] {
+        let joined: TestConversation = Conversation::join(
+            member.member_id.member_id_bytes(),
+            &member.provider,
+            &member.signer,
+            &welcome.welcome_bytes,
+            &welcome.conversation_sync_bytes,
+            &member.consensus,
+            member.scoring(),
+            member.clock.clone(),
+            member.app_id(),
+            config.clone(),
+        )
+        .expect("join")
+        .expect("welcome addresses the member");
+        assert_eq!(joined.members().expect("members").len(), 4);
+        convos.push(joined);
+    }
+
+    // Exactly two of the four members steward — the deterministic 2-of-4 subset
+    // the genesis install picked, seen consistently through the shared sync.
+    let steward_count = convos.iter().filter(|c| c.is_steward()).count();
+    assert_eq!(
+        steward_count, 2,
+        "sn_max = 2 founds a 2-member steward subset"
+    );
 }

@@ -177,6 +177,7 @@ impl Member {
             integ.clock.clone(),
             integ.app_id(),
             config.clone(),
+            &[],
         )
         .expect("create conversation");
         Self {
