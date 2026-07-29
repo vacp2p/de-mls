@@ -57,11 +57,12 @@ pub const HARNESS_EPOCH: Duration = Duration::from_secs(1_750_000_000);
 /// handful of rounds.
 pub fn fast_config() -> ConversationConfig {
     ConversationConfig {
-        commit_inactivity_duration: Duration::from_millis(50),
+        commit_batch_window: Duration::from_millis(50),
         freeze_duration: Duration::from_millis(20),
         voting_delay: Duration::from_millis(30),
         consensus_timeout: Duration::from_millis(150),
         proposal_expiration: Duration::from_millis(2000),
+        backup_takeover_window: Duration::from_millis(150),
         ..ConversationConfig::default()
     }
 }

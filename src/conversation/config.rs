@@ -6,9 +6,9 @@ use crate::DEFAULT_MAX_RETRIES;
 use crate::StewardListConfig;
 use crate::protos::de_mls::messages::v1::TimingConfig;
 
-/// Wall-clock window the steward waits before batching approved proposals
-/// into a commit (RFC §Inactivity Timer #1, "Commit inactivity").
-pub const DEFAULT_COMMIT_INACTIVITY_DURATION: Duration = Duration::from_secs(60);
+/// Window that batches approved proposals from the first one; at its end every
+/// steward mints a commit candidate (RFC §Inactivity Timer #1).
+pub const DEFAULT_COMMIT_BATCH_WINDOW: Duration = Duration::from_secs(60);
 
 /// Lifetime of a voting proposal before it expires unvoted
 /// (RFC §Creating Voting Proposal).
@@ -19,9 +19,13 @@ pub const DEFAULT_PROPOSAL_EXPIRATION: Duration = Duration::from_secs(600);
 pub const DEFAULT_CONSENSUS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Inactivity window during Layer 2 / Layer 3 recovery
-/// (RFC §Inactivity Timer #2, "Recovery inactivity"). Typically shorter
-/// than `commit_inactivity_duration` so retries don't burn a full epoch.
-pub const DEFAULT_RECOVERY_INACTIVITY_DURATION: Duration = Duration::from_secs(5);
+/// (RFC §Inactivity Timer #2, "Recovery inactivity").
+/// Typically shorter than `commit_batch_window`.
+pub const DEFAULT_RETRY_WINDOW: Duration = Duration::from_secs(5);
+
+/// How long a backup steward waits for a silent epoch steward before covering
+/// its propose / sync-resend (RFC §Inactivity Timer #3).
+pub const DEFAULT_BACKUP_TAKEOVER_WINDOW: Duration = Duration::from_secs(20);
 
 /// Per-member window to cast a manual vote before the app auto-votes
 /// using `liveness_criteria_yes`. MUST be `< consensus_timeout`.
@@ -59,25 +63,28 @@ pub const DEFAULT_RECOVERY_MAX_ROUNDS: u32 = 0;
 /// library-owned) as the nested [`steward_list`](Self::steward_list).
 #[derive(Debug, Clone)]
 pub struct ConversationConfig {
-    /// RFC §Inactivity Timer #1: how long the epoch steward has to commit
-    /// approved proposals before honest members enter the commit round.
-    pub commit_inactivity_duration: Duration,
-    /// Freeze window before deterministic selection.
-    ///
-    /// Defaults to `commit_inactivity_duration / 2`.
+    /// How long approved proposals are batched before every steward mints a
+    /// commit candidate (RFC §Inactivity Timer #1).
+    pub commit_batch_window: Duration,
+    /// How long the freeze collects commit candidates before one is
+    /// deterministically selected (RFC §Freezing).
     pub freeze_duration: Duration,
-    /// RFC §Inactivity Timer #2: shorter inactivity window applied during
-    /// Layer 2 / Layer 3 recovery so retries don't burn a full epoch.
-    pub recovery_inactivity_duration: Duration,
-    /// RFC §Inactivity Timer #3 (voting): how long a backup steward waits before
-    /// re-driving buffered membership updates that haven't opened a consensus
-    /// session. `Duration::ZERO` (the default) derives it from
-    /// `commit_inactivity_duration + recovery_inactivity_duration`; set a
-    /// non-zero value to tune it independently. See [`Self::voting_inactivity_window`].
-    pub voting_inactivity_duration: Duration,
-    /// How long a proposal stays active before expiring (RFC §Creating Voting Proposal).
+    /// Per-round window for reelection rotation and recovery — short so a retry
+    /// doesn't burn a full epoch (RFC §Inactivity Timer #2).
+    pub retry_window: Duration,
+    /// How long a backup steward waits for a silent epoch steward (to propose a
+    /// buffered update, or answer a sync-resend) before covering it
+    /// (RFC §Inactivity Timer #3).
+    pub backup_takeover_window: Duration,
+    /// How long a proposal stays open before it expires unvoted
+    /// (RFC §Creating Voting Proposal).
     pub proposal_expiration: Duration,
+    /// How long a vote session waits for ⌈2n/3⌉ real votes before the
+    /// silent-vote fallback (RFC §Voting).
     pub consensus_timeout: Duration,
+    /// How long a member waits before auto-casting `liveness_criteria_yes`
+    /// (invariant: `voting_delay < consensus_timeout < commit_batch_window`).
+    pub voting_delay: Duration,
     /// Max age (in epochs) of a buffered membership update. An entry first
     /// seen at epoch `E` is dropped once `current_epoch - E` exceeds this
     /// value (so it survives epochs `E..=E + max_age` inclusive).
@@ -85,11 +92,6 @@ pub struct ConversationConfig {
     /// Max steward-election retries within one MLS epoch before the app
     /// surfaces "reelection stuck". `0` disables retry entirely.
     pub max_reelection_attempts: u32,
-    /// Per-member window to cast a manual vote before the app auto-casts
-    /// using `liveness_criteria_yes`. Relationship invariant:
-    /// `voting_delay < consensus_timeout < commit_inactivity_duration`. See
-    /// [`DEFAULT_VOTING_DELAY`].
-    pub voting_delay: Duration,
     /// Whether silent voters count as YES at `consensus_timeout` (RFC
     /// §Creating Voting Proposal). See [`DEFAULT_LIVENESS_CRITERIA_YES`].
     /// Also used by the auto-vote timer as the cast value.
@@ -121,11 +123,10 @@ pub struct ConversationConfig {
 impl Default for ConversationConfig {
     fn default() -> Self {
         Self {
-            commit_inactivity_duration: DEFAULT_COMMIT_INACTIVITY_DURATION,
-            freeze_duration: DEFAULT_COMMIT_INACTIVITY_DURATION / 2,
-            recovery_inactivity_duration: DEFAULT_RECOVERY_INACTIVITY_DURATION,
-            // Zero → derived from commit + recovery (see `voting_inactivity_window`).
-            voting_inactivity_duration: Duration::ZERO,
+            commit_batch_window: DEFAULT_COMMIT_BATCH_WINDOW,
+            freeze_duration: DEFAULT_COMMIT_BATCH_WINDOW / 2,
+            retry_window: DEFAULT_RETRY_WINDOW,
+            backup_takeover_window: DEFAULT_BACKUP_TAKEOVER_WINDOW,
             proposal_expiration: DEFAULT_PROPOSAL_EXPIRATION,
             consensus_timeout: DEFAULT_CONSENSUS_TIMEOUT,
             pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
@@ -143,33 +144,16 @@ impl Default for ConversationConfig {
 }
 
 impl ConversationConfig {
-    /// Effective RFC §Inactivity Timer #3 window: the explicit
-    /// `voting_inactivity_duration` when set, otherwise
-    /// `commit_inactivity_duration + recovery_inactivity_duration`.
-    pub fn voting_inactivity_window(&self) -> Duration {
-        if self.voting_inactivity_duration.is_zero() {
-            self.commit_inactivity_duration + self.recovery_inactivity_duration
-        } else {
-            self.voting_inactivity_duration
-        }
-    }
-
     /// Overwrite the duration fields from a wire [`TimingConfig`]. Used on
     /// the joiner side when applying `ConversationSync`. Non-timing fields
     /// (`liveness_criteria_yes`, `pending_update_max_epochs`) stay untouched.
     pub fn apply_timing(&mut self, timing: &TimingConfig) {
-        apply_nonzero_ms(
-            &mut self.commit_inactivity_duration,
-            timing.commit_inactivity_duration_ms,
-        );
+        apply_nonzero_ms(&mut self.commit_batch_window, timing.commit_batch_window_ms);
         apply_nonzero_ms(&mut self.freeze_duration, timing.freeze_duration_ms);
+        apply_nonzero_ms(&mut self.retry_window, timing.retry_window_ms);
         apply_nonzero_ms(
-            &mut self.recovery_inactivity_duration,
-            timing.recovery_inactivity_duration_ms,
-        );
-        apply_nonzero_ms(
-            &mut self.voting_inactivity_duration,
-            timing.voting_inactivity_duration_ms,
+            &mut self.backup_takeover_window,
+            timing.backup_takeover_window_ms,
         );
         apply_nonzero_ms(&mut self.proposal_expiration, timing.proposal_expiration_ms);
         apply_nonzero_ms(&mut self.consensus_timeout, timing.consensus_timeout_ms);
@@ -190,10 +174,10 @@ fn apply_nonzero_ms(field: &mut Duration, wire_ms: u64) {
 impl From<&ConversationConfig> for TimingConfig {
     fn from(config: &ConversationConfig) -> Self {
         Self {
-            commit_inactivity_duration_ms: config.commit_inactivity_duration.as_millis() as u64,
+            commit_batch_window_ms: config.commit_batch_window.as_millis() as u64,
             freeze_duration_ms: config.freeze_duration.as_millis() as u64,
-            recovery_inactivity_duration_ms: config.recovery_inactivity_duration.as_millis() as u64,
-            voting_inactivity_duration_ms: config.voting_inactivity_duration.as_millis() as u64,
+            retry_window_ms: config.retry_window.as_millis() as u64,
+            backup_takeover_window_ms: config.backup_takeover_window.as_millis() as u64,
             proposal_expiration_ms: config.proposal_expiration.as_millis() as u64,
             consensus_timeout_ms: config.consensus_timeout.as_millis() as u64,
         }
@@ -207,10 +191,10 @@ mod tests {
     #[test]
     fn timing_config_round_trip() {
         let original = ConversationConfig {
-            commit_inactivity_duration: Duration::from_millis(100),
+            commit_batch_window: Duration::from_millis(100),
             freeze_duration: Duration::from_millis(200),
-            recovery_inactivity_duration: Duration::from_millis(300),
-            voting_inactivity_duration: Duration::from_millis(600),
+            retry_window: Duration::from_millis(300),
+            backup_takeover_window: Duration::from_millis(600),
             proposal_expiration: Duration::from_millis(400),
             consensus_timeout: Duration::from_millis(500),
             ..ConversationConfig::default()
@@ -218,61 +202,33 @@ mod tests {
         let timing = TimingConfig::from(&original);
         let mut applied = ConversationConfig::default();
         applied.apply_timing(&timing);
-        assert_eq!(
-            applied.commit_inactivity_duration,
-            Duration::from_millis(100)
-        );
+        assert_eq!(applied.commit_batch_window, Duration::from_millis(100));
         assert_eq!(applied.freeze_duration, Duration::from_millis(200));
-        assert_eq!(
-            applied.recovery_inactivity_duration,
-            Duration::from_millis(300)
-        );
+        assert_eq!(applied.retry_window, Duration::from_millis(300));
         assert_eq!(applied.proposal_expiration, Duration::from_millis(400));
         assert_eq!(applied.consensus_timeout, Duration::from_millis(500));
-        assert_eq!(
-            applied.voting_inactivity_duration,
-            Duration::from_millis(600)
-        );
-    }
-
-    /// Zero (the default) derives the window from commit + recovery; a non-zero
-    /// value overrides it.
-    #[test]
-    fn voting_inactivity_window_derives_when_zero() {
-        let derived = ConversationConfig {
-            commit_inactivity_duration: Duration::from_secs(60),
-            recovery_inactivity_duration: Duration::from_secs(5),
-            voting_inactivity_duration: Duration::ZERO,
-            ..ConversationConfig::default()
-        };
-        assert_eq!(derived.voting_inactivity_window(), Duration::from_secs(65));
-
-        let explicit = ConversationConfig {
-            voting_inactivity_duration: Duration::from_secs(12),
-            ..derived
-        };
-        assert_eq!(explicit.voting_inactivity_window(), Duration::from_secs(12));
+        assert_eq!(applied.backup_takeover_window, Duration::from_millis(600));
     }
 
     #[test]
     fn apply_timing_ignores_zero_durations() {
         let mut config = ConversationConfig {
             consensus_timeout: Duration::from_secs(30),
-            commit_inactivity_duration: Duration::from_secs(60),
+            commit_batch_window: Duration::from_secs(60),
             ..ConversationConfig::default()
         };
         let timing = TimingConfig {
             consensus_timeout_ms: 0,
-            commit_inactivity_duration_ms: 0,
+            commit_batch_window_ms: 0,
             freeze_duration_ms: 250,
-            recovery_inactivity_duration_ms: 0,
-            voting_inactivity_duration_ms: 0,
+            retry_window_ms: 0,
+            backup_takeover_window_ms: 0,
             proposal_expiration_ms: 0,
         };
         config.apply_timing(&timing);
         // Zero fields keep their prior values.
         assert_eq!(config.consensus_timeout, Duration::from_secs(30));
-        assert_eq!(config.commit_inactivity_duration, Duration::from_secs(60));
+        assert_eq!(config.commit_batch_window, Duration::from_secs(60));
         // Non-zero field is applied.
         assert_eq!(config.freeze_duration, Duration::from_millis(250));
     }

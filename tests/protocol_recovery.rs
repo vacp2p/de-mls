@@ -20,7 +20,7 @@ fn recovery_auto_mint_converges_on_one_commit() {
     // soon as recovery opens, so the test exercises the multi-minter path.
     let cfg = ConversationConfig {
         recovery_auto_commit_delay: Some(Duration::ZERO),
-        recovery_inactivity_duration: Duration::from_millis(50),
+        retry_window: Duration::from_millis(50),
         ..fast_config()
     };
     // sn_max = 1: a single steward, so muting it leaves no online committer and
@@ -97,7 +97,7 @@ fn manual_only_recovery_does_not_auto_commit() {
     // so the stuck removal must not auto-commit on its own.
     let cfg = ConversationConfig {
         recovery_auto_commit_delay: None,
-        recovery_inactivity_duration: Duration::from_millis(50),
+        retry_window: Duration::from_millis(50),
         ..fast_config()
     };
     let mut h = TestHarness::<3>::bootstrap(
@@ -154,8 +154,8 @@ fn sole_steward_offline_recovers_and_commits_approved_add() {
     // short recovery window — waiting out a second full commit-inactivity
     // epoch would blow the budget.
     let cfg = ConversationConfig {
-        commit_inactivity_duration: Duration::from_secs(20),
-        recovery_inactivity_duration: Duration::from_millis(100),
+        commit_batch_window: Duration::from_secs(20),
+        retry_window: Duration::from_millis(100),
         ..fast_config()
     };
     let mut h = TestHarness::<3>::start(
@@ -208,7 +208,7 @@ fn silent_election_proposer_hands_authority_to_next_member() {
     // proposer authority to the next online member until the stuck removal
     // lands.
     let cfg = ConversationConfig {
-        recovery_inactivity_duration: Duration::from_millis(50),
+        retry_window: Duration::from_millis(50),
         ..fast_config()
     };
     let mut h = TestHarness::<4>::bootstrap(

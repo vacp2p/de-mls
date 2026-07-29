@@ -97,13 +97,13 @@ pub(crate) struct Timing {
     /// Anchor for the backup-steward proposal takeover: set when an
     /// unproposed buffered membership update first appears with no live
     /// proposal for it. A backup steward proposes the buffered update once
-    /// this is older than the recovery window — the epoch steward had its
+    /// this is older than `backup_takeover_window` — the epoch steward had its
     /// chance and stayed silent. Cleared when the buffer is drained or nothing
     /// is left to propose.
     pub(crate) buffered_propose_anchor: Option<Timestamp>,
     /// Anchor for the backup-steward sync re-send takeover: set when a backup
     /// first sees an unanswered `ConversationSyncRequest`. A backup re-sends the
-    /// sync once this is older than the recovery window — the epoch steward
+    /// sync once this is older than `backup_takeover_window` — the epoch steward
     /// stayed silent. Cleared when a `ConversationSync` is observed or the
     /// takeover no longer applies.
     pub(crate) sync_resend_anchor: Option<Timestamp>,
@@ -583,9 +583,9 @@ where
                     return None;
                 }
                 let dur = if self.is_in_recovery_mode() {
-                    cfg.recovery_inactivity_duration
+                    cfg.retry_window
                 } else {
-                    cfg.commit_inactivity_duration
+                    cfg.commit_batch_window
                 };
                 Some(anchor + dur)
             }
@@ -1239,7 +1239,7 @@ mod tests {
             make_conversation_with_steward(steward_service_member());
         // A grace long enough that it won't elapse during the test.
         conversation.config.recovery_auto_commit_delay = Some(Duration::from_secs(3600));
-        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.config.retry_window = Duration::ZERO;
         conversation.enter_recovery_mode();
         conversation.start_freezing();
         let anchor = conversation.clock.timestamp();
@@ -1282,7 +1282,7 @@ mod tests {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_member());
         conversation.config.recovery_auto_commit_delay = Some(Duration::ZERO);
-        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.config.retry_window = Duration::ZERO;
         // 0 would spin forever without the empty-queue exit.
         conversation.config.recovery_max_rounds = 0;
         conversation.enter_recovery_mode();
@@ -1315,7 +1315,7 @@ mod tests {
         // Manual-only (no auto-mint) with real pending work: rounds produce no
         // commit and stay on the retry path.
         conversation.config.recovery_auto_commit_delay = None;
-        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.config.retry_window = Duration::ZERO;
         conversation.config.recovery_max_rounds = 3;
         conversation.enter_recovery_mode();
         conversation.start_freezing();
@@ -1359,7 +1359,7 @@ mod tests {
         let (mut conversation, provider, signer) =
             make_conversation_with_steward(steward_service_member());
         conversation.config.recovery_auto_commit_delay = None;
-        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.config.retry_window = Duration::ZERO;
         conversation.config.recovery_max_rounds = 0; // retry forever (default)
         conversation.enter_recovery_mode();
         conversation.start_freezing();
@@ -1395,7 +1395,7 @@ mod tests {
         // Manual-only with pending work and a 1-round stop line: the first
         // commit-less round must exhaust recovery.
         conversation.config.recovery_auto_commit_delay = None;
-        conversation.config.recovery_inactivity_duration = Duration::ZERO;
+        conversation.config.retry_window = Duration::ZERO;
         conversation.config.recovery_max_rounds = 1;
         conversation.enter_recovery_mode();
         conversation.start_freezing();

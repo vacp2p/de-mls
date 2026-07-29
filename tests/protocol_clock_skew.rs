@@ -30,7 +30,7 @@ const SKEW: Duration = Duration::from_secs(3);
 /// nothing commits over the peer that never saw the proposal.
 fn skew_config() -> ConversationConfig {
     ConversationConfig {
-        commit_inactivity_duration: Duration::from_secs(2),
+        commit_batch_window: Duration::from_secs(2),
         freeze_duration: Duration::from_millis(20),
         voting_delay: Duration::from_millis(300),
         consensus_timeout: Duration::from_millis(500),

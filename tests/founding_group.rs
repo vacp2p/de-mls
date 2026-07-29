@@ -30,10 +30,10 @@ const STEP: Duration = Duration::from_millis(50);
 
 /// A config whose commit-inactivity window is long enough to measure, while
 /// every other gate stays sub-second. Preserves the documented ordering
-/// invariant `voting_delay < consensus_timeout < commit_inactivity_duration`.
+/// invariant `voting_delay < consensus_timeout < commit_batch_window`.
 fn measurable_commit_window() -> ConversationConfig {
     ConversationConfig {
-        commit_inactivity_duration: Duration::from_secs(2),
+        commit_batch_window: Duration::from_secs(2),
         freeze_duration: Duration::from_millis(20),
         voting_delay: Duration::from_millis(30),
         consensus_timeout: Duration::from_millis(150),
@@ -88,9 +88,9 @@ fn founding_adds_batch_into_one_commit_after_one_inactivity_window() {
     );
 
     assert!(
-        landed_at >= config.commit_inactivity_duration,
+        landed_at >= config.commit_batch_window,
         "the founding commit waited a full inactivity window ({:?}), landed at {landed_at:?}",
-        config.commit_inactivity_duration,
+        config.commit_batch_window,
     );
 
     let welcomes = h.member(0).welcome_readys();
