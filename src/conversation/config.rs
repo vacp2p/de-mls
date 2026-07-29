@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::DEFAULT_MAX_RETRIES;
 use crate::StewardListConfig;
+use crate::error::ConversationError;
 use crate::protos::de_mls::messages::v1::TimingConfig;
 
 /// Window that batches approved proposals from the first one; at its end every
@@ -82,8 +83,9 @@ pub struct ConversationConfig {
     /// How long a vote session waits for ⌈2n/3⌉ real votes before the
     /// silent-vote fallback (RFC §Voting).
     pub consensus_timeout: Duration,
-    /// How long a member waits before auto-casting `liveness_criteria_yes`
-    /// (invariant: `voting_delay < consensus_timeout < commit_batch_window`).
+    /// How long a member waits before auto-casting `liveness_criteria_yes`.
+    /// Must be `< consensus_timeout`, or the auto-vote never fires before the
+    /// session closes (enforced by [`validate`](Self::validate)).
     pub voting_delay: Duration,
     /// Max age (in epochs) of a buffered membership update. An entry first
     /// seen at epoch `E` is dropped once `current_epoch - E` exceeds this
@@ -158,6 +160,41 @@ impl ConversationConfig {
         apply_nonzero_ms(&mut self.proposal_expiration, timing.proposal_expiration_ms);
         apply_nonzero_ms(&mut self.consensus_timeout, timing.consensus_timeout_ms);
     }
+
+    /// Reject a config whose timers can't hold together. Enforces only the
+    /// relations the library's own logic requires — not how any window relates
+    /// to the network delay Δ, which the library can't know. Sizing each window
+    /// above Δ is the integrator's call; a window below it degrades (e.g. two
+    /// stewards forking one add) rather than failing here.
+    pub fn validate(&self) -> Result<(), ConversationError> {
+        // The auto-vote fires at `voting_delay`; the session resolves at
+        // `consensus_timeout`. If the delay isn't shorter, the auto-vote never
+        // fires before the session closes.
+        if self.voting_delay >= self.consensus_timeout {
+            return Err(ConversationError::InvalidConfig(
+                "voting_delay must be < consensus_timeout".to_owned(),
+            ));
+        }
+        // A proposal must outlive its own voting session, or it expires before
+        // the vote can resolve.
+        if self.proposal_expiration <= self.consensus_timeout {
+            return Err(ConversationError::InvalidConfig(
+                "proposal_expiration must be > consensus_timeout".to_owned(),
+            ));
+        }
+        // A zero collection window finalizes on whatever is in hand — no freeze.
+        if self.freeze_duration.is_zero() {
+            return Err(ConversationError::InvalidConfig(
+                "freeze_duration must be non-zero".to_owned(),
+            ));
+        }
+        if self.steward_list.sn_min < 1 || self.steward_list.sn_min > self.steward_list.sn_max {
+            return Err(ConversationError::InvalidConfig(
+                "steward_list requires 1 <= sn_min <= sn_max".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Overwrite `field` with `wire_ms` unless it is zero.
@@ -231,5 +268,85 @@ mod tests {
         assert_eq!(config.commit_batch_window, Duration::from_secs(60));
         // Non-zero field is applied.
         assert_eq!(config.freeze_duration, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn default_config_is_valid() {
+        assert!(ConversationConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn millisecond_test_config_is_valid() {
+        let config = ConversationConfig {
+            voting_delay: Duration::from_millis(50),
+            consensus_timeout: Duration::from_millis(250),
+            commit_batch_window: Duration::from_millis(500),
+            freeze_duration: Duration::from_millis(500),
+            proposal_expiration: Duration::from_millis(4000),
+            ..ConversationConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_voting_delay_not_below_consensus_timeout() {
+        let config = ConversationConfig {
+            voting_delay: Duration::from_secs(30),
+            consensus_timeout: Duration::from_secs(30),
+            ..ConversationConfig::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConversationError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn validate_allows_consensus_timeout_above_commit_batch_window() {
+        // Voting and batching are sequential phases, so a consensus_timeout
+        // larger than commit_batch_window is a valid (if less-batched) choice.
+        let config = ConversationConfig {
+            voting_delay: Duration::from_millis(30),
+            consensus_timeout: Duration::from_millis(150),
+            commit_batch_window: Duration::from_millis(50),
+            ..ConversationConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zero_freeze_duration() {
+        let config = ConversationConfig {
+            freeze_duration: Duration::ZERO,
+            ..ConversationConfig::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConversationError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_proposal_expiration_not_above_consensus_timeout() {
+        let config = ConversationConfig {
+            consensus_timeout: Duration::from_secs(5),
+            proposal_expiration: Duration::from_secs(5),
+            ..ConversationConfig::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConversationError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_bad_steward_bounds() {
+        let mut config = ConversationConfig::default();
+        config.steward_list.sn_min = 3;
+        config.steward_list.sn_max = 2;
+        assert!(matches!(
+            config.validate(),
+            Err(ConversationError::InvalidConfig(_))
+        ));
     }
 }
