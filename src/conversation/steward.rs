@@ -572,10 +572,7 @@ where
             "initiating steward election"
         );
 
-        // Elections are conversation-wide decisions — broadcast unbundled
-        // so the responsible proposer still votes via the vote request.
-        self.initiate_proposal(provider, request, CreatorVote::Deferred, signer)?;
-
+        self.initiate_proposal(provider, request, CreatorVote::Yes, signer)?;
         Ok(())
     }
 

@@ -101,7 +101,7 @@ where
 
         let liveness_criteria_yes = self.config.liveness_criteria_yes;
         let consensus_timeout = self.config.consensus_timeout;
-        let voting_delay = self.config.voting_delay_for(kind);
+        let voting_delay = self.config.voting_delay;
 
         let (proposal_id, unbundled) = self.submit_proposal(
             &request,

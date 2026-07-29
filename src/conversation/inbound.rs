@@ -15,6 +15,7 @@
 //!   the consensus scope.
 
 use std::error::Error as StdError;
+use std::time::Duration;
 
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
@@ -372,28 +373,24 @@ where
                 _ => {}
             }
         }
-        // Skip the vote request + auto-vote for fast-path proposals: the
-        // creator's bundled YES already resolved the consensus session, so peers have
-        // nothing to vote on.
+
         if expected_voters > 1 {
-            // A votable peer proposal always decodes as a
-            // `ConversationUpdateRequest`; an opaque payload can't be
-            // surfaced for a vote, so only the auto-vote drives it.
-            if let Some(request) = decoded {
-                self.emit_event(ConversationEvent::VoteRequested {
-                    proposal_id,
-                    request,
-                });
+            if let Some(conversation_update_request::Payload::StewardElection(election)) =
+                decoded.as_ref().and_then(|r| r.payload.as_ref())
+            {
+                let verdict = self.validate_election_list(election)?;
+                self.register_auto_vote(proposal_id, Duration::ZERO, verdict);
+            } else {
+                if let Some(request) = decoded {
+                    self.emit_event(ConversationEvent::VoteRequested {
+                        proposal_id,
+                        request,
+                    });
+                }
+                let delay = self.config.voting_delay;
+                let vote = self.config.liveness_criteria_yes;
+                self.register_auto_vote(proposal_id, delay, vote);
             }
-            let delay = self.config.voting_delay_for(kind);
-            let vote = self.config.liveness_criteria_yes;
-            self.register_auto_vote(proposal_id, delay, vote);
-            // The consensus library resolves a quorum short of real votes
-            // only through `handle_consensus_timeout` (silent peers weighted
-            // by the liveness criteria), and it expects the application to
-            // arm that deadline for every session — not just its own
-            // proposals. Without this, a session whose quorum needs
-            // silent-peer weighting resolves on the proposer alone.
             self.register_consensus_timeout(proposal_id, self.config.consensus_timeout);
         }
         Ok(())
