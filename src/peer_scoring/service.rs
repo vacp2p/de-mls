@@ -51,7 +51,7 @@ impl<S: PeerScoreStorage> PeerScoringService<S> {
     /// Apply an incremental delta to an already-tracked member. Unlike
     /// `add_member` / `apply_snapshot`, this never creates an entry — a
     /// stale op must not resurrect a removed member. The coordinator
-    /// `add_member`s first; a drop means roster and scores are out of sync.
+    /// `add_member`s first; a drop means member set and scores are out of sync.
     pub fn apply_op(&mut self, op: &ScoreOp) -> Result<(), ConversationError> {
         let Some(current) = self.storage.get(&op.member_id).map_err(storage_err)? else {
             tracing::debug!(
@@ -121,8 +121,8 @@ impl<S: PeerScoreStorage> PeerScoringService<S> {
             .collect())
     }
 
-    /// Complete roster of tracked members with their scores (includes
-    /// default-scored members). Used for roster diffing and UI reads.
+    /// Complete set of tracked members with their scores (includes
+    /// default-scored members). Used for member-set diffing and UI reads.
     pub fn all_members_with_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, ConversationError> {
         self.storage.all_scores().map_err(storage_err)
     }

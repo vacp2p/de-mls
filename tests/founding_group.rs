@@ -120,11 +120,12 @@ fn founding_adds_batch_into_one_commit_after_one_inactivity_window() {
 
 /// Immediately after the founding commit, the freshly-added friends are not
 /// yet settled, so the creator remains the sole steward for the whole of
-/// epoch 1. Pins the property a genesis path would change by marking founders
-/// settled — and shows the creator's epoch-1 stewardship is a *consequence* of
+/// epoch 1. Pins the property a genesis path would change by marking the
+/// initial members settled — and shows the creator's epoch-1 stewardship is a
+/// *consequence* of
 /// the settled rule, not a guarantee of creation.
 #[test]
-fn founders_are_not_stewards_in_the_epoch_they_arrive() {
+fn initial_members_are_not_stewards_in_the_epoch_they_arrive() {
     let mut h = TestHarness::<4>::start(
         [ALICE, BOB, CHARLIE, DAVE],
         "settle",
@@ -159,7 +160,7 @@ fn founders_are_not_stewards_in_the_epoch_they_arrive() {
 /// Five members in the tree, four of whom have never run. The creator adds a
 /// sixth. Pins what the four silent leaves contribute to that vote.
 #[test]
-fn silent_founders_are_counted_as_voters_on_the_next_add() {
+fn silent_initial_members_are_counted_as_voters_on_the_next_add() {
     let mut h = TestHarness::<6>::start(
         [ALICE, BOB, CHARLIE, DAVE, ERIN, FRANK],
         "ghost",
@@ -210,7 +211,7 @@ fn silent_founders_are_counted_as_voters_on_the_next_add() {
 /// The two-person case: me and one friend who never opens the welcome. Pins
 /// what the pair can still do — the most common real-world founding shape.
 #[test]
-fn a_single_silent_founder_and_the_next_add() {
+fn a_single_silent_initial_member_and_the_next_add() {
     let mut h = TestHarness::<3>::start(
         [ALICE, BOB, CHARLIE],
         "pair",
@@ -251,7 +252,7 @@ fn a_single_silent_founder_and_the_next_add() {
 /// so it still mints commits, but nothing it sends arrives.
 ///
 /// The guarantee this test pins is recovery — the survivors land the add
-/// without the creator, so a group does not die with its founder.
+/// without the creator, so a group does not die with its creator.
 ///
 /// Known gap, documented but not asserted: the isolated creator merged its own
 /// lost commit and advanced onto a private branch. Both branches report the
@@ -283,7 +284,7 @@ fn survivors_recover_when_the_sole_steward_is_partitioned() {
     assert!(h.member(0).is_epoch_steward(), "creator stewards epoch 1");
     assert!(
         h.converged(),
-        "the founded group is one group to begin with"
+        "the created group is one group to begin with"
     );
 
     h.mute(0);

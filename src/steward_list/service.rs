@@ -1,5 +1,5 @@
-//! [`StewardListService`] — the library-owned, SHA256-deterministic steward
-//! roster for one conversation.
+//! [`StewardListService`] — the library-owned, SHA256-deterministic steward list
+//! for one conversation.
 //!
 //! It owns the steward-list protocol: generating and validating the
 //! deterministic list, rotating the epoch/backup steward, proposing elections,
@@ -60,7 +60,7 @@ pub struct StewardListSnapshot {
     max_retries: u32,
 }
 
-/// Per-conversation steward roster. Eligibility flows in via `Fn(&[u8]) -> bool`
+/// Per-conversation steward list. Eligibility flows in via `Fn(&[u8]) -> bool`
 /// on position queries.
 #[derive(Debug)]
 pub struct StewardListService {
@@ -76,7 +76,7 @@ pub struct StewardListService {
 }
 
 impl StewardListService {
-    /// Empty roster — no list until the library installs one (the creator's
+    /// Empty — no list until the library installs one (the creator's
     /// bootstrap list or a joiner's `ConversationSync`). The deterministic-sort
     /// salt is seeded by the library via [`Self::set_conversation_id`] once the
     /// conversation id is known, so the integrator builds this without it.
@@ -469,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn steward_members_returns_filtered_roster() {
+    fn steward_members_returns_filtered_list() {
         let mut p = StewardListService::empty(config());
         let mems = members(&[1, 2, 3]);
         p.install_list(0, &mems, 3, 0).unwrap();
@@ -595,7 +595,7 @@ mod tests {
 
     #[test]
     fn snapshot_of_empty_service_errors() {
-        // A roster with no installed list has nothing to snapshot.
+        // A service with no installed list has nothing to snapshot.
         let p = StewardListService::empty(config());
         assert!(p.snapshot().is_err());
     }

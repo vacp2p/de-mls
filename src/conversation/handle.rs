@@ -61,7 +61,7 @@ pub(crate) struct ConversationServices<Cp: ConsensusPlugin, Sc: PeerScoreStorage
     pub(crate) mls: MlsService,
     /// Per-conversation peer-score tracker.
     pub(crate) scoring: PeerScoringService<Sc>,
-    /// Per-conversation steward roster.
+    /// Per-conversation steward list.
     pub(crate) steward_list: StewardListService,
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Built from the
@@ -807,7 +807,7 @@ mod tests {
         Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, crate::MockClock>;
 
     /// Build a conversation with a real creator-side MLS service and the given
-    /// steward roster, returning it alongside the provider that backs the MLS
+    /// steward list, returning it alongside the provider that backs the MLS
     /// group and the signer that seeded it (for paths that sign — the guard
     /// tests early-return before then).
     fn make_conversation_with_steward(

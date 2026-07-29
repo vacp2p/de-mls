@@ -1,7 +1,7 @@
-//! Steward list: the library-owned deterministic roster and rotation queries.
+//! Steward list: the library-owned deterministic list and rotation queries.
 //!
 //! - `list` — [`StewardList`] value and [`StewardListConfig`]
-//! - `service` — [`StewardListService`], the stateful per-conversation roster
+//! - `service` — [`StewardListService`], the stateful per-conversation steward list
 
 mod list;
 mod service;

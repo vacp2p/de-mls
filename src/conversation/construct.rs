@@ -20,8 +20,10 @@ use hashgraph_like_consensus::{events::ConsensusEventBus, service::ConsensusServ
 use crate::{
     ConsensusPlugin, Conversation, ConversationConfig, ConversationError, ConversationEvent,
     ConversationQueues, ConversationServices, ConversationStateMachine, PeerScoreStorage,
-    PeerScoringService, StewardListService, WallClock, consensus::outcome_bus::OutcomeBus,
-    mls_crypto::MlsService,
+    PeerScoringService, StewardListService, WallClock,
+    consensus::outcome_bus::OutcomeBus,
+    mls_crypto::{MlsCommitInput, MlsService},
+    protos::de_mls::messages::v1::MemberWelcome,
 };
 
 impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
@@ -30,14 +32,12 @@ where
     Sc: PeerScoreStorage,
     Wc: WallClock,
 {
-    /// Create a brand-new conversation we steward. Starts in `Working` with the
-    /// local member installed as sole steward at epoch 0. The library seeds a
-    /// fresh MLS group into `provider` (which it does not retain) from
-    /// `credential` and `ciphersuite`. `member_id` names the local member — the
-    /// opaque id bytes the protocol matches on. `clock` moves in and becomes
-    /// the conversation's time source — every deadline is measured against
-    /// it; a shared clock (e.g. [`crate::MockClock`]) stays drivable through
-    /// a clone the caller keeps.
+    /// Create a new conversation as the steward.
+    /// If you want a single-steward group, do not pass any `initial_members`.
+    /// If you want to start with a group of members,  provide their
+    ///  `(member_id, key_package_bytes)` in `initial_members` so all are added in a
+    ///  single genesis commit—group starts at epoch 1 with all present.
+    /// In both cases, the creator is installed as a steward and the group is ready to use.
     #[allow(clippy::too_many_arguments)]
     pub fn create<Pr>(
         conversation_id: &str,
@@ -51,6 +51,7 @@ where
         clock: Wc,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
+        initial_members: &[(&[u8], &[u8])],
     ) -> Result<Self, ConversationError>
     where
         Pr: OpenMlsProvider,
@@ -63,7 +64,7 @@ where
             group_config,
             signer,
         )?;
-        Self::assemble(
+        let mut conversation = Self::assemble(
             conversation_id,
             mls,
             scoring,
@@ -73,7 +74,76 @@ where
             config,
             true,
             member_id,
-        )
+        )?;
+        conversation.seed_initial_members(provider, signer, initial_members)?;
+        Ok(conversation)
+    }
+
+    /// Admit all initial members in a single genesis commit,
+    /// merge inline (no proposal or vote), install the steward list, and emit a welcome.
+    /// Their join epochs are unset, making them eligible stewards from epoch 1.
+    fn seed_initial_members<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+        initial_members: &[(&[u8], &[u8])],
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if initial_members.is_empty() {
+            return Ok(());
+        }
+        let updates: Vec<MlsCommitInput> = initial_members
+            .iter()
+            .map(|(_, kp)| MlsCommitInput::Add(kp.to_vec()))
+            .collect();
+        let joiner_identities: Vec<Vec<u8>> =
+            initial_members.iter().map(|(id, _)| id.to_vec()).collect();
+
+        // Genesis is the creator's unilateral seed: build the batched add-commit
+        // and merge it inline, skipping the consensus/freeze lifecycle.
+        let artifacts = self
+            .services
+            .mls
+            .create_commit_candidate(provider, signer, &updates)?;
+        self.services.mls.merge_own_commit(provider)?;
+
+        // Score the members and install the steward list over the settled members
+        // at the merged epoch. `install_list` sorts and takes the top-sn, so this
+        // handles an initial set larger than `sn_max` (a real subset) too.
+        for (id, _) in initial_members {
+            self.services.scoring.add_member(id)?;
+        }
+        let (epoch, members) = {
+            let mls = self.mls();
+            (mls.current_epoch()?, mls.members()?)
+        };
+        let settled = self.queues.settled_members(&members, epoch);
+        let sn = self
+            .services
+            .steward_list
+            .config()
+            .compute_list_size(settled.len());
+        self.services
+            .steward_list
+            .install_list(epoch, &settled, sn, 0)?;
+
+        // Deliver the single welcome: attach the ConversationSync, emit
+        // WelcomeReady, and broadcast it for relay.
+        if let Some(welcome_bytes) = artifacts.welcome {
+            self.deliver_welcome(
+                provider,
+                signer,
+                MemberWelcome {
+                    welcome_bytes,
+                    conversation_sync_bytes: Vec::new(),
+                    joiner_identities,
+                },
+            );
+        }
+        Ok(())
     }
 
     /// Build a fully-joined conversation from a welcome: the library opens the
@@ -155,7 +225,7 @@ where
         steward_list.set_conversation_id(conversation_id.as_bytes());
         steward_list.set_max_retries(config.max_reelection_attempts);
         // Creator path: bootstrap the list with self as sole steward at
-        // epoch 0. Joiner path leaves the roster empty until `ConversationSync`.
+        // epoch 0. Joiner path leaves the member set empty until `ConversationSync`.
         if is_creation {
             steward_list.install_list(0, std::slice::from_ref(&self_member_id_bytes), 1, 0)?;
             scoring.add_member(&self_member_id_bytes)?;

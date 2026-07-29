@@ -87,7 +87,7 @@ fn assert_no_election_storm<const N: usize>(h: &TestHarness<N>) {
 #[test]
 fn backup_steward_proposes_buffered_joiner_when_epoch_steward_silent() {
     // sn_max = 5 ≥ membership at every size here, so the steward list is always
-    // the full roster and growing back to 3 fires no subset election — the test
+    // the full member set and growing back to 3 fires no subset election — the test
     // isolates the backup *proposal* takeover, not election.
     let cfg = ConversationConfig {
         backup_takeover_window: Duration::from_millis(100),

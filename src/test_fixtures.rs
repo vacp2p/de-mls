@@ -76,12 +76,12 @@ pub(crate) fn make_creator_mls(member_id: &[u8]) -> (TestMls, TestProvider, Sign
     (mls, provider, signer)
 }
 
-/// Steward roster where the local member is NOT a steward (no list installed).
+/// Steward list where the local member is NOT a steward (no list installed).
 pub(crate) fn steward_service_member() -> StewardListService {
     StewardListService::empty(StewardListConfig::new(1, 5).unwrap())
 }
 
-/// Steward roster where `member_id` IS the sole steward.
+/// Steward list where `member_id` IS the sole steward.
 pub(crate) fn steward_service_steward(member_id: &[u8]) -> StewardListService {
     let mut service = StewardListService::empty(StewardListConfig::new(1, 5).unwrap());
     service

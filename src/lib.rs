@@ -60,7 +60,7 @@ pub mod consensus;
 /// Peer-scoring plug-in: vocabulary, traits, and reference service.
 pub mod peer_scoring;
 
-/// Steward-list plug-in: deterministic roster and rotation queries.
+/// Steward-list plug-in: deterministic list and rotation queries.
 pub mod steward_list;
 
 /// Commit round candidate processing, selection, and commit application.

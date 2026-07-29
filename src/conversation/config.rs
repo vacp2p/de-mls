@@ -115,7 +115,7 @@ pub struct ConversationConfig {
     /// giving up and emitting [`crate::ConversationEvent::RecoveryExhausted`].
     /// `0` retries forever. See [`DEFAULT_RECOVERY_MAX_ROUNDS`].
     pub recovery_max_rounds: u32,
-    /// Steward-list size bounds (`sn_min` / `sn_max`). The roster itself is
+    /// Steward-list size bounds (`sn_min` / `sn_max`). The list itself is
     /// library-owned; this is the only steward knob the integrator sets.
     pub steward_list: StewardListConfig,
 }
