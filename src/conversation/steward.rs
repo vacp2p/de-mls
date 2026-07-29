@@ -451,15 +451,35 @@ where
 
     // ── Crate-internal ───────────────────────────────────────────────
 
+    /// Checks if a proposed steward-election list matches what we'd build
+    /// from our current settled members at `election_epoch`.
+    /// Rejects any list that's biased or tampered. Our local view is safe to use
+    /// since membership doesn't change during an election.
+    pub(crate) fn validate_election_list(
+        &self,
+        election: &StewardElectionProposal,
+    ) -> Result<bool, ConversationError> {
+        let epoch = election.election_epoch;
+        let members = self.mls().members()?;
+        let pool: Vec<Vec<u8>> = members
+            .iter()
+            .filter(|m| self.queues.is_settled(m, epoch))
+            .cloned()
+            .collect();
+        self.services.steward_list.validate_proposed(
+            &election.proposed_stewards,
+            epoch,
+            &pool,
+            election.retry_round,
+        )
+    }
+
     /// Submit a steward-election proposal. Only the deterministic responsible
     /// proposer actually submits; others no-op, so this is safe to call from
     /// every poll tick without double-proposing.
     ///
-    /// `recovery = true` bypasses the list-exhaustion gate and filters
-    /// queued-removal targets out of the candidate pool — those entries are
-    /// already in `approved_proposals` thanks to
-    /// [`crate::apply_consensus_result`], so `has_approved_removal`
-    /// catches them without an explicit exclude.
+    /// `recovery = true` bypasses the list-exhaustion gate so recovery can run a
+    /// fresh election even when the prior list is spent.
     pub(crate) fn initiate_steward_election<Pr>(
         &mut self,
         provider: &Pr,
@@ -482,24 +502,12 @@ where
                 return Ok(());
             }
 
-            // Build the candidate pool: settled MLS members minus queued
-            // removals and locally-observed unresponsive stewards (recovery
-            // only — non-recovery elections trust the current MLS roster).
-            // Unsettled (just-joined) members are excluded — they may not
-            // have attached MLS and can't serve as stewards yet.
             let candidate_pool: Vec<Vec<u8>> = mls_members
                 .iter()
                 .filter(|m| self.queues.is_settled(m, epoch))
-                .filter(|m| {
-                    !(recovery
-                        && (self.queues.has_approved_removal(m)
-                            || self.queues.is_unresponsive_steward(m)))
-                })
                 .cloned()
                 .collect();
-            let pool_set: std::collections::HashSet<&[u8]> =
-                candidate_pool.iter().map(Vec::as_slice).collect();
-            let eligible = |c: &[u8]| pool_set.contains(c);
+            let eligible = |c: &[u8]| !(recovery && self.queues.has_approved_removal(c));
 
             match self.services.steward_list.propose_election(
                 epoch,
@@ -601,12 +609,9 @@ where
         Ok(())
     }
 
-    /// Whether this member is the deterministic proposer that should auto-file
-    /// the `Deadlock` ECP when re-election exhausts — the responsible proposer
-    /// for the current retry round, restricted to candidates that are
-    /// MLS-present, not queued for removal, and not locally observed as
-    /// unresponsive. Gates the automatic escalation so it doesn't file one ECP
-    /// per member.
+    /// Returns true if this member is the designated proposer to auto-file the
+    /// `Deadlock` ECP after all re-election retries, ensuring only one member
+    /// escalates per round.
     pub(crate) fn is_deadlock_proposer(&self) -> Result<bool, ConversationError> {
         let mls = self.mls();
         let mls_members = mls.members()?;
@@ -620,11 +625,7 @@ where
             .responsible_proposer(
                 self.services.steward_list.next_election_round(),
                 &mls_members,
-                |c: &[u8]| {
-                    mls_set.contains(c)
-                        && !conversation_ref.has_approved_removal(c)
-                        && !conversation_ref.is_unresponsive_steward(c)
-                },
+                |c: &[u8]| mls_set.contains(c) && !conversation_ref.has_approved_removal(c),
             )
             .is_some_and(|proposer| proposer == self_id))
     }

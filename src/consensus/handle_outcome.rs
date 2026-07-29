@@ -185,14 +185,7 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        // The proposal carries no separate candidate pool: `proposed_stewards`
-        // is the full set the proposer sorted.
-        let is_valid = self.services.steward_list.validate_proposed(
-            &election.proposed_stewards,
-            election.election_epoch,
-            &election.proposed_stewards,
-            election.retry_round,
-        )?;
+        let is_valid = self.validate_election_list(&election)?;
         if !is_valid {
             info!(
                 conversation = %self.conversation_id,

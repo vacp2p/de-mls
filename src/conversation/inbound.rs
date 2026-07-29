@@ -442,26 +442,12 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        // The commit merged, so advance to Working FIRST: the bookkeeping below
-        // is best-effort and must not be able to strand the state machine in
-        // Selection. reset_retry too — this commit ended any retry cycle, and
-        // the unresponsive-steward accusations and recovery window with it.
         self.services.steward_list.reset_retry();
-        self.queues.clear_unresponsive_stewards();
         self.timing.reelection_recovered = false;
-        let state = self.current_state();
-        if matches!(
-            state,
-            ConversationState::Working
-                | ConversationState::Freezing
-                | ConversationState::Selection
-                | ConversationState::Reelection
-        ) {
-            let event = self.start_working();
-            self.emit_event(ConversationEvent::PhaseChange(event));
-        }
+        let event = self.start_working();
+        self.emit_event(ConversationEvent::PhaseChange(event));
 
-        let mls_members = self.mls().members().unwrap_or_default();
+        let mls_members = self.mls().members()?;
         self.sync_scoring_members(&mls_members)?;
         self.prune_pending_updates_after_commit()?;
         self.steward_list_housekeeping(provider, signer)?;
