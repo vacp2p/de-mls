@@ -215,6 +215,7 @@ where
         is_creation: bool,
         member_id: &[u8],
     ) -> Result<Self, ConversationError> {
+        config.validate()?;
         let self_member_id_bytes = member_id.to_vec();
         let queues = ConversationQueues::new(conversation_id, config.dedup_window);
 

@@ -50,6 +50,9 @@ pub enum ConversationError {
     #[error("Invalid config size")]
     InvalidConfigSize,
 
+    #[error("Invalid conversation config: {0}")]
+    InvalidConfig(String),
+
     #[error("Non-MLS proposals found in approved queue (ids: {proposal_ids:?})")]
     UnexpectedNonMlsProposals { proposal_ids: Vec<u32> },
 }
