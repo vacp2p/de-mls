@@ -276,5 +276,4 @@ mod tests {
         // Non-zero field is applied.
         assert_eq!(config.freeze_duration, Duration::from_millis(250));
     }
-
 }
