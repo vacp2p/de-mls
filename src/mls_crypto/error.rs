@@ -73,7 +73,7 @@ pub enum MlsError {
     #[error("No pending staged commit for group: {0}")]
     NoPendingStagedCommit(String),
 
-    #[error("Remove proposal references leaf index {0} with no active credential")]
+    #[error("Leaf index {0} resolves to no active member in the group")]
     UnknownLeafIndex(u32),
 }
 

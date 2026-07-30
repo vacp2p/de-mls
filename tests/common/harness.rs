@@ -232,6 +232,12 @@ impl Member {
         self.integ.member_id.member_id_bytes()
     }
 
+    /// This member's MLS signature public key — the key its leaf is bound to.
+    /// Ground truth for asserting what peers resolve via `member_signature_key`.
+    pub fn signing_pubkey(&self) -> Vec<u8> {
+        self.integ.signer.to_public_vec()
+    }
+
     /// Reelection retry round; `0` while no recovery election is in flight or
     /// the member hasn't joined.
     pub fn retry_round(&self) -> u32 {
@@ -360,6 +366,14 @@ impl Member {
             .and_then(|c| c.members().ok())
             .map(|m| m.len())
             .unwrap_or(0)
+    }
+
+    /// Signature key this member's tree binds to `member_id`, or `None` when
+    /// `member_id` is not a current member (or this member hasn't joined).
+    pub fn member_signature_key(&self, member_id: &[u8]) -> Option<Vec<u8>> {
+        self.convo
+            .as_ref()
+            .and_then(|c| c.member_signature_key(member_id))
     }
 
     /// Every [`ConversationEvent`] this member has emitted, in order.

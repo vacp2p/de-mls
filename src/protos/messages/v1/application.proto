@@ -17,8 +17,6 @@ message AppMessage {
     ProposalAdded proposal_added = 7;
     CommitCandidate commit_candidate = 8;
     ConversationSync conversation_sync = 9;
-    // Plaintext broadcast of a freshly minted welcome so every member —
-    // not just the committing steward — can deliver it to the joiners.
     MemberWelcome member_welcome = 10;
     EventMembershipChange membership_change = 11;
     ConversationSyncRequest conversation_sync_request = 12;
@@ -34,7 +32,6 @@ message ConversationMessage {
   bytes message = 1;
   bytes sender = 2;
   string conversation_id = 3;
-  bytes sender_credential = 4;
 }
 
 message EventMembershipChange {

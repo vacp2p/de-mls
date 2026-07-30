@@ -104,7 +104,7 @@ where
     //    rogue MLS proposals on the app subtopic from polluting state.
     let Some(DecryptedMessage {
         payload: app_bytes,
-        sender,
+        member,
     }) = mls.decrypt_application_only(provider, payload)?
     else {
         tracing::debug!(
@@ -119,19 +119,14 @@ where
     // Per-variant pre-checks; whatever survives converges on the `try_into`
     // conversion below.
     match &mut app_msg.payload {
-        // Stamp the MLS-authenticated sender (the verified leaf credential
-        // content) onto conversation messages.
-        Some(app_message::Payload::ConversationMessage(cm)) => {
-            cm.sender_credential = sender.clone();
-        }
         // Fast-path proposals must originate from the self-removal target.
         Some(app_message::Payload::Proposal(proposal))
-            if !authorize_fast_path_proposal(proposal, &sender) =>
+            if !authorize_fast_path_proposal(proposal, &member.member_id) =>
         {
             warn!(
                 conversation = conversation.name(),
                 proposal_id = proposal.proposal_id,
-                sender = ?sender,
+                sender = ?member.member_id,
                 owner = ?proposal.proposal_owner,
                 "fast-path proposal rejected: sender is not the self-removal target"
             );
@@ -140,7 +135,9 @@ where
         // A sync re-send request: the MLS-authenticated sender is the
         // requester, so capture it here rather than trust a wire field.
         Some(app_message::Payload::ConversationSyncRequest(_)) => {
-            return Ok(ProcessResult::ConversationSyncRequested { requester: sender });
+            return Ok(ProcessResult::ConversationSyncRequested {
+                requester: member.member_id,
+            });
         }
         // Drop BanRequests whose target isn't in the conversation — saves a
         // useless consensus round.

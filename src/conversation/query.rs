@@ -95,6 +95,12 @@ where
         Ok(self.mls().members()?)
     }
 
+    /// Signature public key bound to `member_id`'s MLS leaf, or `None` if it is
+    /// not a current member.
+    pub fn member_signature_key(&self, member_id: &[u8]) -> Option<Vec<u8>> {
+        self.mls().member_signature_key(member_id)
+    }
+
     pub fn member_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, ConversationError> {
         self.services.scoring.all_members_with_scores()
     }
