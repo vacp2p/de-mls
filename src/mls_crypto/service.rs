@@ -20,13 +20,14 @@ use openmls::group::{
 use openmls::key_packages::KeyPackageIn;
 use openmls::prelude::{
     ContentType, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, ProcessedMessageContent,
-    ProtocolMessage, ProtocolVersion,
+    ProtocolMessage, ProtocolVersion, Sender,
 };
 use openmls_traits::storage::StorageProvider;
 use openmls_traits::{OpenMlsProvider, signatures::Signer};
 use prost::Message;
 use tracing::warn;
 
+use crate::mls_crypto::types::MemberIdentity;
 use crate::{
     Extensions, GroupContext,
     mls_crypto::{
@@ -500,15 +501,39 @@ impl MlsService {
         }
 
         let processed = group.process_message(provider, protocol_message)?;
-        let sender_id = processed.credential().serialized_content().to_vec();
+
+        let (member_id, signature_key) = match processed.sender() {
+            Sender::Member(leaf_index) => {
+                let m = group
+                    .member_at(*leaf_index)
+                    .ok_or(MlsError::UnknownLeafIndex(leaf_index.u32()))?;
+
+                (m.credential.serialized_content().to_vec(), m.signature_key)
+            }
+            _ => return Ok(None),
+        };
 
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(app) => Ok(Some(DecryptedMessage {
                 payload: app.into_bytes(),
-                sender: sender_id,
+                member: MemberIdentity {
+                    member_id,
+                    signature_key,
+                },
             })),
             _ => Ok(None),
         }
+    }
+
+    /// The signature public key bound to `member_id`'s current leaf, or `None`
+    /// if no current member carries that credential identity. Assumes member-id
+    /// uniqueness (the same invariant [`Self::is_member`] and [`Self::members`]
+    /// rely on); with duplicate identities it returns the first leaf's key.
+    pub fn member_signature_key(&self, member_id: &[u8]) -> Option<Vec<u8>> {
+        self.group
+            .members()
+            .find(|m| m.credential.serialized_content() == member_id)
+            .map(|m| m.signature_key)
     }
 
     /// Peek a wire message's outer kind without processing or signature-checking
@@ -531,7 +556,7 @@ impl MlsService {
 }
 
 #[cfg(test)]
-mod stage_preserves_own_tests {
+mod service_tests {
     use super::*;
     use crate::test_fixtures::{TEST_SUITE, TestProvider, make_creator_mls};
     use openmls::credentials::{BasicCredential, CredentialWithKey};

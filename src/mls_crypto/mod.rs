@@ -15,6 +15,6 @@ mod types;
 pub use error::MlsError;
 pub use service::MlsService;
 pub use types::{
-    CommitArtifacts, DecryptedMessage, MlsCommitInput, MlsMessageKind, MlsProposalOutput,
-    StagedCandidateResult,
+    CommitArtifacts, DecryptedMessage, MemberIdentity, MlsCommitInput, MlsMessageKind,
+    MlsProposalOutput, StagedCandidateResult,
 };

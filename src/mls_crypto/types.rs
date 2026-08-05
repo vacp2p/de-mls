@@ -30,12 +30,21 @@ pub enum MlsMessageKind {
     Other,
 }
 
+/// The sender of a decrypted message, drawn from its MLS leaf: the
+/// `signature_key` MLS verified signed this message, and the `member_id`
+/// that is `mls_member.credential.serialized_content()`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemberIdentity {
+    pub member_id: Vec<u8>,
+    pub signature_key: Vec<u8>,
+}
+
 /// A decrypted inbound application message: the plaintext `payload` and the
-/// `sender`'s MLS-authenticated leaf credential.
+/// `member` whose `signature_key` signed it.
 #[derive(Clone, Debug)]
 pub struct DecryptedMessage {
     pub payload: Vec<u8>,
-    pub sender: Vec<u8>,
+    pub member: MemberIdentity,
 }
 
 /// Outcome of staging a remote commit candidate.
