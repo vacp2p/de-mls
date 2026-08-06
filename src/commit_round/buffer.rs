@@ -1,9 +1,11 @@
 //! Commit-round candidate buffer: the per-epoch set of commit candidates the
 //! round collects before selection, and the outcome of a buffering attempt.
 
+use prost::Message;
+
 use crate::{
     CommitHash, NoopReason, ProcessResult, compute_commit_hash,
-    protos::de_mls::messages::v1::CommitCandidate,
+    protos::de_mls::messages::v1::{AppMessage, CommitCandidate},
 };
 
 /// Commit-round candidate buffer for deterministic selection: the candidates
@@ -64,6 +66,14 @@ impl CommitRoundBuffer {
         self.candidates.iter().any(|c| c.is_local_candidate)
     }
 
+    /// Wire bytes of our own buffered candidate, ready to rebroadcast, or
+    /// `None` when we hold no local candidate.
+    pub fn local_candidate_bytes(&self) -> Option<Vec<u8>> {
+        let candidate = self.candidates.iter().find(|c| c.is_local_candidate)?;
+        let msg: AppMessage = candidate.candidate_msg.clone().into();
+        Some(msg.encode_to_vec())
+    }
+
     /// Discard all buffered candidates.
     pub fn clear(&mut self) {
         self.candidates.clear();
@@ -114,5 +124,45 @@ impl CommitBufferOutcome {
             Self::DuplicateHash => ProcessResult::Noop(NoopReason::DuplicateBufferedHash),
             Self::CapReached => ProcessResult::Noop(NoopReason::CandidateBufferFull),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(commit_byte: u8) -> CommitCandidate {
+        CommitCandidate {
+            conversation_id: b"g".to_vec(),
+            mls_proposals: vec![vec![0xAB; 8]],
+            commit_message: vec![commit_byte; 32],
+            steward_member_id: vec![0x01],
+        }
+    }
+
+    #[test]
+    fn local_candidate_bytes_offers_only_our_own_candidate() {
+        let mut buffer = CommitRoundBuffer::default();
+        assert!(
+            buffer.local_candidate_bytes().is_none(),
+            "an empty buffer has nothing to resend"
+        );
+
+        // A remote candidate is not ours to rebroadcast.
+        buffer.add(candidate(0x01), false, None, Vec::new(), 1, 4);
+        assert!(
+            buffer.local_candidate_bytes().is_none(),
+            "a remote candidate must not be offered for rebroadcast"
+        );
+
+        // Our own candidate comes back as the AppMessage-wrapped wire bytes.
+        let ours = candidate(0x02);
+        buffer.add(ours.clone(), true, None, Vec::new(), 1, 4);
+        let expected: AppMessage = ours.into();
+        assert_eq!(
+            buffer.local_candidate_bytes(),
+            Some(expected.encode_to_vec()),
+            "resend must reproduce the identical wire bytes"
+        );
     }
 }
