@@ -477,6 +477,21 @@ where
         self.mint_and_broadcast_candidate(provider, signer)
     }
 
+    /// Rebroadcast our own commit candidate for the current round instead of
+    /// building a new one — a steward's remedy when its candidate was lost in
+    /// transport. A fresh build would draw new path secrets and fork the round;
+    /// resending replays the same bytes. Needs no provider or signer. `true` if
+    /// a candidate was held and rebroadcast, `false` if we have none.
+    pub fn resend_commit(&self) -> bool {
+        match self.queues.commit_round.local_candidate_bytes() {
+            Some(payload) => {
+                self.broadcast(payload);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Finalize the active commit round.
     pub(crate) fn finalize_commit_round<Pr>(
         &mut self,
@@ -1208,6 +1223,43 @@ mod tests {
             matches!(err, ConversationError::NoProposals),
             "recovery must relax the steward gate, got {err:?}"
         );
+    }
+
+    #[test]
+    fn resend_commit_rebroadcasts_the_held_candidate() {
+        let (mut conversation, _provider, _signer) =
+            make_conversation_with_steward(steward_service_steward(b"test-member-id"));
+
+        // No candidate built yet: nothing to resend, nothing broadcast.
+        assert!(!conversation.resend_commit(), "no held candidate to resend");
+        assert!(conversation.drain_outbound().is_empty());
+
+        // Seed our own candidate into the round, as building one would.
+        let candidate = CommitCandidate {
+            conversation_id: b"g".to_vec(),
+            mls_proposals: vec![vec![0x01; 8]],
+            commit_message: vec![0x02; 32],
+            steward_member_id: b"test-member-id".to_vec(),
+        };
+        let epoch = conversation.mls().current_epoch().unwrap();
+        conversation
+            .queues
+            .commit_round
+            .add(candidate.clone(), true, None, Vec::new(), epoch, 4);
+
+        // Resend puts the AppMessage-wrapped candidate back on the wire.
+        assert!(conversation.resend_commit(), "held candidate is resent");
+        let out = conversation.drain_outbound();
+        assert_eq!(out.len(), 1, "exactly one rebroadcast");
+        let expected: AppMessage = candidate.into();
+        assert_eq!(out[0].payload, expected.encode_to_vec());
+
+        // The candidate stays buffered, so resend can be called again.
+        assert!(
+            conversation.resend_commit(),
+            "candidate still held after resend"
+        );
+        assert_eq!(conversation.drain_outbound().len(), 1);
     }
 
     #[test]
