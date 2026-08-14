@@ -4,7 +4,7 @@ use hashgraph_like_consensus::{
 };
 
 use crate::{
-    ConversationError, ScoreEvent, ScoreOp,
+    ConversationError, Member, ScoreEvent, ScoreOp,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, ConversationSync,
         ConversationSyncRequest, ConversationUpdateRequest, EmergencyCriteriaProposal,
@@ -17,8 +17,10 @@ use crate::{
 /// directly and dispatches the side effects.
 #[derive(Debug, Clone)]
 pub enum ProcessResult {
-    /// Decrypted application message ready to deliver to the UI.
-    AppMessage(Box<AppMessage>),
+    /// Decrypted application message, paired with its MLS-authenticated sender
+    /// as an OpenMLS [`Member`] (credential + signing key + leaf), ready to
+    /// deliver to the UI.
+    AppMessage(Box<AppMessage>, Member),
 
     /// Consensus proposal from a peer — forward to the consensus service.
     Proposal(Box<Proposal>),
@@ -247,12 +249,6 @@ impl TryFrom<AppMessage> for ProcessResult {
     type Error = ConversationError;
     fn try_from(value: AppMessage) -> Result<Self, Self::Error> {
         match &value.payload {
-            Some(app_message::Payload::ConversationMessage(_)) => {
-                Ok(ProcessResult::AppMessage(Box::new(value)))
-            }
-            Some(app_message::Payload::MembershipChange(_)) => {
-                Ok(ProcessResult::AppMessage(Box::new(value)))
-            }
             Some(app_message::Payload::Proposal(proposal)) => {
                 Ok(ProcessResult::Proposal(Box::new(proposal.clone())))
             }

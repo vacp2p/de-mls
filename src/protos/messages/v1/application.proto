@@ -30,8 +30,7 @@ message BanRequest {
 
 message ConversationMessage {
   bytes message = 1;
-  bytes sender = 2;
-  string conversation_id = 3;
+  string conversation_id = 2;
 }
 
 message EventMembershipChange {

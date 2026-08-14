@@ -64,7 +64,6 @@ where
 
         let app_msg: AppMessage = ConversationMessage {
             message,
-            sender: self.self_member_id.to_vec(),
             conversation_id: self.conversation_id.clone(),
         }
         .into();

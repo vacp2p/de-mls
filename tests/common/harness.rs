@@ -120,12 +120,12 @@ impl Integrator {
     }
 }
 
-/// A captured inbound chat message: the decrypted body plus the sender's
-/// opaque member-id bytes.
+/// A captured inbound chat message: the decrypted body plus the MLS-authenticated
+/// sender as a [`de_mls::Member`] (credential + signing key).
 #[derive(Debug, Clone)]
 pub struct ReceivedChat {
     pub body: Vec<u8>,
-    pub sender: Vec<u8>,
+    pub sender: de_mls::Member,
 }
 
 /// One protocol participant: integrator state + its `Conversation` (absent
@@ -408,11 +408,15 @@ impl Member {
         self.events
             .iter()
             .filter_map(|e| match e {
-                ConversationEvent::ConversationMessage(AppMessage {
-                    payload: Some(app_message::Payload::ConversationMessage(cm)),
-                }) => Some(ReceivedChat {
+                ConversationEvent::ConversationMessage {
+                    message:
+                        AppMessage {
+                            payload: Some(app_message::Payload::ConversationMessage(cm)),
+                        },
+                    sender,
+                } => Some(ReceivedChat {
                     body: cm.message.clone(),
-                    sender: cm.sender.clone(),
+                    sender: sender.clone(),
                 }),
                 _ => None,
             })

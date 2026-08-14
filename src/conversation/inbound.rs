@@ -151,6 +151,17 @@ where
         }
         _ => {}
     }
+
+    // Chat and membership-change messages carry the MLS-authenticated sender
+    // (its verified leaf) so the integrator attributes them without trusting a
+    // wire field.
+    if matches!(
+        app_msg.payload,
+        Some(app_message::Payload::ConversationMessage(_))
+            | Some(app_message::Payload::MembershipChange(_))
+    ) {
+        return Ok(ProcessResult::AppMessage(Box::new(app_msg), member));
+    }
     app_msg.try_into()
 }
 
@@ -228,8 +239,11 @@ where
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
         match result {
-            ProcessResult::AppMessage(msg) => {
-                self.emit_event(ConversationEvent::ConversationMessage(*msg));
+            ProcessResult::AppMessage(msg, sender) => {
+                self.emit_event(ConversationEvent::ConversationMessage {
+                    message: *msg,
+                    sender,
+                });
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::Proposal(proposal) => {
