@@ -36,10 +36,11 @@ fn chat_message_delivered_to_peer() {
         h.member(1).got_chat(b"Hello from alice")
     });
 
-    // The message landed on the *other* member, decrypted, attributed to alice.
+    // The message landed on the *other* member, decrypted, attributed to alice
+    // by her MLS-authenticated signing key.
     let chat = &h.member(1).received()[0];
     assert_eq!(chat.body, b"Hello from alice");
-    assert_eq!(chat.sender, h.member(0).member_id_bytes());
+    assert_eq!(chat.sender.signature_key, h.member(0).signing_pubkey());
     // And the sender did not echo it back to itself.
     assert!(
         !h.member(0).got_chat(b"Hello from alice"),
@@ -47,9 +48,9 @@ fn chat_message_delivered_to_peer() {
     );
 }
 
-/// A receiving peer can resolve the MLS-authenticated signature key of a chat's
-/// attributed sender via `member_signature_key(sender)`, and it matches the key
-/// that sender actually signs with — the realistic sender-authentication path.
+/// A chat arrives with its MLS-authenticated sender attached, whose signing key
+/// is the key that sender actually signs with — the realistic
+/// sender-authentication path, with no self-reported wire field in the loop.
 #[test]
 fn received_chat_sender_signature_key_resolves_to_the_signer() {
     let mut h = TestHarness::<3>::bootstrap(
@@ -67,15 +68,13 @@ fn received_chat_sender_signature_key_resolves_to_the_signer() {
     });
 
     let alice_key = h.member(0).signing_pubkey();
-    // Each receiver reads the attributed sender and resolves its signing key,
-    // landing on alice's real key.
+    // Each receiver reads the authenticated sender off the chat and finds
+    // alice's real signing key on it directly.
     for receiver in [1usize, 2] {
         let chat = &h.member(receiver).received()[0];
-        assert_eq!(chat.sender, h.member(0).member_id_bytes());
         assert_eq!(
-            h.member(receiver).member_signature_key(&chat.sender),
-            Some(alice_key.clone()),
-            "receiver {receiver} resolved the wrong signing key for alice",
+            chat.sender.signature_key, alice_key,
+            "receiver {receiver} got the wrong signing key for alice",
         );
     }
 }
