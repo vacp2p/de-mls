@@ -10,6 +10,7 @@
 //! can back every conversation. The service keeps only the group and a
 //! staged-commit slot; the integrator owns identity, keys, and storage.
 
+use std::collections::HashSet;
 use std::error::Error as StdError;
 
 use openmls::credentials::CredentialWithKey;
@@ -19,34 +20,38 @@ use openmls::group::{
 };
 use openmls::key_packages::KeyPackageIn;
 use openmls::prelude::{
-    ContentType, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, ProcessedMessageContent,
-    ProtocolMessage, ProtocolVersion, Sender,
+    ContentType, DeserializeBytes, LeafNodeIndex, Member, MlsMessageBodyIn, MlsMessageIn,
+    ProcessedMessageContent, ProtocolMessage, ProtocolVersion, Sender,
 };
 use openmls_traits::storage::StorageProvider;
 use openmls_traits::{OpenMlsProvider, signatures::Signer};
 use prost::Message;
 use tracing::warn;
 
-use crate::mls_crypto::types::MemberIdentity;
+use crate::mls_crypto::member_id::{leaf_index_of, member_id_of};
 use crate::{
     Extensions, GroupContext,
     mls_crypto::{
-        CommitArtifacts, DecryptedMessage, MlsCommitInput, MlsError, MlsMessageKind,
-        MlsProposalOutput, StagedCandidateResult,
+        CommitArtifacts, DecryptedMessage, MembershipDelta, MlsCommitInput, MlsError,
+        MlsMessageKind, MlsProposalOutput, StagedCandidateResult,
     },
     protos::de_mls::messages::v1::AppMessage,
 };
 
 /// DE-MLS's MLS engine for one conversation: a single `MlsGroup` plus the
 /// staged-commit slot for the inbound stage→merge/discard pipeline.
-///
-/// Provider, signer, and credential are passed in per call and never stored.
-/// Read-only methods take `&self`; state-advancing ones take `&mut self`, and
-/// callers serialize via the outer per-conversation lock.
 pub struct MlsService {
     conversation_id: String,
     group: MlsGroup,
     pending_staged_commit: Option<StagedCommit>,
+}
+
+/// The leaf indices a commit's Remove proposals vacate.
+fn removed_leaves_of(staged: &StagedCommit) -> Vec<LeafNodeIndex> {
+    staged
+        .remove_proposals()
+        .map(|r| r.remove_proposal().removed())
+        .collect()
 }
 
 impl MlsService {
@@ -148,21 +153,18 @@ impl MlsService {
         &self.conversation_id
     }
 
-    /// Current members as serialized credential bytes, one per leaf in MLS leaf
-    /// order.
+    /// Returns the `member_id` of all current members.
     pub fn members(&self) -> Result<Vec<Vec<u8>>, MlsError> {
         Ok(self
             .group
             .members()
-            .map(|m| m.credential.serialized_content().to_vec())
+            .map(|m| member_id_of(m.index))
             .collect())
     }
 
-    /// Whether `member_id` is a current member.
+    /// Whether `member_id` a current member in the MLS.
     pub fn is_member(&self, member_id: &[u8]) -> bool {
-        self.members()
-            .map(|members| members.iter().any(|m| m.as_slice() == member_id))
-            .unwrap_or(false)
+        self.resolve_member_id(member_id).is_some()
     }
 
     /// Current MLS epoch — the single source of truth; keep no parallel counter.
@@ -182,6 +184,25 @@ impl MlsService {
     // Extensions configured for the MlsGroup
     pub fn extensions(&self) -> &Extensions<GroupContext> {
         self.group.extensions()
+    }
+
+    // ── Leaf-index identity ───────────────────────────────────────
+
+    /// This member's own leaf index.
+    pub fn own_index(&self) -> LeafNodeIndex {
+        self.group.own_leaf_index()
+    }
+
+    /// The leaf index `member_id` decodes to, or `None` if it isn't a current
+    /// member.
+    pub fn resolve_member_id(&self, member_id: &[u8]) -> Option<LeafNodeIndex> {
+        let index = leaf_index_of(member_id)?;
+        self.group.member_at(index).map(|_| index)
+    }
+
+    /// Current members as OpenMLS [`Member`]s, in leaf order.
+    pub fn members_view(&self) -> Vec<Member> {
+        self.group.members().collect()
     }
 
     // ══════════════════════════════════════════════════════════
@@ -223,14 +244,9 @@ impl MlsService {
                     mls_proposals.push(mls_message_out.to_bytes()?);
                 }
                 MlsCommitInput::Remove(member_id) => {
-                    let member_index = group.members().find_map(|m| {
-                        if m.credential.serialized_content() == member_id {
-                            Some(m.index)
-                        } else {
-                            None
-                        }
-                    });
-                    if let Some(index) = member_index {
+                    if let Some(index) = leaf_index_of(member_id)
+                        && group.member_at(index).is_some()
+                    {
                         let (mls_message_out, _proposal_ref) =
                             group.propose_remove_member(provider, signer, index)?;
                         mls_proposals.push(mls_message_out.to_bytes()?);
@@ -255,14 +271,38 @@ impl MlsService {
     }
 
     /// Apply our staged commit, advancing the epoch — call once our candidate
-    /// has won the commit round.
-    pub fn merge_own_commit<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
+    /// has won the commit round. Returns the membership change it applied.
+    pub fn merge_own_commit<Pr>(&mut self, provider: &Pr) -> Result<MembershipDelta, MlsError>
     where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
+        let removed = self
+            .group
+            .pending_commit()
+            .map(removed_leaves_of)
+            .unwrap_or_default();
+        let before = self.populated_leaves();
         self.group.merge_pending_commit(provider)?;
-        Ok(())
+        Ok(self.delta(before, removed))
+    }
+
+    /// The leaf indices this group currently seats.
+    fn populated_leaves(&self) -> HashSet<u32> {
+        self.group.members().map(|m| m.index.u32()).collect()
+    }
+
+    /// Returns who was added or removed by the latest commit, based on the Remove
+    /// proposals and the updated tree. New or recycled leaves show up as added;
+    /// removed leaves are from this commit’s Remove proposals.
+    fn delta(&self, before: HashSet<u32>, removed: Vec<LeafNodeIndex>) -> MembershipDelta {
+        let removed_set: HashSet<u32> = removed.iter().map(|i| i.u32()).collect();
+        let added = self
+            .group
+            .members()
+            .filter(|m| !before.contains(&m.index.u32()) || removed_set.contains(&m.index.u32()))
+            .collect();
+        MembershipDelta { added, removed }
     }
 
     /// Drop our staged commit and the pending proposals it carried — call when
@@ -315,7 +355,10 @@ impl MlsService {
             let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(proposal_bytes)?;
             let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
             let processed = group.process_message(provider, protocol_message)?;
-            let sender = processed.credential().serialized_content().to_vec();
+            let sender = match processed.sender() {
+                Sender::Member(idx) => member_id_of(*idx),
+                _ => return Ok(StagedCandidateResult::Aborted),
+            };
             match processed.into_content() {
                 ProcessedMessageContent::ProposalMessage(proposal) => {
                     group
@@ -355,12 +398,16 @@ impl MlsService {
         }
 
         let processed = group.process_message(provider, protocol_message)?;
-        let commit_sender = processed.credential().serialized_content().to_vec();
+        let commit_sender = match processed.sender() {
+            Sender::Member(idx) => member_id_of(*idx),
+            _ => return Ok(StagedCandidateResult::Aborted),
+        };
 
         let outcome = match processed.into_content() {
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 let self_removed = staged.self_removed();
                 let mut actions = Vec::new();
+                // An Add targets a not-yet-member, identified by its key-package credential.
                 for add in staged.add_proposals() {
                     let id = add
                         .add_proposal()
@@ -371,13 +418,10 @@ impl MlsService {
                         .to_vec();
                     actions.push(MlsProposalOutput::Add(id));
                 }
+                // A Remove targets an existing member by its leaf index.
                 for remove in staged.remove_proposals() {
                     let removed_index = remove.remove_proposal().removed();
-                    let id = group
-                        .member(removed_index)
-                        .map(|c| c.serialized_content().to_vec())
-                        .ok_or(MlsError::UnknownLeafIndex(removed_index.u32()))?;
-                    actions.push(MlsProposalOutput::Remove(id));
+                    actions.push(MlsProposalOutput::Remove(member_id_of(removed_index)));
                 }
                 Some((commit_sender, self_removed, actions, *staged))
             }
@@ -410,8 +454,8 @@ impl MlsService {
     }
 
     /// Apply the staged peer commit, advancing the epoch. Errors if nothing is
-    /// staged.
-    pub fn merge_staged_commit<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
+    /// staged. Returns the membership change it applied.
+    pub fn merge_staged_commit<Pr>(&mut self, provider: &Pr) -> Result<MembershipDelta, MlsError>
     where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
@@ -420,8 +464,10 @@ impl MlsService {
             .pending_staged_commit
             .take()
             .ok_or_else(|| MlsError::NoPendingStagedCommit(self.conversation_id.clone()))?;
+        let removed = removed_leaves_of(&staged);
+        let before = self.populated_leaves();
         self.group.merge_staged_commit(provider, staged)?;
-        Ok(())
+        Ok(self.delta(before, removed))
     }
 
     /// Drop the staged peer commit and the pending proposals it staged on top
@@ -502,38 +548,27 @@ impl MlsService {
 
         let processed = group.process_message(provider, protocol_message)?;
 
-        let (member_id, signature_key) = match processed.sender() {
-            Sender::Member(leaf_index) => {
-                let m = group
-                    .member_at(*leaf_index)
-                    .ok_or(MlsError::UnknownLeafIndex(leaf_index.u32()))?;
-
-                (m.credential.serialized_content().to_vec(), m.signature_key)
-            }
+        let member = match processed.sender() {
+            Sender::Member(leaf_index) => group
+                .member_at(*leaf_index)
+                .ok_or(MlsError::UnknownLeafIndex(leaf_index.u32()))?,
             _ => return Ok(None),
         };
 
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(app) => Ok(Some(DecryptedMessage {
                 payload: app.into_bytes(),
-                member: MemberIdentity {
-                    member_id,
-                    signature_key,
-                },
+                member,
             })),
             _ => Ok(None),
         }
     }
 
-    /// The signature public key bound to `member_id`'s current leaf, or `None`
-    /// if no current member carries that credential identity. Assumes member-id
-    /// uniqueness (the same invariant [`Self::is_member`] and [`Self::members`]
-    /// rely on); with duplicate identities it returns the first leaf's key.
+    /// The signature public key at `member_id`'s leaf, or `None` if that leaf is
+    /// blank or the bytes aren't a valid id.
     pub fn member_signature_key(&self, member_id: &[u8]) -> Option<Vec<u8>> {
-        self.group
-            .members()
-            .find(|m| m.credential.serialized_content() == member_id)
-            .map(|m| m.signature_key)
+        let index = leaf_index_of(member_id)?;
+        self.group.member_at(index).map(|m| m.signature_key)
     }
 
     /// Peek a wire message's outer kind without processing or signature-checking
@@ -726,14 +761,92 @@ mod service_tests {
 
         // The remote applied (carol added) and our own was discarded, not
         // applied (dave absent).
-        let members = alice.members().unwrap();
+        let members = alice.members_view();
+        let has = |name: &[u8]| {
+            members
+                .iter()
+                .any(|m| m.credential.serialized_content() == name)
+        };
+        assert!(has(b"carol"), "the remote commit (add carol) applied");
         assert!(
-            members.iter().any(|m| m == b"carol"),
-            "the remote commit (add carol) applied"
+            !has(b"dave"),
+            "our own commit (add dave) was discarded before the merge, not applied"
+        );
+    }
+
+    /// Recycling: one commit removes the member at a leaf and adds a new one
+    /// that refills it. The merge delta must list that leaf in BOTH `removed`
+    /// and `added` — the delta reads the commit's own Remove proposals, so a
+    /// leaf a Remove vacated and an Add refilled counts as both, and the reused
+    /// leaf never carries the old member's per-leaf state (score) to the new one.
+    #[test]
+    fn merge_delta_flags_a_reused_leaf_as_removed_and_added() {
+        let (mut alice, provider_a, signer_a) = make_creator_mls(b"alice");
+        let joiners = TestProvider::default();
+
+        // Seat alice(0), bob(1), carol(2) so bob's leaf is an interior slot.
+        for name in [b"bob".as_slice(), b"carol".as_slice()] {
+            let kp = fresh_key_package(&joiners, name);
+            alice
+                .create_commit_candidate(&provider_a, &signer_a, &[MlsCommitInput::Add(kp)])
+                .expect("add member");
+            alice.merge_own_commit(&provider_a).expect("merge add");
+        }
+        let bob_leaf = LeafNodeIndex::new(1);
+        assert!(
+            alice
+                .members_view()
+                .iter()
+                .any(|m| m.index == bob_leaf && m.credential.serialized_content() == b"bob"),
+            "bob is seated at leaf 1"
+        );
+
+        // One commit: remove bob (leaf 1) and add dave, who refills that leaf.
+        let dave_kp = fresh_key_package(&joiners, b"dave");
+        alice
+            .create_commit_candidate(
+                &provider_a,
+                &signer_a,
+                &[
+                    MlsCommitInput::Remove(member_id_of(bob_leaf)),
+                    MlsCommitInput::Add(dave_kp),
+                ],
+            )
+            .expect("remove bob + add dave in one commit");
+        let delta = alice
+            .merge_own_commit(&provider_a)
+            .expect("merge the recycling commit");
+
+        // Dave now holds bob's old leaf; bob is gone.
+        assert!(
+            alice
+                .members_view()
+                .iter()
+                .any(|m| m.index == bob_leaf && m.credential.serialized_content() == b"dave"),
+            "dave refilled leaf 1"
         );
         assert!(
-            !members.iter().any(|m| m == b"dave"),
-            "our own commit (add dave) was discarded before the merge, not applied"
+            !alice
+                .members_view()
+                .iter()
+                .any(|m| m.credential.serialized_content() == b"bob"),
+            "bob is no longer a member"
+        );
+
+        // The reused leaf is on BOTH sides of the delta — a pure index diff
+        // (leaf 1 present before and after) would miss the swap and leak bob's
+        // state onto dave.
+        assert!(
+            delta.removed.contains(&bob_leaf),
+            "reused leaf listed as removed; removed={:?}",
+            delta.removed.iter().map(|i| i.u32()).collect::<Vec<_>>()
+        );
+        assert!(
+            delta
+                .added
+                .iter()
+                .any(|m| m.index == bob_leaf && m.credential.serialized_content() == b"dave"),
+            "reused leaf listed as added with the new member"
         );
     }
 }

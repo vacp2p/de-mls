@@ -138,17 +138,20 @@ pub fn validate_commit_candidate(
     )))
 }
 
-/// `(kind_tag, member_id)` projection of an approved voting request.
-/// Returns `None` for non-MLS payloads (emergency/election).
+/// `(kind_tag, id)` projection of an approved voting request — an add keys on
+/// the joiner's MLS credential, a remove on the target's `member_id` (leaf
+/// index). Returns `None` for non-MLS payloads (emergency/election).
 fn action_projection_from_request(req: &ConversationUpdateRequest) -> Option<(u8, &[u8])> {
     match req.payload.as_ref()? {
-        Payload::MemberInvite(im) => Some((0, &im.member_id)),
+        Payload::MemberInvite(im) => Some((0, &im.credential)),
         Payload::RemoveMember(rm) => Some((1, &rm.member_id)),
         _ => None,
     }
 }
 
-/// `(kind_tag, member_id)` projection of an MLS-staged action.
+/// `(kind_tag, id)` projection of an MLS-staged action, matching
+/// [`action_projection_from_request`]: add by the credential, remove by leaf
+/// index.
 fn action_projection_from_mls(action: &MlsProposalOutput) -> (u8, &[u8]) {
     match action {
         MlsProposalOutput::Add(id) => (0, id),

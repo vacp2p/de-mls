@@ -24,7 +24,7 @@ message AppMessage {
 }
 
 message BanRequest {
-  bytes user_to_ban = 1;
+  bytes member_id = 1;
   string conversation_id = 2;
 }
 
@@ -106,7 +106,8 @@ message EmergencyCriteriaProposal {
 
 message MemberInvite {
   bytes key_package_bytes = 1;
-  bytes member_id = 2;
+  // The joiner's encoded MLS credential
+  bytes credential = 2;
 }
 
 message RemoveMember {

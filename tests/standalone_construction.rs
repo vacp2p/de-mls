@@ -90,7 +90,6 @@ fn create_builds_a_working_steward_session_without_user() {
     let integrator = Integrator::new();
     let conversation: TestConversation = Conversation::create(
         "standalone",
-        integrator.member_id.member_id_bytes(),
         &integrator.provider,
         integrator.credential.clone(),
         &test_mls_group_config(),
@@ -133,7 +132,6 @@ fn join_completes_in_one_call() {
 
     let mut creator: TestConversation = Conversation::create(
         "standalone-welcome",
-        alice.member_id.member_id_bytes(),
         &alice.provider,
         alice.credential.clone(),
         &test_mls_group_config(),
@@ -186,7 +184,6 @@ fn join_completes_in_one_call() {
     // never minted the key package can't open it.
     let bystander = Integrator::with_key(ALICE);
     let bystander_join: Option<TestConversation> = Conversation::join(
-        bystander.member_id.member_id_bytes(),
         &bystander.provider,
         &bystander.signer,
         &welcome.welcome_bytes,
@@ -207,7 +204,6 @@ fn join_completes_in_one_call() {
     // run the join side-effects, apply the bundled sync. Only the addressed
     // joiner — holding the KP provider — gets `Some`.
     let joined: TestConversation = Conversation::join(
-        bob.member_id.member_id_bytes(),
         &bob.provider,
         &bob.signer,
         &welcome.welcome_bytes,
@@ -245,7 +241,6 @@ fn create_with_members_seeds_initial_members_at_genesis() {
 
     let creator: TestConversation = Conversation::create(
         "genesis",
-        alice.member_id.member_id_bytes(),
         &alice.provider,
         alice.credential.clone(),
         &test_mls_group_config(),
@@ -294,7 +289,6 @@ fn create_with_members_seeds_initial_members_at_genesis() {
     // and a steward — the property genesis beats the incremental baseline on.
     for member in [&bob, &charlie] {
         let joined: TestConversation = Conversation::join(
-            member.member_id.member_id_bytes(),
             &member.provider,
             &member.signer,
             &welcome.welcome_bytes,
@@ -335,7 +329,6 @@ fn create_with_members_founds_a_subset_steward_group() {
 
     let creator: TestConversation = Conversation::create(
         "genesis-subset",
-        alice.member_id.member_id_bytes(),
         &alice.provider,
         alice.credential.clone(),
         &test_mls_group_config(),
@@ -373,7 +366,6 @@ fn create_with_members_founds_a_subset_steward_group() {
     let mut convos = vec![creator];
     for member in [&bob, &charlie, &dave] {
         let joined: TestConversation = Conversation::join(
-            member.member_id.member_id_bytes(),
             &member.provider,
             &member.signer,
             &welcome.welcome_bytes,

@@ -1,5 +1,16 @@
 //! MLS types and operation results.
 
+use openmls::prelude::{LeafNodeIndex, Member};
+
+/// Describes a membership update resulting from a merge:
+/// lists members who were added (with their assigned leaves)
+/// and the members who was removed.
+#[derive(Clone, Debug, Default)]
+pub struct MembershipDelta {
+    pub added: Vec<Member>,
+    pub removed: Vec<LeafNodeIndex>,
+}
+
 /// A membership change the steward feeds into the commit pipeline.
 #[derive(Clone, Debug)]
 pub enum MlsCommitInput {
@@ -9,14 +20,16 @@ pub enum MlsCommitInput {
     Remove(Vec<u8>),
 }
 
-/// A membership change read out of a single MLS proposal while staging a
-/// commit's bundled proposals — the target's `member_id` for both Add and
-/// Remove.
+/// Represents a membership change extracted from an individual MLS proposal while
+/// processing the set of proposals included in a commit. For Add, the joiner is
+/// identified by their MLS credential, as a leaf index is not assigned until after
+/// the commit merges; for Remove, the targeted member is referenced by their
+/// `member_id` (leaf index).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MlsProposalOutput {
-    /// Add a member — member-id is read from the key package credential.
+    /// Add a joiner, identified by its credential until it has a leaf index.
     Add(Vec<u8>),
-    /// Remove a member — member-id of the removed member.
+    /// Remove a member by its `member_id` (leaf index).
     Remove(Vec<u8>),
 }
 
@@ -30,21 +43,13 @@ pub enum MlsMessageKind {
     Other,
 }
 
-/// The sender of a decrypted message, drawn from its MLS leaf: the
-/// `signature_key` MLS verified signed this message, and the `member_id`
-/// that is `mls_member.credential.serialized_content()`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemberIdentity {
-    pub member_id: Vec<u8>,
-    pub signature_key: Vec<u8>,
-}
-
-/// A decrypted inbound application message: the plaintext `payload` and the
-/// `member` whose `signature_key` signed it.
+/// Represents a decrypted application message received from the network,
+/// containing the plaintext `payload` and the MLS-authenticated sender as an
+/// OpenMLS [`Member`] (including leaf index, credential, and keys).
 #[derive(Clone, Debug)]
 pub struct DecryptedMessage {
     pub payload: Vec<u8>,
-    pub member: MemberIdentity,
+    pub member: Member,
 }
 
 /// Outcome of staging a remote commit candidate.

@@ -167,7 +167,6 @@ impl Member {
         let scoring = integ.scoring();
         let convo = Conversation::create(
             conversation_id,
-            integ.member_id.member_id_bytes(),
             &integ.provider,
             integ.credential.clone(),
             &mls_group_config,
@@ -226,10 +225,22 @@ impl Member {
         self.integ.member_id.member_id_bytes()
     }
 
-    /// MLS member-id bytes (identical to `app_id` in this harness) — the value
-    /// a `RemoveMember` proposal targets.
-    pub fn member_id_bytes(&self) -> &[u8] {
+    /// The identity this member's credential carries — valid before it joins.
+    /// Peers see it as the credential in a `MembersChanged` event and map it
+    /// onto the member's leaf index.
+    pub fn credential_id(&self) -> &[u8] {
         self.integ.member_id.member_id_bytes()
+    }
+
+    /// This member's de-mls `member_id` (its leaf index) in the conversation —
+    /// the value a `RemoveMember` proposal targets and that senders/members are
+    /// reported by. A member's leaf index is the same in every node's tree, so
+    /// this doubles as the id peers use to name it. Panics if not joined.
+    pub fn member_id_bytes(&self) -> &[u8] {
+        self.convo
+            .as_ref()
+            .expect("member has joined")
+            .member_id_bytes()
     }
 
     /// This member's MLS signature public key — the key its leaf is bound to.
@@ -462,7 +473,7 @@ impl Member {
             matches!(
                 req.payload.as_ref(),
                 Some(conversation_update_request::Payload::MemberInvite(im))
-                    if im.member_id == member_id
+                    if im.credential == member_id
             )
         };
         let mut ids: Vec<u32> = self
@@ -498,7 +509,7 @@ impl Member {
             .flatten()
             .filter_map(|r| match r.payload.as_ref() {
                 Some(conversation_update_request::Payload::MemberInvite(im)) => {
-                    Some(im.member_id.clone())
+                    Some(im.credential.clone())
                 }
                 _ => None,
             })
@@ -524,6 +535,16 @@ impl Member {
     }
 
     pub fn add_member(&mut self, key_package: &MintedKeyPackage) {
+        // App-side dedup: a correct integrator doesn't invite an identity
+        // already in the group — de-mls no longer guesses membership.
+        if let Some(convo) = self.convo.as_ref()
+            && convo
+                .members_view()
+                .iter()
+                .any(|m| m.credential.serialized_content() == key_package.member_id())
+        {
+            return;
+        }
         self.convo
             .as_mut()
             .expect("member has joined")
@@ -710,7 +731,7 @@ impl Member {
         let _ = convo.sponsor_member(
             &self.integ.provider,
             &self.integ.signer,
-            &invite.member_id,
+            &invite.credential,
             &invite.key_package_bytes,
         );
     }
@@ -730,7 +751,6 @@ impl Member {
         // `join` opens the welcome internally; only the addressed joiner gets
         // `Some`.
         match Conversation::join(
-            self.integ.member_id.member_id_bytes(),
             &self.integ.provider,
             &self.integ.signer,
             &welcome.welcome_bytes,
@@ -777,7 +797,7 @@ impl Member {
 pub fn build_key_package_announcement(key_package_bytes: &[u8], member_id: &[u8]) -> Vec<u8> {
     MemberInvite {
         key_package_bytes: key_package_bytes.to_vec(),
-        member_id: member_id.to_vec(),
+        credential: member_id.to_vec(),
     }
     .encode_to_vec()
 }

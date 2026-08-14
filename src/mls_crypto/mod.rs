@@ -9,12 +9,14 @@
 //! - `error` — `MlsError`.
 
 mod error;
+mod member_id;
 mod service;
 mod types;
 
 pub use error::MlsError;
+pub(crate) use member_id::member_id_of;
 pub use service::MlsService;
 pub use types::{
-    CommitArtifacts, DecryptedMessage, MemberIdentity, MlsCommitInput, MlsMessageKind,
-    MlsProposalOutput, StagedCandidateResult,
+    CommitArtifacts, DecryptedMessage, MembershipDelta, MlsCommitInput,
+    MlsMessageKind, MlsProposalOutput, StagedCandidateResult,
 };

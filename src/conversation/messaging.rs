@@ -6,7 +6,6 @@
 use std::error::Error as StdError;
 
 use openmls_traits::{OpenMlsProvider, signatures::Signer, storage::StorageProvider};
-use tracing::info;
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
@@ -126,20 +125,15 @@ where
         )
     }
 
-    /// Relay a joiner that announced its own key package, without endorsing it:
-    /// the proposal is submitted unbundled ([`CreatorVote::Deferred`]) and this
-    /// member votes on it like any other. Only the primary epoch steward relays
-    /// immediately, so a single Add proposal is opened per joiner. Every other
-    /// member records the announcement in the pending-update buffer instead —
-    /// a backup proposes it from there if the epoch steward stays silent past
-    /// `backup_takeover_window` (drained by `poll`), so an offline epoch steward
-    /// doesn't strand the join. No-op outside `Working`.
+    /// Sponsor a joiner who sent their own key package, but don't endorse it: just relay the request.
+    /// Only the current epoch steward actually submits the Add proposal right away;
+    /// everyone else saves it to propose later if the steward goes
+    /// quiet (handled by `poll` after `backup_takeover_window`).
+    /// Does nothing unless we're in `Working` state.
     ///
-    /// See [`Self::add_member`] for the endorsing out-of-band invite.
+    /// For out-of-band invites with endorsement, use [`Self::add_member`].
     ///
-    /// `joiner_id` is the announced joiner's id, taken from the `MemberInvite`
-    /// the caller decoded (it travels alongside the key-package bytes on the
-    /// wire);
+    /// `joiner_id` is the serialized credential related to the `key_package_bytes`.
     pub fn sponsor_member<Pr>(
         &mut self,
         provider: &Pr,
@@ -163,14 +157,11 @@ where
                 signer,
             );
         }
-        if joiner_id == self.member_id_bytes() || self.mls().is_member(joiner_id) {
-            return Ok(());
-        }
         let epoch = self.mls().current_epoch()?;
         self.queues.insert_pending_update(
             ConversationUpdateRequest::member_invite(MemberInvite {
                 key_package_bytes: key_package_bytes.to_vec(),
-                member_id: joiner_id.to_vec(),
+                credential: joiner_id.to_vec(),
             }),
             epoch,
         );
@@ -184,7 +175,7 @@ where
         &mut self,
         provider: &Pr,
         key_package_bytes: &[u8],
-        member_id: &[u8],
+        joiner_id: &[u8],
         creator_vote: CreatorVote,
         signer: &impl Signer,
     ) -> Result<(), ConversationError>
@@ -192,24 +183,11 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        // Don't propose our own key package.
-        if member_id == self.member_id_bytes() {
-            return Ok(());
-        }
-        // The target is already in the group — nothing to add.
-        if self.mls().is_member(member_id) {
-            info!(
-                conversation = %self.id(),
-                member = ?member_id,
-                "add member skipped: already a member"
-            );
-            return Ok(());
-        }
         self.initiate_proposal(
             provider,
             ConversationUpdateRequest::member_invite(MemberInvite {
                 key_package_bytes: key_package_bytes.to_vec(),
-                member_id: member_id.to_vec(),
+                credential: joiner_id.to_vec(),
             }),
             creator_vote,
             signer,
