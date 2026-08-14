@@ -113,11 +113,11 @@ pub fn apply_consensus_result(
     if approved
         && let Some(conversation_update_request::Payload::MemberInvite(invite)) =
             request.payload.as_ref()
-        && conversation.has_approved_invite(&invite.member_id)
+        && conversation.has_approved_invite(&invite.credential)
     {
         info!(
             proposal_id,
-            target = ?invite.member_id,
+            target = ?invite.credential,
             "invite proposal deduped — target already queued for admission"
         );
         return Ok(ConsensusApplyResult::NoAction);
@@ -227,7 +227,7 @@ fn removal_request_for(evidence: &ViolationEvidence) -> ConversationUpdateReques
     ConversationUpdateRequest::remove_member(evidence.target_member_id.clone())
 }
 
-/// Identity this approval would queue for removal in `approved_proposals`,
+/// The `member_id` this approval would queue for removal in `approved_proposals`,
 /// if any. Covers a direct `RemoveMember` request and a score-below-threshold
 /// ECP that transforms into one. Returns `None` for elections, non-removal
 /// emergencies, non-removal regular proposals, and rejections.

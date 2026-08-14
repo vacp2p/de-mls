@@ -22,7 +22,7 @@ use crate::{
     ConversationQueues, ConversationServices, ConversationStateMachine, PeerScoreStorage,
     PeerScoringService, StewardListService, WallClock,
     consensus::outcome_bus::OutcomeBus,
-    mls_crypto::{MlsCommitInput, MlsService},
+    mls_crypto::{MlsCommitInput, MlsService, member_id_of},
     protos::de_mls::messages::v1::MemberWelcome,
 };
 
@@ -41,7 +41,6 @@ where
     #[allow(clippy::too_many_arguments)]
     pub fn create<Pr>(
         conversation_id: &str,
-        member_id: &[u8],
         provider: &Pr,
         credential: CredentialWithKey,
         group_config: &MlsGroupCreateConfig,
@@ -73,7 +72,6 @@ where
             app_id,
             config,
             true,
-            member_id,
         )?;
         conversation.seed_initial_members(provider, signer, initial_members)?;
         Ok(conversation)
@@ -108,13 +106,12 @@ where
             .services
             .mls
             .create_commit_candidate(provider, signer, &updates)?;
-        self.services.mls.merge_own_commit(provider)?;
+        let delta = self.services.mls.merge_own_commit(provider)?;
 
-        // Score the members and install the steward list over the settled members
-        // at the merged epoch. `install_list` sorts and takes the top-sn, so this
-        // handles an initial set larger than `sn_max` (a real subset) too.
-        for (id, _) in initial_members {
-            self.services.scoring.add_member(id)?;
+        // Score the members by their assigned leaf and install the steward list
+        // over the settled members at the merged epoch.
+        for m in &delta.added {
+            self.services.scoring.add_member(&member_id_of(m.index))?;
         }
         let (epoch, members) = {
             let mls = self.mls();
@@ -162,7 +159,6 @@ where
     /// a clone the caller keeps.
     #[allow(clippy::too_many_arguments)]
     pub fn join<Pr>(
-        member_id: &[u8],
         provider: &Pr,
         signer: &impl Signer,
         welcome_bytes: &[u8],
@@ -190,7 +186,6 @@ where
             app_id,
             config,
             false,
-            member_id,
         )?;
         conversation.on_joined(provider, signer)?;
         conversation.apply_welcome_sync(provider, conversation_sync_bytes, signer)?;
@@ -213,10 +208,11 @@ where
         app_id: Arc<[u8]>,
         config: ConversationConfig,
         is_creation: bool,
-        member_id: &[u8],
     ) -> Result<Self, ConversationError> {
         config.validate()?;
-        let self_member_id_bytes = member_id.to_vec();
+        // Identity is the member's leaf index: the creator seeds at leaf 0, a
+        // joiner takes the leaf the welcome placed it on.
+        let self_member_id_bytes = member_id_of(mls.own_index());
         let queues = ConversationQueues::new(conversation_id, config.dedup_window);
 
         // The conversation id is the deterministic-sort salt every member must
@@ -261,7 +257,7 @@ where
             state_machine,
             config,
             clock,
-            Arc::from(member_id),
+            Arc::from(self_member_id_bytes.as_slice()),
             app_id,
         );
         // Surface the opening phase so a caller draining conversation events sees

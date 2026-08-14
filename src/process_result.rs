@@ -261,7 +261,7 @@ impl TryFrom<AppMessage> for ProcessResult {
             }
             Some(app_message::Payload::BanRequest(ban_request)) => {
                 Ok(ProcessResult::MembershipChangeReceived(Box::new(
-                    ConversationUpdateRequest::remove_member(ban_request.user_to_ban.clone()),
+                    ConversationUpdateRequest::remove_member(ban_request.member_id.clone()),
                 )))
             }
             Some(app_message::Payload::ConversationSync(sync)) => Ok(

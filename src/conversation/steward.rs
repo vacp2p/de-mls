@@ -40,7 +40,7 @@ where
     // ── Public API ───────────────────────────────────────────────────
 
     /// Add any MLS members not yet tracked in scoring, and drop scored
-    /// entries for identities no longer in MLS. Diffing is delegated to
+    /// entries for members no longer in MLS. Diffing is delegated to
     /// [`scoring_member_diff`]; this method only applies the diff.
     pub(crate) fn sync_scoring_members(
         &mut self,
@@ -176,35 +176,6 @@ where
             {
                 info!(conversation = %self.conversation_id, error = %e, "proposal deferred");
             }
-        }
-        Ok(())
-    }
-
-    /// Drop Add entries whose target is now a member and Remove entries
-    /// whose target is now gone, then expire entries older than
-    /// `pending_update_max_epochs`.
-    pub(crate) fn prune_pending_updates_after_commit(&mut self) -> Result<(), ConversationError> {
-        let (current_epoch, members, max_age) = {
-            let mls = self.mls();
-            (
-                mls.current_epoch()?,
-                mls.members()?,
-                self.config.pending_update_max_epochs,
-            )
-        };
-
-        let before = self.queues.pending_update_count();
-        self.queues.prune_pending_updates_for_members(&members);
-        let expired = self.queues.expire_pending_updates(current_epoch, max_age);
-        let after = self.queues.pending_update_count();
-        if before != after {
-            info!(
-                conversation = %self.conversation_id,
-                before,
-                after,
-                expired = expired.len(),
-                "pruned pending updates after commit"
-            );
         }
         Ok(())
     }

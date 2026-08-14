@@ -1,5 +1,7 @@
 //! Read-only queries over a conversation's state.
 
+use openmls::group::Member;
+
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, Extensions, GroupContext,
     MemberRole, PeerScoreStorage, WallClock,
@@ -23,7 +25,7 @@ where
         &self.conversation_id
     }
 
-    /// Identity bytes of the local member in this conversation.
+    /// The local member's `member_id` (leaf-index bytes) in this conversation.
     pub fn member_id_bytes(&self) -> &[u8] {
         &self.self_member_id
     }
@@ -89,10 +91,14 @@ where
         Ok(epoch_steward == Some(self.self_member_id.as_ref()))
     }
 
-    /// Identity bytes of every current member of this conversation, as
-    /// reported by MLS.
+    /// `member_id` (leaf-index bytes) of every current member, in MLS leaf order.
     pub fn members(&self) -> Result<Vec<Vec<u8>>, ConversationError> {
         Ok(self.mls().members()?)
+    }
+
+    /// Every current member as an OpenMLS [`Member`].
+    pub fn members_view(&self) -> Vec<Member> {
+        self.mls().members_view()
     }
 
     /// Signature public key bound to `member_id`'s MLS leaf, or `None` if it is
@@ -109,8 +115,7 @@ where
         self.services.scoring.score_for(member_id)
     }
 
-    /// Identities that have an in-flight self-leave request. Used by the UI
-    /// to render a "pending leave" indicator.
+    /// Members that have an in-flight self-leave request.
     pub fn pending_leave_member_ids(&self) -> Result<Vec<Vec<u8>>, ConversationError> {
         let members = self.mls().members()?;
         Ok(members
