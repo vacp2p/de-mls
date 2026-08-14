@@ -17,6 +17,6 @@ pub use error::MlsError;
 pub(crate) use member_id::member_id_of;
 pub use service::MlsService;
 pub use types::{
-    CommitArtifacts, DecryptedMessage, MembershipDelta, MlsCommitInput,
-    MlsMessageKind, MlsProposalOutput, StagedCandidateResult,
+    CommitArtifacts, DecryptedMessage, MembershipDelta, MlsCommitInput, MlsMessageKind,
+    MlsProposalOutput, StagedCandidateResult,
 };
