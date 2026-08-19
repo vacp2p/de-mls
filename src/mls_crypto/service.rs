@@ -46,6 +46,19 @@ pub struct MlsService {
     pending_staged_commit: Option<StagedCommit>,
 }
 
+/// The serialized leaf credential of a key package — the id a joiner is tracked
+/// by until the Add commit gives it a leaf. Reads it without validating the key
+/// package; validation happens at commit.
+pub(crate) fn credential_of_key_package(key_package_bytes: &[u8]) -> Result<Vec<u8>, MlsError> {
+    let (kp_in, _) =
+        KeyPackageIn::tls_deserialize_bytes(key_package_bytes).map_err(MlsError::KeyPackageTls)?;
+    Ok(kp_in
+        .unverified_credential()
+        .credential
+        .serialized_content()
+        .to_vec())
+}
+
 impl MlsService {
     // ══════════════════════════════════════════════════════════
     // Construction & teardown

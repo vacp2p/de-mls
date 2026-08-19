@@ -571,7 +571,6 @@ impl Member {
             .add_member(
                 &self.integ.provider,
                 &self.integ.signer,
-                key_package.member_id(),
                 key_package.as_bytes(),
             )
             .expect("add member");
@@ -742,7 +741,6 @@ impl Member {
         let _ = convo.sponsor_member(
             &self.integ.provider,
             &self.integ.signer,
-            &invite.credential,
             &invite.key_package_bytes,
         );
     }

@@ -149,12 +149,7 @@ fn join_completes_in_one_call() {
     // the add, so her bundled YES resolves consensus on its own.
     let bob_kp = bob.mint_key_package();
     creator
-        .add_member(
-            &alice.provider,
-            &alice.signer,
-            bob_kp.member_id(),
-            bob_kp.as_bytes(),
-        )
+        .add_member(&alice.provider, &alice.signer, bob_kp.as_bytes())
         .expect("add member");
 
     // Drive the creator until the welcome is minted.

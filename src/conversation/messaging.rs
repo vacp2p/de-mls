@@ -10,7 +10,7 @@ use openmls_traits::{OpenMlsProvider, signatures::Signer, storage::StorageProvid
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote, MemberId,
     PeerScoreStorage, WallClock,
-    mls_crypto::member_id_of,
+    mls_crypto::{credential_of_key_package, member_id_of},
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, ConversationSyncRequest, ConversationUpdateRequest,
         MemberInvite,
@@ -98,15 +98,11 @@ where
     /// endorsing the add by bundling a YES vote at submit. Any member may call.
     /// Errors unless the conversation is `Working`.
     ///
-    /// `joiner_id` is the joiner's id, which the caller already holds (it is the
-    /// credential the key package carries);
-    ///
     /// See [`Self::sponsor_member`] for the non-endorsing steward relay.
     pub fn add_member<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
-        joiner_id: &[u8],
         key_package_bytes: &[u8],
     ) -> Result<(), ConversationError>
     where
@@ -117,29 +113,19 @@ where
         if state != ConversationState::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
-        self.propose_add(
-            provider,
-            key_package_bytes,
-            joiner_id,
-            CreatorVote::Yes,
-            signer,
-        )
+        self.propose_add(provider, key_package_bytes, CreatorVote::Yes, signer)
     }
 
     /// Sponsor a joiner who sent their own key package, but don't endorse it: just relay the request.
     /// Only the current epoch steward actually submits the Add proposal right away;
     /// everyone else saves it to propose later if the steward goes
     /// quiet (handled by `poll` after `backup_takeover_window`).
-    /// Does nothing unless we're in `Working` state.
     ///
     /// For out-of-band invites with endorsement, use [`Self::add_member`].
-    ///
-    /// `joiner_id` is the serialized credential related to the `key_package_bytes`.
     pub fn sponsor_member<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
-        joiner_id: &[u8],
         key_package_bytes: &[u8],
     ) -> Result<(), ConversationError>
     where
@@ -150,19 +136,14 @@ where
             return Ok(());
         }
         if self.is_epoch_steward()? {
-            return self.propose_add(
-                provider,
-                key_package_bytes,
-                joiner_id,
-                CreatorVote::Deferred,
-                signer,
-            );
+            return self.propose_add(provider, key_package_bytes, CreatorVote::Deferred, signer);
         }
+        let credential = credential_of_key_package(key_package_bytes)?;
         let epoch = self.mls().current_epoch()?;
         self.queues.insert_pending_update(
             ConversationUpdateRequest::member_invite(MemberInvite {
                 key_package_bytes: key_package_bytes.to_vec(),
-                credential: joiner_id.to_vec(),
+                credential,
             }),
             epoch,
         );
@@ -176,7 +157,6 @@ where
         &mut self,
         provider: &Pr,
         key_package_bytes: &[u8],
-        joiner_id: &[u8],
         creator_vote: CreatorVote,
         signer: &impl Signer,
     ) -> Result<(), ConversationError>
@@ -184,11 +164,12 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
+        let credential = credential_of_key_package(key_package_bytes)?;
         self.initiate_proposal(
             provider,
             ConversationUpdateRequest::member_invite(MemberInvite {
                 key_package_bytes: key_package_bytes.to_vec(),
-                credential: joiner_id.to_vec(),
+                credential,
             }),
             creator_vote,
             signer,
