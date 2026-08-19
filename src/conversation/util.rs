@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use sha2::{Digest, Sha256};
 
+use crate::mls_crypto::credential_of_key_package;
 use crate::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, ViolationType, conversation_update_request,
 };
@@ -23,11 +24,16 @@ pub fn member_set(members: &[Vec<u8>]) -> HashSet<&[u8]> {
     members.iter().map(|m| m.as_slice()).collect()
 }
 
-/// Return the target member_id of a membership-changing `ConversationUpdateRequest`.
-pub fn target_member_id_of(request: &ConversationUpdateRequest) -> Option<&[u8]> {
+/// The target of a membership-changing `ConversationUpdateRequest`: a removal's
+/// `member_id` (leaf index), or an invite's joiner credential — read from the
+/// key package, since the invite carries only that. `None` for other payloads,
+/// or an unparseable key package.
+pub fn target_member_id_of(request: &ConversationUpdateRequest) -> Option<Vec<u8>> {
     match request.payload.as_ref()? {
-        conversation_update_request::Payload::MemberInvite(m) => Some(&m.credential),
-        conversation_update_request::Payload::RemoveMember(m) => Some(&m.member_id),
+        conversation_update_request::Payload::MemberInvite(m) => {
+            credential_of_key_package(&m.key_package_bytes).ok()
+        }
+        conversation_update_request::Payload::RemoveMember(m) => Some(m.member_id.clone()),
         _ => None,
     }
 }
@@ -37,7 +43,7 @@ pub fn target_member_id_of(request: &ConversationUpdateRequest) -> Option<&[u8]>
 /// approval. Lets the in-flight index dedup a repeated or buffered change
 /// against a live score-removal for the whole voting window, not just after it
 /// becomes a RemoveMember.
-pub fn in_flight_target(request: &ConversationUpdateRequest) -> Option<&[u8]> {
+pub fn in_flight_target(request: &ConversationUpdateRequest) -> Option<Vec<u8>> {
     if let Some(id) = target_member_id_of(request) {
         return Some(id);
     }
@@ -47,5 +53,5 @@ pub fn in_flight_target(request: &ConversationUpdateRequest) -> Option<&[u8]> {
     };
     let ev = ec.evidence.as_ref()?;
     (ViolationType::try_from(ev.violation_type) == Ok(ViolationType::ScoreBelowThreshold))
-        .then_some(ev.target_member_id.as_slice())
+        .then(|| ev.target_member_id.clone())
 }

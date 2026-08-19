@@ -24,7 +24,7 @@ use crate::{
     ProposalKind, StewardListService, Timestamp, WallClock,
     consensus::outcome_bus::OutcomeReceiver,
     decode_inbound_payload, finalize_commit_round, member_set,
-    mls_crypto::{CommitArtifacts, MlsCommitInput, MlsService},
+    mls_crypto::{CommitArtifacts, MlsCommitInput, MlsService, credential_of_key_package},
     protos::de_mls::messages::v1::{
         AppMessage, CommitCandidate, conversation_update_request::Payload,
     },
@@ -328,7 +328,7 @@ where
                         continue;
                     }
                     updates.push(MlsCommitInput::Add(im.key_package_bytes.clone()));
-                    joiner_identities.push(im.credential.clone());
+                    joiner_identities.push(credential_of_key_package(&im.key_package_bytes)?);
                 }
                 Some(Payload::RemoveMember(rm)) => {
                     if let Some(target) = urgent_target.as_deref()
@@ -888,14 +888,10 @@ mod tests {
     }
 
     fn invite_for(
-        joiner_id: &[u8],
         key_package_bytes: Vec<u8>,
     ) -> crate::protos::de_mls::messages::v1::ConversationUpdateRequest {
         use crate::protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberInvite};
-        ConversationUpdateRequest::member_invite(MemberInvite {
-            key_package_bytes,
-            credential: joiner_id.to_vec(),
-        })
+        ConversationUpdateRequest::member_invite(MemberInvite { key_package_bytes })
     }
 
     /// A candidate that cannot be minted is not a phase-change detail — it
@@ -908,7 +904,7 @@ mod tests {
         // Undecodable key-package bytes: the mint fails inside OpenMLS.
         convo
             .queues
-            .insert_approved_proposal(1, invite_for(b"joiner-member-id", vec![0xAA; 32]));
+            .insert_approved_proposal(1, invite_for(vec![0xAA; 32]));
 
         convo
             .on_freeze_entered(&provider, &signer, ConversationState::Freezing)

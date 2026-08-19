@@ -86,7 +86,7 @@ where
         // cross-node duplicate — two members proposing the same target — is
         // caught later at approval by `has_approved_*`.
         if let Some(target) = in_flight_target(&request)
-            && self.queues.active_proposal_targets().contains(target)
+            && self.queues.active_proposal_targets().contains(&target)
         {
             info!(
                 conversation = %self.conversation_id,

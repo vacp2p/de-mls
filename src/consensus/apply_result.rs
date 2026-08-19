@@ -8,6 +8,7 @@ use tracing::info;
 
 use crate::{
     ConversationError, ConversationQueues,
+    mls_crypto::credential_of_key_package,
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, ViolationEvidence, ViolationType,
         conversation_update_request,
@@ -113,11 +114,12 @@ pub fn apply_consensus_result(
     if approved
         && let Some(conversation_update_request::Payload::MemberInvite(invite)) =
             request.payload.as_ref()
-        && conversation.has_approved_invite(&invite.credential)
+        && let Ok(credential) = credential_of_key_package(&invite.key_package_bytes)
+        && conversation.has_approved_invite(&credential)
     {
         info!(
             proposal_id,
-            target = ?invite.credential,
+            target = ?credential,
             "invite proposal deduped — target already queued for admission"
         );
         return Ok(ConsensusApplyResult::NoAction);
@@ -170,9 +172,7 @@ pub fn apply_consensus_result(
     }
     // Rejected membership: caller drops the buffered pending-update.
     if !approved && let Some(target) = target_member_id_of(request) {
-        return Ok(ConsensusApplyResult::RejectedMembership {
-            target: target.to_vec(),
-        });
+        return Ok(ConsensusApplyResult::RejectedMembership { target });
     }
     Ok(ConsensusApplyResult::NoAction)
 }

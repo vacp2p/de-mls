@@ -31,6 +31,7 @@ use prost::Message;
 
 use de_mls::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
+use de_mls::mls_crypto::credential_of_key_package;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
     conversation_update_request,
@@ -493,7 +494,7 @@ impl Member {
             matches!(
                 req.payload.as_ref(),
                 Some(conversation_update_request::Payload::MemberInvite(im))
-                    if im.credential == member_id
+                    if credential_of_key_package(&im.key_package_bytes).is_ok_and(|c| c == member_id)
             )
         };
         let mut ids: Vec<u32> = self
@@ -529,7 +530,7 @@ impl Member {
             .flatten()
             .filter_map(|r| match r.payload.as_ref() {
                 Some(conversation_update_request::Payload::MemberInvite(im)) => {
-                    Some(im.credential.clone())
+                    credential_of_key_package(&im.key_package_bytes).ok()
                 }
                 _ => None,
             })
@@ -653,10 +654,7 @@ impl Member {
         Outbound {
             conversation_id: conversation_id.to_string(),
             sender: self.app_id().to_vec(),
-            payload: build_key_package_announcement(
-                key_package.as_bytes(),
-                key_package.member_id(),
-            ),
+            payload: build_key_package_announcement(key_package.as_bytes()),
         }
     }
 
@@ -800,13 +798,12 @@ impl Member {
     }
 }
 
-/// Encode a key package and its owner's `member_id` into the wire format used
-/// for KP announcements. Returns the prost-encoded `MemberInvite` bytes ready
-/// for broadcast on the welcome subtopic.
-pub fn build_key_package_announcement(key_package_bytes: &[u8], member_id: &[u8]) -> Vec<u8> {
+/// Encode a key package into the wire format used for KP announcements.
+/// Returns the prost-encoded `MemberInvite` bytes ready for broadcast on the
+/// welcome subtopic.
+pub fn build_key_package_announcement(key_package_bytes: &[u8]) -> Vec<u8> {
     MemberInvite {
         key_package_bytes: key_package_bytes.to_vec(),
-        credential: member_id.to_vec(),
     }
     .encode_to_vec()
 }

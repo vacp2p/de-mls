@@ -10,7 +10,7 @@ use openmls_traits::{OpenMlsProvider, signatures::Signer, storage::StorageProvid
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote, MemberId,
     PeerScoreStorage, WallClock,
-    mls_crypto::{credential_of_key_package, member_id_of},
+    mls_crypto::member_id_of,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, ConversationSyncRequest, ConversationUpdateRequest,
         MemberInvite,
@@ -138,21 +138,19 @@ where
         if self.is_epoch_steward()? {
             return self.propose_add(provider, key_package_bytes, CreatorVote::Deferred, signer);
         }
-        let credential = credential_of_key_package(key_package_bytes)?;
         let epoch = self.mls().current_epoch()?;
         self.queues.insert_pending_update(
             ConversationUpdateRequest::member_invite(MemberInvite {
                 key_package_bytes: key_package_bytes.to_vec(),
-                credential,
             }),
             epoch,
         );
         Ok(())
     }
 
-    /// Shared body of [`Self::add_member`] / [`Self::sponsor_member`]: parse the
-    /// key package, skip our own and already-present members, and open the Add
-    /// proposal with the caller-chosen vote mode.
+    /// Shared body of [`Self::add_member`] / [`Self::sponsor_member`]: open the
+    /// Add proposal carrying the joiner's key package, with the caller-chosen
+    /// vote mode.
     fn propose_add<Pr>(
         &mut self,
         provider: &Pr,
@@ -164,12 +162,10 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let credential = credential_of_key_package(key_package_bytes)?;
         self.initiate_proposal(
             provider,
             ConversationUpdateRequest::member_invite(MemberInvite {
                 key_package_bytes: key_package_bytes.to_vec(),
-                credential,
             }),
             creator_vote,
             signer,
