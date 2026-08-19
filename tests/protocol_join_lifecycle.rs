@@ -29,10 +29,10 @@ fn evicted_member_rejoins_at_a_later_epoch() {
         .find(|&i| i != target && h.member(i).is_steward())
         .expect("a steward drives the removal");
 
-    let target_id = h.member(target).member_id_bytes().to_vec();
+    let target_key = h.member(target).signing_pubkey();
     let pre_remove_epoch = h.member(steward).epoch();
 
-    h.member_mut(steward).remove_member(&target_id);
+    h.member_mut(steward).remove_member(&target_key);
     h.process_until("target removed", |h| h.member(steward).member_count() == 2);
 
     // Rejoin: same identity registers afresh, announces a new key package, and
@@ -50,12 +50,7 @@ fn evicted_member_rejoins_at_a_later_epoch() {
         h.member(target).epoch()
     );
     assert!(
-        h.member(steward)
-            .convo()
-            .members()
-            .unwrap()
-            .iter()
-            .any(|m| m == &target_id),
+        h.member(steward).member_id_for(&target_key).is_some(),
         "the steward sees the rejoined identity back in the member set"
     );
 }
@@ -108,7 +103,7 @@ fn backup_steward_resends_sync_when_epoch_steward_silent() {
         StewardListConfig::new(1, 5).unwrap(),
     );
     let target = 2usize;
-    let target_id = h.member(target).member_id_bytes().to_vec();
+    let target_id = h.member(target).signing_pubkey();
     let driver = (0..3).find(|&i| i != target).unwrap();
     h.member_mut(driver).remove_member(&target_id);
     h.process_until("target evicted", |h| h.member(driver).member_count() == 2);

@@ -41,7 +41,7 @@ fn peer_vote_no_blocks_the_commit() {
     assert_eq!(epoch_before, 1, "bootstrap settled at epoch 1");
 
     // Alice proposes removing bob (her YES is bundled at submit).
-    let bob_id = h.member(1).member_id_bytes().to_vec();
+    let bob_id = h.member(1).signing_pubkey();
     h.member_mut(0).remove_member(&bob_id);
 
     // Bob surfaces the vote request and votes NO before any auto-vote fires.

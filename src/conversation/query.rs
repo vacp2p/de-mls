@@ -4,7 +4,7 @@ use openmls::group::Member;
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, Extensions, GroupContext,
-    MemberRole, PeerScoreStorage, WallClock,
+    MemberId, MemberRole, PeerScoreStorage, WallClock, mls_crypto::member_id_of,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
@@ -101,18 +101,18 @@ where
         self.mls().members_view()
     }
 
-    /// Signature public key bound to `member_id`'s MLS leaf, or `None` if it is
-    /// not a current member.
-    pub fn member_signature_key(&self, member_id: &[u8]) -> Option<Vec<u8>> {
-        self.mls().member_signature_key(member_id)
-    }
-
     pub fn member_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, ConversationError> {
         self.services.scoring.all_members_with_scores()
     }
 
-    pub fn member_score(&self, member_id: &[u8]) -> Result<Option<i64>, ConversationError> {
-        self.services.scoring.score_for(member_id)
+    /// Peer score for `member`, `None` if unscored; `MemberGone` if the handle
+    /// is stale.
+    pub fn member_score(&self, member: &MemberId) -> Result<Option<i64>, ConversationError> {
+        let leaf = self
+            .mls()
+            .leaf_of(member)
+            .ok_or(ConversationError::MemberGone)?;
+        self.services.scoring.score_for(&member_id_of(leaf))
     }
 
     /// Members that have an in-flight self-leave request.

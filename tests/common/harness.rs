@@ -35,7 +35,9 @@ use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
     conversation_update_request,
 };
-use de_mls::{Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome};
+use de_mls::{
+    Conversation, ConversationConfig, CreatorVote, MemberId, MemberRole, Outbound, PollOutcome,
+};
 use de_mls::{ConversationError, ConversationEvent, ConversationState, MockClock, ScoringConfig};
 use hashgraph_like_consensus::error::ConsensusError;
 
@@ -379,12 +381,15 @@ impl Member {
             .unwrap_or(0)
     }
 
-    /// Signature key this member's tree binds to `member_id`, or `None` when
-    /// `member_id` is not a current member (or this member hasn't joined).
-    pub fn member_signature_key(&self, member_id: &[u8]) -> Option<Vec<u8>> {
-        self.convo
-            .as_ref()
-            .and_then(|c| c.member_signature_key(member_id))
+    /// This member's [`MemberId`] for the member signing with `signature_key`,
+    /// from its own tree view; `None` if none does.
+    pub fn member_id_for(&self, signature_key: &[u8]) -> Option<MemberId> {
+        self.convo.as_ref().and_then(|c| {
+            c.members_view()
+                .iter()
+                .find(|m| m.signature_key == signature_key)
+                .map(MemberId::from)
+        })
     }
 
     /// Every [`ConversationEvent`] this member has emitted, in order.
@@ -561,11 +566,16 @@ impl Member {
             .expect("add member");
     }
 
-    pub fn remove_member(&mut self, member_id: &[u8]) {
+    /// Remove the member signing with `target_signature_key`, resolved against
+    /// this member's own tree view.
+    pub fn remove_member(&mut self, target_signature_key: &[u8]) {
+        let member = self
+            .member_id_for(target_signature_key)
+            .expect("target is a current member");
         self.convo
             .as_mut()
             .expect("member has joined")
-            .remove_member(&self.integ.provider, &self.integ.signer, member_id)
+            .remove_member(&self.integ.provider, &self.integ.signer, member)
             .expect("remove member");
     }
 

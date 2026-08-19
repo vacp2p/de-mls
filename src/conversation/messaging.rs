@@ -8,8 +8,9 @@ use std::error::Error as StdError;
 use openmls_traits::{OpenMlsProvider, signatures::Signer, storage::StorageProvider};
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
+    ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote, MemberId,
     PeerScoreStorage, WallClock,
+    mls_crypto::member_id_of,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, ConversationSyncRequest, ConversationUpdateRequest,
         MemberInvite,
@@ -202,7 +203,7 @@ where
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
-        member_id: &[u8],
+        member: MemberId,
     ) -> Result<(), ConversationError>
     where
         Pr: OpenMlsProvider,
@@ -213,9 +214,14 @@ where
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
 
+        let leaf = self
+            .mls()
+            .leaf_of(&member)
+            .ok_or(ConversationError::MemberGone)?;
+
         self.initiate_proposal(
             provider,
-            ConversationUpdateRequest::remove_member(member_id.to_vec()),
+            ConversationUpdateRequest::remove_member(member_id_of(leaf)),
             CreatorVote::Yes,
             signer,
         )?;

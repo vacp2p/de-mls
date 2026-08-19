@@ -41,7 +41,7 @@ fn recovery_auto_mint_converges_on_one_commit() {
         .expect("a sole epoch steward exists");
     let online: Vec<usize> = (0..3).filter(|&i| i != steward).collect();
     let (a, b) = (online[0], online[1]);
-    let steward_id = h.member(steward).member_id_bytes().to_vec();
+    let steward_id = h.member(steward).signing_pubkey();
     h.mute(steward);
 
     // A non-steward moves to remove the silent steward — consensus among the two
@@ -114,7 +114,7 @@ fn manual_only_recovery_does_not_auto_commit() {
         .find(|&i| h.member(i).convo().is_epoch_steward().unwrap())
         .expect("a sole epoch steward exists");
     let online: Vec<usize> = (0..3).filter(|&i| i != steward).collect();
-    let steward_id = h.member(steward).member_id_bytes().to_vec();
+    let steward_id = h.member(steward).signing_pubkey();
     h.mute(steward);
 
     h.member_mut(online[0]).remove_member(&steward_id);
@@ -230,7 +230,7 @@ fn silent_election_proposer_hands_authority_to_next_member() {
     let steward = (0..4)
         .find(|&i| h.member(i).is_epoch_steward())
         .expect("a sole epoch steward exists");
-    let steward_id = h.member(steward).member_id_bytes().to_vec();
+    let steward_id = h.member(steward).signing_pubkey();
     // With the steward's removal approved, round-0 proposer authority falls
     // to the lowest remaining member id — take that member offline too.
     let mut others: Vec<usize> = (0..4).filter(|&i| i != steward).collect();

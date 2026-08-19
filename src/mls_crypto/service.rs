@@ -28,7 +28,7 @@ use openmls_traits::{OpenMlsProvider, signatures::Signer};
 use prost::Message;
 use tracing::warn;
 
-use crate::mls_crypto::member_id::{leaf_index_of, member_id_of};
+use crate::mls_crypto::member_id::{MemberId, leaf_index_of, member_id_of};
 use crate::{
     Extensions, GroupContext,
     mls_crypto::{
@@ -198,6 +198,13 @@ impl MlsService {
     pub fn resolve_member_id(&self, member_id: &[u8]) -> Option<LeafNodeIndex> {
         let index = leaf_index_of(member_id)?;
         self.group.member_at(index).map(|_| index)
+    }
+
+    /// The leaf a [`MemberId`] currently resolves to, or `None` if the handle is
+    /// stale — its member left, or the leaf was reused (signature-key mismatch).
+    pub fn leaf_of(&self, id: &MemberId) -> Option<LeafNodeIndex> {
+        let member = self.group.member_at(id.leaf())?;
+        (member.signature_key.as_slice() == id.tag()).then_some(id.leaf())
     }
 
     /// Current members as OpenMLS [`Member`]s, in leaf order.
@@ -562,13 +569,6 @@ impl MlsService {
             })),
             _ => Ok(None),
         }
-    }
-
-    /// The signature public key at `member_id`'s leaf, or `None` if that leaf is
-    /// blank or the bytes aren't a valid id.
-    pub fn member_signature_key(&self, member_id: &[u8]) -> Option<Vec<u8>> {
-        let index = leaf_index_of(member_id)?;
-        self.group.member_at(index).map(|m| m.signature_key)
     }
 
     /// Peek a wire message's outer kind without processing or signature-checking

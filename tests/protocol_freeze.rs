@@ -24,7 +24,7 @@ fn freeze_cycle_emits_phases_in_order() {
 
     // Only look at phases emitted from here on (ignore the join cycle's).
     let baseline = h.member(0).events().len();
-    let bob_id = h.member(1).member_id_bytes().to_vec();
+    let bob_id = h.member(1).signing_pubkey();
     h.member_mut(0).remove_member(&bob_id);
 
     h.process_until("steward completes the freeze cycle", |h| {
@@ -73,7 +73,7 @@ fn silent_steward_drives_observer_to_reelection() {
     // The observer files approved work, then the steward goes silent: the
     // observer can't author a candidate itself and never sees the steward's,
     // so its freeze window elapses into Reelection.
-    let steward_id = h.member(steward).member_id_bytes().to_vec();
+    let steward_id = h.member(steward).signing_pubkey();
     h.member_mut(observer).remove_member(&steward_id);
     h.process_until("observer has approved work", |h| {
         h.member(observer).approved_count() > 0
@@ -128,8 +128,9 @@ fn active_emergency_drops_incoming_lower_priority_proposal() {
         let _ = h.member_mut(i).take_outbound();
     }
 
-    let target_a = vec![0xA1u8; 20];
-    let target_b = vec![0xB2u8; 20];
+    // Two distinct current members as removal targets (identities incidental).
+    let target_a = h.member(0).signing_pubkey();
+    let target_b = h.member(1).signing_pubkey();
 
     // Baseline (no emergency yet): CHARLIE's RemoveMember reaches BOB and lands
     // in the pending-update buffer.
