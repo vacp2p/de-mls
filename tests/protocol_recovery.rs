@@ -41,13 +41,13 @@ fn recovery_auto_mint_converges_on_one_commit() {
         .expect("a sole epoch steward exists");
     let online: Vec<usize> = (0..3).filter(|&i| i != steward).collect();
     let (a, b) = (online[0], online[1]);
-    let steward_id = h.member(steward).signing_pubkey();
+    let steward_id = h.member(steward).member_id();
     h.mute(steward);
 
     // A non-steward moves to remove the silent steward — consensus among the two
     // online members approves it, but with no online steward it can't commit —
     // then opens recovery through the real Deadlock-ECP consensus path.
-    h.member_mut(a).remove_member(&steward_id);
+    h.member_mut(a).remove_member(steward_id);
     h.member_mut(a).request_recovery();
 
     // Recovery auto-mints on both online members; they must converge on the
@@ -62,14 +62,9 @@ fn recovery_auto_mint_converges_on_one_commit() {
         h.member(b).epoch(),
         "online members converge on the same epoch"
     );
-    let canonical = |i: usize| {
-        let mut ids = h.member(i).convo().members().unwrap();
-        ids.sort();
-        ids
-    };
     assert_eq!(
-        canonical(a),
-        canonical(b),
+        h.member(a).member_keys(),
+        h.member(b).member_keys(),
         "online members agree on membership"
     );
     assert!(
@@ -114,10 +109,10 @@ fn manual_only_recovery_does_not_auto_commit() {
         .find(|&i| h.member(i).convo().is_epoch_steward().unwrap())
         .expect("a sole epoch steward exists");
     let online: Vec<usize> = (0..3).filter(|&i| i != steward).collect();
-    let steward_id = h.member(steward).signing_pubkey();
+    let steward_id = h.member(steward).member_id();
     h.mute(steward);
 
-    h.member_mut(online[0]).remove_member(&steward_id);
+    h.member_mut(online[0]).remove_member(steward_id);
     h.member_mut(online[0]).request_recovery();
 
     // Let recovery open and several windows pass — with no auto-mint the
@@ -230,7 +225,7 @@ fn silent_election_proposer_hands_authority_to_next_member() {
     let steward = (0..4)
         .find(|&i| h.member(i).is_epoch_steward())
         .expect("a sole epoch steward exists");
-    let steward_id = h.member(steward).signing_pubkey();
+    let steward_id = h.member(steward).member_id();
     // With the steward's removal approved, round-0 proposer authority falls
     // to the lowest remaining member id — take that member offline too.
     let mut others: Vec<usize> = (0..4).filter(|&i| i != steward).collect();
@@ -246,7 +241,7 @@ fn silent_election_proposer_hands_authority_to_next_member() {
     // Approve the steward's removal among the three non-steward members
     // (two online + the silent proposer, who still receives and votes but
     // whose outbound is dropped; the silent peers count as YES at timeout).
-    h.member_mut(online[0]).remove_member(&steward_id);
+    h.member_mut(online[0]).remove_member(steward_id);
 
     h.process_until("removal lands despite two silent members", |h| {
         online

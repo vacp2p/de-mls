@@ -97,17 +97,18 @@ fn members_view_signing_keys_agree_across_the_group() {
         let key = h.member(subject).signing_pubkey();
         for viewer in 0..3 {
             assert!(
-                h.member(viewer).member_id_for(&key).is_some(),
+                h.member(viewer).member_keys().contains(&key),
                 "member {viewer} does not see member {subject}'s signing key",
             );
         }
     }
 
-    // A key belonging to no current member resolves to no handle.
+    // A key belonging to no current member is absent from every view.
     assert!(
-        h.member(0)
-            .member_id_for(b"stranger-not-in-group")
-            .is_none(),
-        "a non-member key must not resolve to a handle",
+        !h.member(0)
+            .member_keys()
+            .iter()
+            .any(|k| k == b"stranger-not-in-group"),
+        "a non-member key must not appear in the member set",
     );
 }

@@ -55,8 +55,8 @@ fn lockstep_peer_surfaces_the_vote_request() {
         "no vote request exists before the removal is proposed"
     );
 
-    let bob_id = h.member(1).signing_pubkey();
-    h.member_mut(0).remove_member(&bob_id);
+    let bob_id = h.member(1).member_id();
+    h.member_mut(0).remove_member(bob_id);
 
     h.process_until("bob receives the vote request", |h| {
         h.member(1).pending_vote_request().is_some()
@@ -80,8 +80,8 @@ fn proposal_arriving_past_expiration_is_dropped_by_skewed_peer() {
     // every proposal alice stamps is already expired when bob validates it.
     h.member(1).advance_clock(SKEW);
 
-    let bob_id = h.member(1).signing_pubkey();
-    h.member_mut(0).remove_member(&bob_id);
+    let bob_id = h.member(1).member_id();
+    h.member_mut(0).remove_member(bob_id);
 
     // Drive well past the consensus timeout: the proposal round must resolve
     // (or retry) without bob ever seeing it.

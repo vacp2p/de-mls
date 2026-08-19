@@ -30,6 +30,13 @@ where
         &self.self_member_id
     }
 
+    /// The local member's own [`MemberId`] handle.
+    pub fn own_id(&self) -> MemberId {
+        self.mls()
+            .member_id_at(self.member_id_bytes())
+            .expect("the local member is present in its own group")
+    }
+
     /// App id this conversation tags on outbound packets and uses for self-echo
     /// filtering in [`Conversation::process_inbound`].
     pub fn app_id(&self) -> &[u8] {
@@ -91,18 +98,21 @@ where
         Ok(epoch_steward == Some(self.self_member_id.as_ref()))
     }
 
-    /// `member_id` (leaf-index bytes) of every current member, in MLS leaf order.
-    pub fn members(&self) -> Result<Vec<Vec<u8>>, ConversationError> {
-        Ok(self.mls().members()?)
-    }
-
-    /// Every current member as an OpenMLS [`Member`].
+    /// Every current member as an OpenMLS [`Member`], in leaf order.
     pub fn members_view(&self) -> Vec<Member> {
         self.mls().members_view()
     }
 
-    pub fn member_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, ConversationError> {
-        self.services.scoring.all_members_with_scores()
+    /// Peer score of every current member, keyed by its [`MemberId`] handle.
+    pub fn member_scores(&self) -> Result<Vec<(MemberId, i64)>, ConversationError> {
+        let mls = self.mls();
+        Ok(self
+            .services
+            .scoring
+            .all_members_with_scores()?
+            .into_iter()
+            .filter_map(|(id, score)| Some((mls.member_id_at(&id)?, score)))
+            .collect())
     }
 
     /// Peer score for `member`, `None` if unscored; `MemberGone` if the handle
@@ -115,18 +125,20 @@ where
         self.services.scoring.score_for(&member_id_of(leaf))
     }
 
-    /// Members that have an in-flight self-leave request.
-    pub fn pending_leave_member_ids(&self) -> Result<Vec<Vec<u8>>, ConversationError> {
-        let members = self.mls().members()?;
-        Ok(members
+    /// Members that have an in-flight self-leave request, by [`MemberId`].
+    pub fn pending_leave(&self) -> Result<Vec<MemberId>, ConversationError> {
+        let mls = self.mls();
+        Ok(mls
+            .members()?
             .into_iter()
             .filter(|id| self.queues.is_pending_self_leave(id))
+            .filter_map(|id| mls.member_id_at(&id))
             .collect())
     }
 
-    /// Steward role for each member. Uses live rotation so removed or
-    /// pending-leave stewards are skipped in role display.
-    pub fn member_roles(&self) -> Result<Vec<(Vec<u8>, MemberRole)>, ConversationError> {
+    /// Steward role of each member, keyed by its [`MemberId`] handle. Uses live
+    /// rotation so removed or pending-leave stewards are skipped in role display.
+    pub fn member_roles(&self) -> Result<Vec<(MemberId, MemberRole)>, ConversationError> {
         let mls = self.mls();
         let epoch = mls.current_epoch()?;
         let members = mls.members()?;
@@ -143,7 +155,7 @@ where
         let roles = members
             .iter()
             .cloned()
-            .map(|id| {
+            .filter_map(|id| {
                 let role = if has_list && !exhausted {
                     if live_epoch.as_deref().is_some_and(|es| es == id) {
                         MemberRole::EpochSteward
@@ -159,7 +171,7 @@ where
                 } else {
                     MemberRole::Member
                 };
-                (id, role)
+                Some((mls.member_id_at(&id)?, role))
             })
             .collect();
         Ok(roles)

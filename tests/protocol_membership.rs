@@ -93,8 +93,8 @@ fn removed_member_observes_leaving_and_group_shrinks() {
         .find(|&i| i != target && h.member(i).is_steward())
         .expect("a steward drives the removal");
 
-    let target_id = h.member(target).signing_pubkey();
-    h.member_mut(steward).remove_member(&target_id);
+    let target_id = h.member(target).member_id();
+    h.member_mut(steward).remove_member(target_id);
 
     h.process_until("target removed", |h| h.member(steward).member_count() == 2);
 

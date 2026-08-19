@@ -278,7 +278,7 @@ impl Member {
     }
 
     /// Per-member roles (steward / backup / member) in this conversation.
-    pub fn member_roles(&self) -> Vec<(Vec<u8>, MemberRole)> {
+    pub fn member_roles(&self) -> Vec<(MemberId, MemberRole)> {
         self.convo
             .as_ref()
             .and_then(|c| c.member_roles().ok())
@@ -286,7 +286,7 @@ impl Member {
     }
 
     /// Per-member peer scores.
-    pub fn member_scores(&self) -> Vec<(Vec<u8>, i64)> {
+    pub fn member_scores(&self) -> Vec<(MemberId, i64)> {
         self.convo
             .as_ref()
             .map(|c| c.member_scores().expect("member_scores"))
@@ -376,20 +376,31 @@ impl Member {
     pub fn member_count(&self) -> usize {
         self.convo
             .as_ref()
-            .and_then(|c| c.members().ok())
-            .map(|m| m.len())
+            .map(|c| c.members_view().len())
             .unwrap_or(0)
     }
 
-    /// This member's [`MemberId`] for the member signing with `signature_key`,
-    /// from its own tree view; `None` if none does.
-    pub fn member_id_for(&self, signature_key: &[u8]) -> Option<MemberId> {
-        self.convo.as_ref().and_then(|c| {
-            c.members_view()
-                .iter()
-                .find(|m| m.signature_key == signature_key)
-                .map(MemberId::from)
-        })
+    /// This member's own [`MemberId`] handle. Valid group-wide (the tree is
+    /// shared), so pass it to another member's `remove_member`.
+    pub fn member_id(&self) -> MemberId {
+        self.convo.as_ref().expect("member has joined").own_id()
+    }
+
+    /// Sorted signature keys of every member in this member's own tree view —
+    /// the group's identity set, for agreement and membership checks.
+    pub fn member_keys(&self) -> Vec<Vec<u8>> {
+        let mut keys: Vec<Vec<u8>> = self
+            .convo
+            .as_ref()
+            .map(|c| {
+                c.members_view()
+                    .into_iter()
+                    .map(|m| m.signature_key)
+                    .collect()
+            })
+            .unwrap_or_default();
+        keys.sort();
+        keys
     }
 
     /// Every [`ConversationEvent`] this member has emitted, in order.
@@ -566,16 +577,12 @@ impl Member {
             .expect("add member");
     }
 
-    /// Remove the member signing with `target_signature_key`, resolved against
-    /// this member's own tree view.
-    pub fn remove_member(&mut self, target_signature_key: &[u8]) {
-        let member = self
-            .member_id_for(target_signature_key)
-            .expect("target is a current member");
+    /// Propose removing `target` (another member's [`MemberId`] handle).
+    pub fn remove_member(&mut self, target: MemberId) {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .remove_member(&self.integ.provider, &self.integ.signer, member)
+            .remove_member(&self.integ.provider, &self.integ.signer, target)
             .expect("remove member");
     }
 
@@ -941,13 +948,8 @@ impl<const N: usize> TestHarness<N> {
 
     /// Every member sees the same set of MLS members (order-independent).
     pub fn membership_agrees(&self) -> bool {
-        let canonical = |m: &Member| {
-            let mut ids = m.convo().members().unwrap_or_default();
-            ids.sort();
-            ids
-        };
-        let first = canonical(&self.members[0]);
-        self.members.iter().all(|m| canonical(m) == first)
+        let first = self.members[0].member_keys();
+        self.members.iter().all(|m| m.member_keys() == first)
     }
 
     pub fn member(&self, index: usize) -> &Member {
