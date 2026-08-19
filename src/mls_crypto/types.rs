@@ -1,14 +1,15 @@
 //! MLS types and operation results.
 
-use openmls::prelude::{LeafNodeIndex, Member};
+use openmls::prelude::Member;
 
-/// Describes a membership update resulting from a merge:
-/// lists members who were added (with their assigned leaves)
-/// and the members who was removed.
+use crate::mls_crypto::MemberId;
+
+/// Describes a membership update resulting from a merge: the members added (with
+/// their assigned leaves) and, as pre-merge [`MemberId`] handles, those removed.
 #[derive(Clone, Debug, Default)]
 pub struct MembershipDelta {
     pub added: Vec<Member>,
-    pub removed: Vec<LeafNodeIndex>,
+    pub removed: Vec<MemberId>,
 }
 
 /// A membership change the steward feeds into the commit pipeline.

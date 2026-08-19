@@ -467,8 +467,10 @@ where
     /// both actions occur—the incoming member starts with a clean slate.
     fn reconcile_membership_after_commit(&mut self) -> Result<(), ConversationError> {
         let delta = self.queues.take_membership_delta();
-        for idx in &delta.removed {
-            self.services.scoring.remove_member(&member_id_of(*idx))?;
+        for member in &delta.removed {
+            self.services
+                .scoring
+                .remove_member(&member_id_of(member.leaf()))?;
         }
         for m in &delta.added {
             self.services.scoring.add_member(&member_id_of(m.index))?;

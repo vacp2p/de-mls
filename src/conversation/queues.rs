@@ -194,8 +194,8 @@ impl ConversationQueues {
         let Some(delta) = self.pending_membership_delta.clone() else {
             return;
         };
-        for idx in &delta.removed {
-            let id = member_id_of(*idx);
+        for member in &delta.removed {
+            let id = member_id_of(member.leaf());
             self.pending_updates.remove(&id);
             self.drop_approved_removals_for(&id);
         }
