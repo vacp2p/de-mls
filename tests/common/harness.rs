@@ -31,7 +31,7 @@ use prost::Message;
 
 use de_mls::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
-use de_mls::mls_crypto::credential_of_key_package;
+use de_mls::mls_crypto::unvalidated_credential_of_key_package;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
     conversation_update_request,
@@ -494,7 +494,7 @@ impl Member {
             matches!(
                 req.payload.as_ref(),
                 Some(conversation_update_request::Payload::MemberInvite(im))
-                    if credential_of_key_package(&im.key_package_bytes).is_ok_and(|c| c == member_id)
+                    if unvalidated_credential_of_key_package(&im.key_package_bytes).is_ok_and(|c| c == member_id)
             )
         };
         let mut ids: Vec<u32> = self
@@ -530,7 +530,7 @@ impl Member {
             .flatten()
             .filter_map(|r| match r.payload.as_ref() {
                 Some(conversation_update_request::Payload::MemberInvite(im)) => {
-                    credential_of_key_package(&im.key_package_bytes).ok()
+                    unvalidated_credential_of_key_package(&im.key_package_bytes).ok()
                 }
                 _ => None,
             })
@@ -582,7 +582,7 @@ impl Member {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .remove_member(&self.integ.provider, &self.integ.signer, target)
+            .remove_member(&self.integ.provider, &self.integ.signer, &target)
             .expect("remove member");
     }
 

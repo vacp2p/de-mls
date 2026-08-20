@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use sha2::{Digest, Sha256};
 
-use crate::mls_crypto::credential_of_key_package;
+use crate::mls_crypto::unvalidated_credential_of_key_package;
 use crate::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, ViolationType, conversation_update_request,
 };
@@ -31,7 +31,7 @@ pub fn member_set(members: &[Vec<u8>]) -> HashSet<&[u8]> {
 pub fn target_member_id_of(request: &ConversationUpdateRequest) -> Option<Vec<u8>> {
     match request.payload.as_ref()? {
         conversation_update_request::Payload::MemberInvite(m) => {
-            credential_of_key_package(&m.key_package_bytes).ok()
+            unvalidated_credential_of_key_package(&m.key_package_bytes).ok()
         }
         conversation_update_request::Payload::RemoveMember(m) => Some(m.member_id.clone()),
         _ => None,

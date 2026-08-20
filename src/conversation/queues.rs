@@ -540,7 +540,10 @@ fn removes_member(req: &ConversationUpdateRequest, member_id: &[u8]) -> bool {
 
 /// True when `req` admits `member_id`, whatever key package it carries.
 fn invites_member(req: &ConversationUpdateRequest, member_id: &[u8]) -> bool {
-    target_member_id_of(req).is_some_and(|target| target == member_id)
+    matches!(
+        req.payload.as_ref(),
+        Some(conversation_update_request::Payload::MemberInvite(_))
+    ) && target_member_id_of(req).is_some_and(|target| target == member_id)
 }
 
 /// Capacity of the resolved-outcome dedup set (`resolved_proposals`): proposal

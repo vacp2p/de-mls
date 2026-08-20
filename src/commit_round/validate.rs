@@ -11,7 +11,9 @@ use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 use crate::{
     BufferedCommitCandidate, ConversationError, ConversationQueues, StewardListService,
     commit_round::context::RoundContext,
-    mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult, credential_of_key_package},
+    mls_crypto::{
+        MlsProposalOutput, MlsService, StagedCandidateResult, unvalidated_credential_of_key_package,
+    },
     protos::de_mls::messages::v1::{
         CommitCandidate, ConversationUpdateRequest, ViolationEvidence,
         conversation_update_request::Payload,
@@ -144,9 +146,10 @@ pub fn validate_commit_candidate(
 /// index). Returns `None` for non-MLS payloads (emergency/election).
 fn action_projection_from_request(req: &ConversationUpdateRequest) -> Option<(u8, Vec<u8>)> {
     match req.payload.as_ref()? {
-        Payload::MemberInvite(im) => {
-            Some((0, credential_of_key_package(&im.key_package_bytes).ok()?))
-        }
+        Payload::MemberInvite(im) => Some((
+            0,
+            unvalidated_credential_of_key_package(&im.key_package_bytes).ok()?,
+        )),
         Payload::RemoveMember(rm) => Some((1, rm.member_id.clone())),
         _ => None,
     }

@@ -10,7 +10,7 @@ use openmls_traits::{OpenMlsProvider, signatures::Signer, storage::StorageProvid
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote, MemberId,
     PeerScoreStorage, WallClock,
-    mls_crypto::member_id_of,
+    mls_crypto::{member_id_of, validate_key_package},
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, ConversationSyncRequest, ConversationUpdateRequest,
         MemberInvite,
@@ -138,6 +138,7 @@ where
         if self.is_epoch_steward()? {
             return self.propose_add(provider, key_package_bytes, CreatorVote::Deferred, signer);
         }
+        validate_key_package(provider, key_package_bytes)?;
         let epoch = self.mls().current_epoch()?;
         self.queues.insert_pending_update(
             ConversationUpdateRequest::member_invite(MemberInvite {
@@ -162,6 +163,7 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
+        validate_key_package(provider, key_package_bytes)?;
         self.initiate_proposal(
             provider,
             ConversationUpdateRequest::member_invite(MemberInvite {
@@ -180,7 +182,7 @@ where
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
-        member: MemberId,
+        member: &MemberId,
     ) -> Result<(), ConversationError>
     where
         Pr: OpenMlsProvider,
@@ -193,7 +195,7 @@ where
 
         let leaf = self
             .mls()
-            .leaf_of(&member)
+            .leaf_of(member)
             .ok_or(ConversationError::MemberGone)?;
 
         self.initiate_proposal(

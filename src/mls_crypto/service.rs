@@ -18,7 +18,7 @@ use openmls::group::{
     GroupId, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, StagedCommit, StagedWelcome,
     WelcomeError,
 };
-use openmls::key_packages::KeyPackageIn;
+use openmls::key_packages::{KeyPackage, KeyPackageIn};
 use openmls::prelude::{
     ContentType, DeserializeBytes, LeafNodeIndex, Member, MlsMessageBodyIn, MlsMessageIn,
     ProcessedMessageContent, ProtocolMessage, ProtocolVersion, Sender,
@@ -46,10 +46,30 @@ pub struct MlsService {
     pending_staged_commit: Option<StagedCommit>,
 }
 
+/// Parse and cryptographically validate a key package, returning the validated
+/// [`KeyPackage`]. This is the gate a joiner passes to enter the group; call it
+/// before proposing an Add so a malformed or invalid key package fails at the
+/// caller rather than only when a steward commits it.
+pub fn validate_key_package<Pr>(
+    provider: &Pr,
+    key_package_bytes: &[u8],
+) -> Result<KeyPackage, MlsError>
+where
+    Pr: OpenMlsProvider,
+{
+    let (kp_in, _) =
+        KeyPackageIn::tls_deserialize_bytes(key_package_bytes).map_err(MlsError::KeyPackageTls)?;
+    kp_in
+        .validate(provider.crypto(), ProtocolVersion::Mls10)
+        .map_err(MlsError::storage)
+}
+
 /// The serialized leaf credential of a key package — the id a joiner is tracked
 /// by until the Add commit gives it a leaf. Reads it without validating the key
 /// package; validation happens at commit.
-pub fn credential_of_key_package(key_package_bytes: &[u8]) -> Result<Vec<u8>, MlsError> {
+pub fn unvalidated_credential_of_key_package(
+    key_package_bytes: &[u8],
+) -> Result<Vec<u8>, MlsError> {
     let (kp_in, _) =
         KeyPackageIn::tls_deserialize_bytes(key_package_bytes).map_err(MlsError::KeyPackageTls)?;
     Ok(kp_in
@@ -253,20 +273,15 @@ impl MlsService {
         for update in updates {
             match update {
                 MlsCommitInput::Add(key_package_bytes) => {
-                    let (kp_in, _rest) = KeyPackageIn::tls_deserialize_bytes(key_package_bytes)
-                        .map_err(MlsError::KeyPackageTls)?;
-                    let kp = kp_in
-                        .validate(provider.crypto(), ProtocolVersion::Mls10)
-                        .map_err(MlsError::storage)?;
-                    let (mls_message_out, _proposal_ref) =
-                        group.propose_add_member(provider, signer, &kp)?;
+                    let kp = validate_key_package(provider, key_package_bytes)?;
+                    let (mls_message_out, _) = group.propose_add_member(provider, signer, &kp)?;
                     mls_proposals.push(mls_message_out.to_bytes()?);
                 }
                 MlsCommitInput::Remove(member_id) => {
                     if let Some(index) = leaf_index_of(member_id)
                         && group.member_at(index).is_some()
                     {
-                        let (mls_message_out, _proposal_ref) =
+                        let (mls_message_out, _) =
                             group.propose_remove_member(provider, signer, index)?;
                         mls_proposals.push(mls_message_out.to_bytes()?);
                     }

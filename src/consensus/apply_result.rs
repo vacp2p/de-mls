@@ -8,7 +8,7 @@ use tracing::info;
 
 use crate::{
     ConversationError, ConversationQueues,
-    mls_crypto::credential_of_key_package,
+    mls_crypto::unvalidated_credential_of_key_package,
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, ViolationEvidence, ViolationType,
         conversation_update_request,
@@ -114,7 +114,7 @@ pub fn apply_consensus_result(
     if approved
         && let Some(conversation_update_request::Payload::MemberInvite(invite)) =
             request.payload.as_ref()
-        && let Ok(credential) = credential_of_key_package(&invite.key_package_bytes)
+        && let Ok(credential) = unvalidated_credential_of_key_package(&invite.key_package_bytes)
         && conversation.has_approved_invite(&credential)
     {
         info!(
