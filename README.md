@@ -28,8 +28,9 @@ member to its transport address — the transport itself, the OpenMLS provider
 vote-signing key), key-package minting, and the registry of conversations.
 
 **de-mls owns:** the protocol — MLS commits, proposal voting, steward election,
-and freeze timing — along with the per-conversation state behind it: member ids
-(each member's ratchet-tree leaf index), proposal queues, deduplication, the
+and freeze timing — along with the per-conversation state behind it: member
+identity (it hands you each member as an OpenMLS `Member` and takes back an
+opaque `MemberId` handle to act on one), proposal queues, deduplication, the
 steward list, peer scores, and the `Conversation` state machine.
 
 ## The `Conversation` API
@@ -52,8 +53,9 @@ let mut convo: Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, _>
 
 // let joined = Conversation::join(&provider, &signer,
 //                                 welcome_bytes, sync_bytes, …)?;  // Ok(None) = not for us
-// de-mls assigns each member its id — the ratchet-tree leaf index — and hands
-// it back via `member_id_bytes()` and the `MembersChanged` event.
+// de-mls surfaces members as OpenMLS `Member`s (via `members_view()` and the
+// `MembersChanged` event) and takes back an opaque `MemberId` handle
+// (`MemberId::from(&member)`) for `remove_member` / `member_score`.
 
 // Drive it once per wakeup cycle, then drain its products:
 convo.process_inbound(&provider, &signer, &sender, &payload)?; // feed inbound bytes
