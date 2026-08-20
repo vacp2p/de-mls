@@ -86,6 +86,14 @@ where
             );
         }
 
+        if let Err(e) = self.drive_sync_request(provider, signer) {
+            warn!(
+                conversation = %self.conversation_id,
+                error = %e,
+                "sync-request drive error in poll"
+            );
+        }
+
         if let Err(e) = self.start_freeze_on_inactivity(provider, signer) {
             warn!(
                 conversation = %self.conversation_id,
@@ -531,6 +539,46 @@ where
             "backup steward re-sending conversation sync: epoch steward silent past backup_takeover_window"
         );
         self.share_conversation_sync(provider, signer)
+    }
+
+    /// Pull side of sync recovery: when the local steward list is missing or
+    /// exhausted at the current epoch and no election is being voted on locally,
+    /// ask for the current list. Covers anyone that missed an election — a joiner
+    /// welcomed that epoch, or a steward returning from offline whose stale list
+    /// still names it. Rate-limited to one request per `backup_takeover_window`
+    /// (the answer latency — a backup steward covers a silent epoch steward only
+    /// after that window). Skipped while an election is in flight, which resolves
+    /// into the list directly.
+    fn drive_sync_request<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let current_epoch = self.mls().current_epoch()?;
+        let needs_sync = match self.services.steward_list.current_list() {
+            None => true,
+            Some(_) => self.services.steward_list.is_exhausted(current_epoch),
+        };
+        if !needs_sync || self.queues.has_election_in_flight() {
+            self.timing.sync_request_anchor = None;
+            return Ok(());
+        }
+        let now = self.clock.timestamp();
+        if let Some(anchor) = self.timing.sync_request_anchor
+            && now < anchor + self.config.backup_takeover_window
+        {
+            return Ok(());
+        }
+        self.timing.sync_request_anchor = Some(now);
+        info!(
+            conversation = %self.conversation_id,
+            "requesting conversation sync: local steward list missing or exhausted"
+        );
+        self.request_conversation_sync(provider, signer)
     }
 
     /// Steward-inactivity freeze entry: once the inactivity timer fires with

@@ -74,12 +74,11 @@ where
         Ok(())
     }
 
-    /// Ask a steward to re-send the `ConversationSync` after a
-    /// [`crate::ConversationEvent::ConversationSyncMissing`];
-    /// [`crate::ConversationEvent::ConversationSyncApplied`] signals when to
-    /// stop. MLS-encrypted, so only a steward can answer. Don't re-request
-    /// faster than `retry_window` — that's the window a backup
-    /// steward waits before covering for a silent epoch steward.
+    /// Broadcast a `ConversationSyncRequest` so a steward re-sends the `ConversationSync`;
+    /// `poll` calls this automatically whenever the local steward list is missing or
+    /// exhausted, paced at `backup_takeover_window` (the answer latency — a
+    /// backup steward covers a silent epoch steward only after that window);
+    /// [`crate::ConversationEvent::ConversationSyncApplied`] fires once a sync is adopted.
     pub fn request_conversation_sync<Pr>(
         &mut self,
         provider: &Pr,

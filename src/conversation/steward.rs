@@ -326,23 +326,24 @@ where
         };
 
         let timing = TimingConfig::from(&self.config);
+        let steward_members = list.members().to_vec();
+        let election_epoch = list.election_epoch();
 
-        // Filter ghosts and queued-removal targets so joiners don't
-        // inherit stewards they would have to walk past on the very
-        // first epoch.
-        let mls_members = self.mls().members()?;
-        let steward_members = {
-            let eligible = self.queues.steward_eligibility(&mls_members);
-            self.services.steward_list.steward_members(&eligible)
-        };
+        // List members who weren't settled at election time. New joiners
+        // use this to re-calculate and verify the steward list themselves.
+        let unsettled_members: Vec<Vec<u8>> = self
+            .mls()
+            .members()?
+            .into_iter()
+            .filter(|m| !self.queues.is_settled(m, election_epoch))
+            .collect();
 
-        // `retry_round` is the seed that produced the *stored* list —
-        // a frozen tag on `StewardList`, not the plug-in's dynamic
-        // counter for the next attempt (which resets to 0 on accept).
-        // Joiners re-derive the ordering from this seed.
+        // `retry_round` is the fixed seed that made this list.
+        // It's frozen on the list, not the next dynamic attempt.
+        // Joiners use it to recompute the list order.
         let sync = ConversationSync {
             steward_members,
-            election_epoch: list.election_epoch(),
+            election_epoch,
             sn_min: list.config().sn_min as u32,
             sn_max: list.config().sn_max as u32,
             allow_subset_candidates: self.services.steward_list.config().allow_subset_candidates,
@@ -353,6 +354,7 @@ where
             liveness_criteria_yes: self.config.liveness_criteria_yes,
             threshold_peer_score: self.services.scoring.threshold(),
             pending_update_max_epochs: self.config.pending_update_max_epochs,
+            unsettled_members,
         };
 
         let app_msg: AppMessage = sync.into();

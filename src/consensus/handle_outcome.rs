@@ -221,7 +221,16 @@ where
             "steward election applied"
         );
 
-        self.process_buffered_updates(provider, signer)
+        // Broadcast the elected list so a member that missed the vote learns it
+        // and authorizes the next steward's commit. Drain buffered updates
+        // regardless, then surface a share failure.
+        let shared = if self.is_epoch_steward()? {
+            self.share_conversation_sync(provider, signer)
+        } else {
+            Ok(())
+        };
+        self.process_buffered_updates(provider, signer)?;
+        shared
     }
 
     /// Emergency proposal resolved: apply the score ops, lift the partial
