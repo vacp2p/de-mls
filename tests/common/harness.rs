@@ -31,11 +31,14 @@ use prost::Message;
 
 use de_mls::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
+use de_mls::mls_crypto::unvalidated_credential_of_key_package;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
     conversation_update_request,
 };
-use de_mls::{Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome};
+use de_mls::{
+    Conversation, ConversationConfig, CreatorVote, MemberId, MemberRole, Outbound, PollOutcome,
+};
 use de_mls::{ConversationError, ConversationEvent, ConversationState, MockClock, ScoringConfig};
 use hashgraph_like_consensus::error::ConsensusError;
 
@@ -276,7 +279,7 @@ impl Member {
     }
 
     /// Per-member roles (steward / backup / member) in this conversation.
-    pub fn member_roles(&self) -> Vec<(Vec<u8>, MemberRole)> {
+    pub fn member_roles(&self) -> Vec<(MemberId, MemberRole)> {
         self.convo
             .as_ref()
             .and_then(|c| c.member_roles().ok())
@@ -284,7 +287,7 @@ impl Member {
     }
 
     /// Per-member peer scores.
-    pub fn member_scores(&self) -> Vec<(Vec<u8>, i64)> {
+    pub fn member_scores(&self) -> Vec<(MemberId, i64)> {
         self.convo
             .as_ref()
             .map(|c| c.member_scores().expect("member_scores"))
@@ -374,17 +377,31 @@ impl Member {
     pub fn member_count(&self) -> usize {
         self.convo
             .as_ref()
-            .and_then(|c| c.members().ok())
-            .map(|m| m.len())
+            .map(|c| c.members_view().len())
             .unwrap_or(0)
     }
 
-    /// Signature key this member's tree binds to `member_id`, or `None` when
-    /// `member_id` is not a current member (or this member hasn't joined).
-    pub fn member_signature_key(&self, member_id: &[u8]) -> Option<Vec<u8>> {
-        self.convo
+    /// This member's own [`MemberId`] handle. Valid group-wide (the tree is
+    /// shared), so pass it to another member's `remove_member`.
+    pub fn member_id(&self) -> MemberId {
+        self.convo.as_ref().expect("member has joined").own_id()
+    }
+
+    /// Sorted signature keys of every member in this member's own tree view —
+    /// the group's identity set, for agreement and membership checks.
+    pub fn member_keys(&self) -> Vec<Vec<u8>> {
+        let mut keys: Vec<Vec<u8>> = self
+            .convo
             .as_ref()
-            .and_then(|c| c.member_signature_key(member_id))
+            .map(|c| {
+                c.members_view()
+                    .into_iter()
+                    .map(|m| m.signature_key)
+                    .collect()
+            })
+            .unwrap_or_default();
+        keys.sort();
+        keys
     }
 
     /// Every [`ConversationEvent`] this member has emitted, in order.
@@ -477,7 +494,7 @@ impl Member {
             matches!(
                 req.payload.as_ref(),
                 Some(conversation_update_request::Payload::MemberInvite(im))
-                    if im.credential == member_id
+                    if unvalidated_credential_of_key_package(&im.key_package_bytes).is_ok_and(|c| c == member_id)
             )
         };
         let mut ids: Vec<u32> = self
@@ -513,7 +530,7 @@ impl Member {
             .flatten()
             .filter_map(|r| match r.payload.as_ref() {
                 Some(conversation_update_request::Payload::MemberInvite(im)) => {
-                    Some(im.credential.clone())
+                    unvalidated_credential_of_key_package(&im.key_package_bytes).ok()
                 }
                 _ => None,
             })
@@ -555,17 +572,17 @@ impl Member {
             .add_member(
                 &self.integ.provider,
                 &self.integ.signer,
-                key_package.member_id(),
                 key_package.as_bytes(),
             )
             .expect("add member");
     }
 
-    pub fn remove_member(&mut self, member_id: &[u8]) {
+    /// Propose removing `target` (another member's [`MemberId`] handle).
+    pub fn remove_member(&mut self, target: MemberId) {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .remove_member(&self.integ.provider, &self.integ.signer, member_id)
+            .remove_member(&self.integ.provider, &self.integ.signer, &target)
             .expect("remove member");
     }
 
@@ -647,10 +664,7 @@ impl Member {
         Outbound {
             conversation_id: conversation_id.to_string(),
             sender: self.app_id().to_vec(),
-            payload: build_key_package_announcement(
-                key_package.as_bytes(),
-                key_package.member_id(),
-            ),
+            payload: build_key_package_announcement(key_package.as_bytes()),
         }
     }
 
@@ -735,7 +749,6 @@ impl Member {
         let _ = convo.sponsor_member(
             &self.integ.provider,
             &self.integ.signer,
-            &invite.credential,
             &invite.key_package_bytes,
         );
     }
@@ -795,13 +808,12 @@ impl Member {
     }
 }
 
-/// Encode a key package and its owner's `member_id` into the wire format used
-/// for KP announcements. Returns the prost-encoded `MemberInvite` bytes ready
-/// for broadcast on the welcome subtopic.
-pub fn build_key_package_announcement(key_package_bytes: &[u8], member_id: &[u8]) -> Vec<u8> {
+/// Encode a key package into the wire format used for KP announcements.
+/// Returns the prost-encoded `MemberInvite` bytes ready for broadcast on the
+/// welcome subtopic.
+pub fn build_key_package_announcement(key_package_bytes: &[u8]) -> Vec<u8> {
     MemberInvite {
         key_package_bytes: key_package_bytes.to_vec(),
-        credential: member_id.to_vec(),
     }
     .encode_to_vec()
 }
@@ -941,13 +953,8 @@ impl<const N: usize> TestHarness<N> {
 
     /// Every member sees the same set of MLS members (order-independent).
     pub fn membership_agrees(&self) -> bool {
-        let canonical = |m: &Member| {
-            let mut ids = m.convo().members().unwrap_or_default();
-            ids.sort();
-            ids
-        };
-        let first = canonical(&self.members[0]);
-        self.members.iter().all(|m| canonical(m) == first)
+        let first = self.members[0].member_keys();
+        self.members.iter().all(|m| m.member_keys() == first)
     }
 
     pub fn member(&self, index: usize) -> &Member {

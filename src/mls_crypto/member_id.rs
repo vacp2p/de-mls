@@ -10,7 +10,37 @@
 //! bytes opaquely; only this module and [`MlsService`](super::MlsService) know
 //! they encode a leaf index.
 
-use openmls::prelude::LeafNodeIndex;
+use openmls::prelude::{LeafNodeIndex, Member};
+
+/// An opaque, de-mls-issued handle to a current member. Obtain one with
+/// [`MemberId::from`] a [`Member`] the library returned; pass it back to
+/// `remove_member` / `member_score`. It pins the member's leaf and the
+/// signature key held when issued, so once that member leaves or its leaf is
+/// reused the handle stops resolving instead of acting on a different member.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct MemberId {
+    leaf: LeafNodeIndex,
+    tag: Vec<u8>,
+}
+
+impl MemberId {
+    pub(crate) fn leaf(&self) -> LeafNodeIndex {
+        self.leaf
+    }
+
+    pub(crate) fn tag(&self) -> &[u8] {
+        &self.tag
+    }
+}
+
+impl From<&Member> for MemberId {
+    fn from(member: &Member) -> Self {
+        Self {
+            leaf: member.index,
+            tag: member.signature_key.clone(),
+        }
+    }
+}
 
 /// Encode a leaf index as its `member_id` bytes.
 pub(crate) fn member_id_of(index: LeafNodeIndex) -> Vec<u8> {

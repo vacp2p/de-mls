@@ -18,7 +18,7 @@ use openmls::group::{
     GroupId, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, StagedCommit, StagedWelcome,
     WelcomeError,
 };
-use openmls::key_packages::KeyPackageIn;
+use openmls::key_packages::{KeyPackage, KeyPackageIn};
 use openmls::prelude::{
     ContentType, DeserializeBytes, LeafNodeIndex, Member, MlsMessageBodyIn, MlsMessageIn,
     ProcessedMessageContent, ProtocolMessage, ProtocolVersion, Sender,
@@ -28,7 +28,7 @@ use openmls_traits::{OpenMlsProvider, signatures::Signer};
 use prost::Message;
 use tracing::warn;
 
-use crate::mls_crypto::member_id::{leaf_index_of, member_id_of};
+use crate::mls_crypto::member_id::{MemberId, leaf_index_of, member_id_of};
 use crate::{
     Extensions, GroupContext,
     mls_crypto::{
@@ -46,12 +46,37 @@ pub struct MlsService {
     pending_staged_commit: Option<StagedCommit>,
 }
 
-/// The leaf indices a commit's Remove proposals vacate.
-fn removed_leaves_of(staged: &StagedCommit) -> Vec<LeafNodeIndex> {
-    staged
-        .remove_proposals()
-        .map(|r| r.remove_proposal().removed())
-        .collect()
+/// Parse and cryptographically validate a key package, returning the validated
+/// [`KeyPackage`]. This is the gate a joiner passes to enter the group; call it
+/// before proposing an Add so a malformed or invalid key package fails at the
+/// caller rather than only when a steward commits it.
+pub fn validate_key_package<Pr>(
+    provider: &Pr,
+    key_package_bytes: &[u8],
+) -> Result<KeyPackage, MlsError>
+where
+    Pr: OpenMlsProvider,
+{
+    let (kp_in, _) =
+        KeyPackageIn::tls_deserialize_bytes(key_package_bytes).map_err(MlsError::KeyPackageTls)?;
+    kp_in
+        .validate(provider.crypto(), ProtocolVersion::Mls10)
+        .map_err(MlsError::storage)
+}
+
+/// The serialized leaf credential of a key package — the id a joiner is tracked
+/// by until the Add commit gives it a leaf. Reads it without validating the key
+/// package; validation happens at commit.
+pub fn unvalidated_credential_of_key_package(
+    key_package_bytes: &[u8],
+) -> Result<Vec<u8>, MlsError> {
+    let (kp_in, _) =
+        KeyPackageIn::tls_deserialize_bytes(key_package_bytes).map_err(MlsError::KeyPackageTls)?;
+    Ok(kp_in
+        .unverified_credential()
+        .credential
+        .serialized_content()
+        .to_vec())
 }
 
 impl MlsService {
@@ -200,6 +225,20 @@ impl MlsService {
         self.group.member_at(index).map(|_| index)
     }
 
+    /// The leaf a [`MemberId`] currently resolves to, or `None` if the handle is
+    /// stale — its member left, or the leaf was reused (signature-key mismatch).
+    pub fn leaf_of(&self, id: &MemberId) -> Option<LeafNodeIndex> {
+        let member = self.group.member_at(id.leaf())?;
+        (member.signature_key.as_slice() == id.tag()).then_some(id.leaf())
+    }
+
+    /// The [`MemberId`] handle for the member at `member_id` (leaf bytes), or
+    /// `None` if no current member sits there.
+    pub fn member_id_at(&self, member_id: &[u8]) -> Option<MemberId> {
+        let index = leaf_index_of(member_id)?;
+        self.group.member_at(index).map(|m| MemberId::from(&m))
+    }
+
     /// Current members as OpenMLS [`Member`]s, in leaf order.
     pub fn members_view(&self) -> Vec<Member> {
         self.group.members().collect()
@@ -234,20 +273,15 @@ impl MlsService {
         for update in updates {
             match update {
                 MlsCommitInput::Add(key_package_bytes) => {
-                    let (kp_in, _rest) = KeyPackageIn::tls_deserialize_bytes(key_package_bytes)
-                        .map_err(MlsError::KeyPackageTls)?;
-                    let kp = kp_in
-                        .validate(provider.crypto(), ProtocolVersion::Mls10)
-                        .map_err(MlsError::storage)?;
-                    let (mls_message_out, _proposal_ref) =
-                        group.propose_add_member(provider, signer, &kp)?;
+                    let kp = validate_key_package(provider, key_package_bytes)?;
+                    let (mls_message_out, _) = group.propose_add_member(provider, signer, &kp)?;
                     mls_proposals.push(mls_message_out.to_bytes()?);
                 }
                 MlsCommitInput::Remove(member_id) => {
                     if let Some(index) = leaf_index_of(member_id)
                         && group.member_at(index).is_some()
                     {
-                        let (mls_message_out, _proposal_ref) =
+                        let (mls_message_out, _) =
                             group.propose_remove_member(provider, signer, index)?;
                         mls_proposals.push(mls_message_out.to_bytes()?);
                     }
@@ -277,14 +311,26 @@ impl MlsService {
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let removed = self
-            .group
-            .pending_commit()
-            .map(removed_leaves_of)
-            .unwrap_or_default();
+        let removed = match self.group.pending_commit() {
+            Some(staged) => self.removed_members_of(staged),
+            None => Vec::new(),
+        };
         let before = self.populated_leaves();
         self.group.merge_pending_commit(provider)?;
         Ok(self.delta(before, removed))
+    }
+
+    /// The members a commit's Remove proposals vacate, as [`MemberId`] handles.
+    /// Called before the commit merges — the tree still seats them, so each
+    /// handle captures the departing member's leaf and signature key.
+    fn removed_members_of(&self, staged: &StagedCommit) -> Vec<MemberId> {
+        staged
+            .remove_proposals()
+            .filter_map(|r| {
+                let leaf = r.remove_proposal().removed();
+                self.group.member_at(leaf).map(|m| MemberId::from(&m))
+            })
+            .collect()
     }
 
     /// The leaf indices this group currently seats.
@@ -295,8 +341,8 @@ impl MlsService {
     /// Returns who was added or removed by the latest commit, based on the Remove
     /// proposals and the updated tree. New or recycled leaves show up as added;
     /// removed leaves are from this commit’s Remove proposals.
-    fn delta(&self, before: HashSet<u32>, removed: Vec<LeafNodeIndex>) -> MembershipDelta {
-        let removed_set: HashSet<u32> = removed.iter().map(|i| i.u32()).collect();
+    fn delta(&self, before: HashSet<u32>, removed: Vec<MemberId>) -> MembershipDelta {
+        let removed_set: HashSet<u32> = removed.iter().map(|id| id.leaf().u32()).collect();
         let added = self
             .group
             .members()
@@ -464,7 +510,7 @@ impl MlsService {
             .pending_staged_commit
             .take()
             .ok_or_else(|| MlsError::NoPendingStagedCommit(self.conversation_id.clone()))?;
-        let removed = removed_leaves_of(&staged);
+        let removed = self.removed_members_of(&staged);
         let before = self.populated_leaves();
         self.group.merge_staged_commit(provider, staged)?;
         Ok(self.delta(before, removed))
@@ -562,13 +608,6 @@ impl MlsService {
             })),
             _ => Ok(None),
         }
-    }
-
-    /// The signature public key at `member_id`'s leaf, or `None` if that leaf is
-    /// blank or the bytes aren't a valid id.
-    pub fn member_signature_key(&self, member_id: &[u8]) -> Option<Vec<u8>> {
-        let index = leaf_index_of(member_id)?;
-        self.group.member_at(index).map(|m| m.signature_key)
     }
 
     /// Peek a wire message's outer kind without processing or signature-checking
@@ -837,9 +876,13 @@ mod service_tests {
         // (leaf 1 present before and after) would miss the swap and leak bob's
         // state onto dave.
         assert!(
-            delta.removed.contains(&bob_leaf),
+            delta.removed.iter().any(|id| id.leaf() == bob_leaf),
             "reused leaf listed as removed; removed={:?}",
-            delta.removed.iter().map(|i| i.u32()).collect::<Vec<_>>()
+            delta
+                .removed
+                .iter()
+                .map(|id| id.leaf().u32())
+                .collect::<Vec<_>>()
         );
         assert!(
             delta

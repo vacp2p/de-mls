@@ -149,12 +149,7 @@ fn join_completes_in_one_call() {
     // the add, so her bundled YES resolves consensus on its own.
     let bob_kp = bob.mint_key_package();
     creator
-        .add_member(
-            &alice.provider,
-            &alice.signer,
-            bob_kp.member_id(),
-            bob_kp.as_bytes(),
-        )
+        .add_member(&alice.provider, &alice.signer, bob_kp.as_bytes())
         .expect("add member");
 
     // Drive the creator until the welcome is minted.
@@ -218,7 +213,7 @@ fn join_completes_in_one_call() {
     .expect("welcome addresses bob");
     assert_eq!(joined.id(), "standalone-welcome");
     assert_eq!(joined.state(), ConversationState::Working);
-    assert_eq!(joined.members().expect("members").len(), 2);
+    assert_eq!(joined.members_view().len(), 2);
     let (epoch, _) = joined.epoch_and_retry().expect("epoch");
     assert_eq!(epoch, 1, "joiner lands on the post-add epoch");
 }
@@ -260,7 +255,7 @@ fn create_with_members_seeds_initial_members_at_genesis() {
     // Genesis is immediate: at epoch 1 with all three members, no polling.
     let (epoch, _) = creator.epoch_and_retry().expect("epoch");
     assert_eq!(epoch, 1, "the genesis commit landed at creation");
-    assert_eq!(creator.members().expect("members").len(), 3);
+    assert_eq!(creator.members_view().len(), 3);
     assert_eq!(creator.state(), ConversationState::Working);
     assert!(
         creator.is_steward(),
@@ -303,7 +298,7 @@ fn create_with_members_seeds_initial_members_at_genesis() {
         .expect("welcome addresses the member");
         assert_eq!(joined.id(), "genesis");
         assert_eq!(joined.state(), ConversationState::Working);
-        assert_eq!(joined.members().expect("members").len(), 3);
+        assert_eq!(joined.members_view().len(), 3);
         let (e, _) = joined.epoch_and_retry().expect("epoch");
         assert_eq!(e, 1, "member lands on the genesis epoch");
         assert!(joined.is_steward(), "an initial member stewards genesis");
@@ -348,7 +343,7 @@ fn create_with_members_founds_a_subset_steward_group() {
 
     let (epoch, _) = creator.epoch_and_retry().expect("epoch");
     assert_eq!(epoch, 1);
-    assert_eq!(creator.members().expect("members").len(), 4);
+    assert_eq!(creator.members_view().len(), 4);
 
     let welcome = creator
         .drain_events()
@@ -378,7 +373,7 @@ fn create_with_members_founds_a_subset_steward_group() {
         )
         .expect("join")
         .expect("welcome addresses the member");
-        assert_eq!(joined.members().expect("members").len(), 4);
+        assert_eq!(joined.members_view().len(), 4);
         convos.push(joined);
     }
 

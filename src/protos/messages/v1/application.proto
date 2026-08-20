@@ -105,8 +105,6 @@ message EmergencyCriteriaProposal {
 
 message MemberInvite {
   bytes key_package_bytes = 1;
-  // The joiner's encoded MLS credential
-  bytes credential = 2;
 }
 
 message RemoveMember {

@@ -194,8 +194,8 @@ impl ConversationQueues {
         let Some(delta) = self.pending_membership_delta.clone() else {
             return;
         };
-        for idx in &delta.removed {
-            let id = member_id_of(*idx);
+        for member in &delta.removed {
+            let id = member_id_of(member.leaf());
             self.pending_updates.remove(&id);
             self.drop_approved_removals_for(&id);
         }
@@ -244,11 +244,11 @@ impl ConversationQueues {
     /// Member ids targeted by an in-flight proposal — either still voting or
     /// already approved. A buffered update whose target is in this set is
     /// already covered by a live proposal and must not be re-proposed.
-    pub fn active_proposal_targets(&self) -> HashSet<&[u8]> {
+    pub fn active_proposal_targets(&self) -> HashSet<Vec<u8>> {
         let voting = self
             .voting_proposals
             .values()
-            .filter_map(|m| m.target.as_deref());
+            .filter_map(|m| m.target.clone());
         let approved = self
             .approved_proposals
             .values()
@@ -343,7 +343,7 @@ impl ConversationQueues {
         self.voting_proposals
             .entry(proposal_id)
             .or_insert_with(|| VotingMeta {
-                target: in_flight_target(proposal).map(<[u8]>::to_vec),
+                target: in_flight_target(proposal),
                 kind: ProposalKind::of(proposal),
             });
     }
@@ -449,10 +449,9 @@ impl ConversationQueues {
         request: ConversationUpdateRequest,
         current_epoch: u64,
     ) -> bool {
-        let Some(member_id) = target_member_id_of(&request) else {
+        let Some(key) = target_member_id_of(&request) else {
             return false;
         };
-        let key = member_id.to_vec();
         if self.pending_updates.contains_key(&key) {
             return false;
         }
@@ -543,8 +542,8 @@ fn removes_member(req: &ConversationUpdateRequest, member_id: &[u8]) -> bool {
 fn invites_member(req: &ConversationUpdateRequest, member_id: &[u8]) -> bool {
     matches!(
         req.payload.as_ref(),
-        Some(conversation_update_request::Payload::MemberInvite(m)) if m.credential == member_id
-    )
+        Some(conversation_update_request::Payload::MemberInvite(_))
+    ) && target_member_id_of(req).is_some_and(|target| target == member_id)
 }
 
 /// Capacity of the resolved-outcome dedup set (`resolved_proposals`): proposal
@@ -642,7 +641,6 @@ mod tests {
         insert_remove_member(&mut conversation, &member(3), ecp_id);
         let add = ConversationUpdateRequest::member_invite(MemberInvite {
             key_package_bytes: vec![0; 8],
-            credential: member(99),
         });
         conversation.insert_approved_proposal(add_id, add);
         assert_eq!(conversation.approved_proposals_count(), 3);

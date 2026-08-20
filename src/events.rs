@@ -8,7 +8,7 @@
 //! Events are fire-and-forget — recording one never blocks on the integrator.
 
 use crate::{
-    ConversationState, LeafNodeIndex, Member,
+    ConversationState, Member, MemberId,
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest, MemberWelcome},
 };
 
@@ -151,10 +151,11 @@ pub enum ConversationEvent {
     },
 
     /// A merged commit changed the member set: `added` carries each new member as
-    /// an OpenMLS [`Member`] (leaf index + credential + keys), `removed` the leaf
-    /// indices vacated. A leaf reused in one commit appears in both lists.
+    /// an OpenMLS [`Member`] (leaf index + credential + keys), `removed` the
+    /// departed members as [`MemberId`] handles (tagged before the commit, so a
+    /// reused leaf yields distinct handles in `added` and `removed`).
     MembersChanged {
         added: Vec<Member>,
-        removed: Vec<LeafNodeIndex>,
+        removed: Vec<MemberId>,
     },
 }
