@@ -129,11 +129,9 @@ where
             self.handle_emergency_scored(provider, proposal_id, &score_ops, signer)?;
         }
 
-        // Free the resolved session so the store holds only live ones. The cap
-        // (`max_consensus_sessions`) counts stored sessions and its trim evicts
-        // by `HashMap` order — divergent across nodes, so a still-needed session
-        // can vanish on one node and not another. Late votes and timeouts for
-        // this proposal fall back to the resolved cache recorded above.
+        // Free the resolved session so the store keeps only live ones; late
+        // votes and timeouts for this proposal fall back to the resolved cache
+        // recorded above.
         self.services
             .consensus
             .storage()
