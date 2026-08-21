@@ -519,22 +519,28 @@ where
         Ok(())
     }
 
-    /// Apply a steward's `ConversationSync` when we're a joiner without a steward
-    /// list. Validates the proposed list against the members it carries
-    /// (not the full MLS set — the list may have been generated before we
-    /// existed), then applies list + protocol flags + timing + peer scores.
+    /// Apply a steward's `ConversationSync` when we hold no steward list, or one
+    /// that's exhausted at the current epoch. Reconstructs the candidate pool
+    /// (MLS members minus the carried unsettled set), re-derives the steward
+    /// list to verify it, then applies list + protocol flags + timing + peer
+    /// scores.
     fn on_conversation_sync(&mut self, sync: ConversationSync) -> Result<(), ConversationError> {
         // A sync is on the wire — the request round is answered, so disarm any
-        // pending backup takeover before the list-present guard returns.
+        // pending backup takeover before the guard returns.
         self.timing.sync_resend_anchor = None;
-        if self.services.steward_list.current_list().is_some() {
-            return Ok(());
-        }
         let conversation_id = self.conversation_id.clone();
         let (members, current_epoch) = {
             let mls = self.mls();
             (mls.members()?, mls.current_epoch()?)
         };
+        // Install a first list, or replace an exhausted one with a strictly
+        // newer election (higher `election_epoch`).
+        if let Some(mine) = self.services.steward_list.election_epoch()
+            && (!self.services.steward_list.is_exhausted(current_epoch)
+                || sync.election_epoch <= mine)
+        {
+            return Ok(());
+        }
         let local_default_peer_score = self.services.scoring.default_score();
         if !validate_conversation_sync(
             &conversation_id,
@@ -665,11 +671,30 @@ fn validate_conversation_sync(
         .steward_members
         .iter()
         .any(|s| members_set.contains(s.as_slice()));
+    // Only accept unsettled members that actually exist, to prevent fake IDs shrinking the pool.
+    // Full protection requires all members to agree on sync content.
+    if !sync
+        .unsettled_members
+        .iter()
+        .all(|u| members_set.contains(u.as_slice()))
+    {
+        info!(
+            conversation = conversation_id,
+            "conversation sync rejected: unsettled member is not in the current set"
+        );
+        return Ok(false);
+    }
+    let unsettled_set = member_set(&sync.unsettled_members);
+    let pool: Vec<Vec<u8>> = members
+        .iter()
+        .filter(|m| !unsettled_set.contains(m.as_slice()))
+        .cloned()
+        .collect();
     let ordering_valid = StewardList::validate(
         &sync.steward_members,
         sync.election_epoch,
         conversation_id.as_bytes(),
-        &sync.steward_members,
+        &pool,
         &StewardListConfig::new(sync.sn_min as usize, sync.sn_max as usize)?,
         sync.retry_round,
     )?;
@@ -834,6 +859,7 @@ mod conversation_sync_tests {
             liveness_criteria_yes: true,
             threshold_peer_score: threshold,
             pending_update_max_epochs: 3,
+            unsettled_members: vec![],
         }
     }
 
@@ -860,6 +886,38 @@ mod conversation_sync_tests {
     fn validate_rejects_default_below_threshold() {
         let sync = valid_sync_with(100);
         assert!(!validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()], 50).unwrap());
+    }
+
+    /// The carried delta reconstructs the pool, so a list
+    /// naming a member the delta excludes is rejected even though it is
+    /// internally well-ordered.
+    #[test]
+    fn validate_verifies_list_against_reconstructed_pool() {
+        let members = vec![b"alice".to_vec(), b"bob".to_vec()];
+        let mut sync = valid_sync_with(0);
+        sync.sn_max = 1;
+        // bob is unsettled → excluded → pool = [alice].
+        sync.unsettled_members = vec![b"bob".to_vec()];
+
+        // The list correctly derived from the pool is accepted.
+        sync.steward_members = vec![b"alice".to_vec()];
+        assert!(validate_conversation_sync("g", &sync, 0, &members, 100).unwrap());
+
+        // A list naming the excluded member does not re-derive → rejected.
+        sync.steward_members = vec![b"bob".to_vec()];
+        assert!(!validate_conversation_sync("g", &sync, 0, &members, 100).unwrap());
+    }
+
+    /// A fabricated `unsettled_members` id (not in the current set) is rejected,
+    /// so a peer can't shrink the reconstructed pool with ids that aren't members.
+    #[test]
+    fn validate_rejects_unsettled_not_in_members() {
+        let members = vec![b"alice".to_vec(), b"bob".to_vec()];
+        let mut sync = valid_sync_with(0);
+        sync.sn_max = 1;
+        sync.steward_members = vec![b"alice".to_vec()];
+        sync.unsettled_members = vec![b"ghost".to_vec()];
+        assert!(!validate_conversation_sync("g", &sync, 0, &members, 100).unwrap());
     }
 
     #[test]

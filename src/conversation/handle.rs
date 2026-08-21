@@ -107,6 +107,12 @@ pub(crate) struct Timing {
     /// stayed silent. Cleared when a `ConversationSync` is observed or the
     /// takeover no longer applies.
     pub(crate) sync_resend_anchor: Option<Timestamp>,
+    /// Anchor for the pull-side conversation-sync request: set when a poll tick
+    /// finds the local steward list missing or exhausted at the current epoch,
+    /// so a member that missed an election asks for the current list.
+    /// Rate-limited to one request per `backup_takeover_window` (the answer
+    /// latency); cleared once a usable list is installed.
+    pub(crate) sync_request_anchor: Option<Timestamp>,
     /// Anchor for the reelection-silence watchdog: set when a poll tick finds
     /// the conversation parked in `Reelection` with no election in flight. A
     /// full silent window past it counts as a rejected election round (see
@@ -131,6 +137,7 @@ impl Timing {
             last_commit_round_progress: None,
             buffered_propose_anchor: None,
             sync_resend_anchor: None,
+            sync_request_anchor: None,
             reelection_silence_anchor: None,
             reelection_recovered: false,
         }
@@ -566,10 +573,11 @@ where
 
     /// Smallest pending deadline relative to now, or `None` when nothing
     /// is scheduled. Returns `Some(Duration::ZERO)` for an already-elapsed
-    /// deadline. Covers consensus-session timeouts, auto-vote timers, and
+    /// deadline. Covers consensus-session timeouts, auto-vote timers,
     /// state-machine phase deadlines (Freezing window, steward / recovery
-    /// inactivity). Forward to an external scheduler that calls `poll()` on
-    /// fire; extra/early wakeups are no-ops.
+    /// inactivity), and the pull-side conversation-sync retry. Forward to an
+    /// external scheduler that calls `poll()` on fire; extra/early wakeups are
+    /// no-ops.
     pub fn next_wakeup_in(&self) -> Option<Duration> {
         let now = self.clock.timestamp();
         let earliest = self
@@ -579,8 +587,20 @@ where
             .copied()
             .chain(self.timing.pending_auto_votes.values().map(|e| e.fire_at))
             .chain(self.phase_deadline())
+            .chain(self.sync_request_deadline())
             .min()?;
         Some(earliest.saturating_duration_since(now))
+    }
+
+    /// Deadline for the next pull-side conversation-sync retry, when one is
+    /// armed. A joiner holding a missing or exhausted steward list re-requests
+    /// the current one every `backup_takeover_window`; surfacing this wakes the
+    /// scheduler so [`Self::drive_sync_request`] fires on schedule. Cleared once
+    /// a usable list is installed.
+    fn sync_request_deadline(&self) -> Option<Timestamp> {
+        self.timing
+            .sync_request_anchor
+            .map(|anchor| anchor + self.config.backup_takeover_window)
     }
 
     /// State-driven phase-timer deadline, if one is currently active. The
@@ -1148,6 +1168,23 @@ mod tests {
             conversation.next_wakeup_in(),
             Some(Duration::ZERO),
             "an elapsed deadline reports zero, not None"
+        );
+    }
+
+    #[test]
+    fn next_wakeup_in_covers_the_pull_side_sync_request() {
+        let mut conversation = make_conversation_working();
+        assert_eq!(conversation.next_wakeup_in(), None, "idle: no wakeup");
+
+        // A joiner holding a stale list arms a sync request; next_wakeup_in must
+        // schedule the retry at anchor + backup_takeover_window.
+        conversation.config.backup_takeover_window = Duration::from_secs(4);
+        let now = conversation.clock.timestamp();
+        conversation.timing.sync_request_anchor = Some(now);
+        assert_eq!(
+            conversation.next_wakeup_in(),
+            Some(Duration::from_secs(4)),
+            "the pull-side sync retry schedules a wakeup"
         );
     }
 

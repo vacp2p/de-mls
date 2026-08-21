@@ -129,6 +129,14 @@ where
             self.handle_emergency_scored(provider, proposal_id, &score_ops, signer)?;
         }
 
+        // Free the resolved session so the store keeps only live ones; late
+        // votes and timeouts for this proposal fall back to the resolved cache
+        // recorded above.
+        self.services
+            .consensus
+            .storage()
+            .remove_session(&scope, proposal_id)?;
+
         Ok(())
     }
 
@@ -221,7 +229,16 @@ where
             "steward election applied"
         );
 
-        self.process_buffered_updates(provider, signer)
+        // Broadcast the elected list so a member that missed the vote learns it
+        // and authorizes the next steward's commit. Drain buffered updates
+        // regardless, then surface a share failure.
+        let shared = if self.is_epoch_steward()? {
+            self.share_conversation_sync(provider, signer)
+        } else {
+            Ok(())
+        };
+        self.process_buffered_updates(provider, signer)?;
+        shared
     }
 
     /// Emergency proposal resolved: apply the score ops, lift the partial

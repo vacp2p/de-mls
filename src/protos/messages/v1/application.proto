@@ -145,6 +145,11 @@ message ConversationSync {
   // Max age (in epochs) of a buffered membership update before the epoch
   // steward drops it.
   uint32 pending_update_max_epochs = 12;
+  // Candidate-basis delta: the members excluded from the steward computation at
+  // `election_epoch` (not yet settled then). A joiner reconstructs the pool as
+  // `MLS members \ unsettled_members` and re-derives the deterministic list to
+  // verify `steward_members` instead of trusting it.
+  repeated bytes unsettled_members = 13;
 }
 
 // A member that joined without a bootstrap asks a steward to re-send the

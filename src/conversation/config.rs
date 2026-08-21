@@ -36,9 +36,10 @@ pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 
 pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
-/// Max consensus sessions retained per conversation before the library evicts
-/// the oldest. Bounds memory for a conversation with many proposals in flight.
-pub const DEFAULT_MAX_CONSENSUS_SESSIONS: usize = 10;
+/// Max consensus sessions kept per conversation before the library evicts the
+/// oldest. Resolved sessions are freed on outcome, so this bounds concurrent
+/// in-flight proposals; kept below the resolved-proposal cache capacity.
+pub const DEFAULT_MAX_CONSENSUS_SESSIONS: usize = 128;
 
 /// Cap on MLS proposals the steward packs into one commit batch — bounds
 /// runaway growth when freeze recovery preserves work across failed cycles.
