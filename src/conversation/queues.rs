@@ -119,12 +119,14 @@ pub struct ConversationQueues {
     /// proposal; replayed once approval lands so the proposer doesn't fall an
     /// epoch behind. Epoch-tagged; stale entries dropped on the next stash/take.
     early_candidates: Vec<(u64, CommitCandidate)>,
-    /// The current epoch's freshly-added members, keyed by `member_id` (leaf
-    /// index), tagged with that epoch. Drives the "settled" check (see
-    /// [`Self::is_settled`]): a member is unsettled only in the epoch it joined.
-    /// Refreshed from the merge delta each commit, so it deterministically
-    /// matches the tree across nodes that apply the same commit.
-    unsettled: Option<(u64, HashSet<Vec<u8>>)>,
+    /// Join epoch per member, keyed by `member_id` (leaf index), recorded from
+    /// each merge delta and pruned when a member departs (so a recycled leaf
+    /// gets a fresh epoch on re-add). Drives the "settled" check (see
+    /// [`Self::is_settled`]): deterministic across nodes that apply the same
+    /// commit, and answerable for any epoch — the `ConversationSync` a
+    /// mid-election joiner adopts recomputes the unsettled set at a possibly
+    /// past election epoch.
+    member_join_epoch: HashMap<Vec<u8>, u64>,
     /// Hashes of recently-seen welcome broadcasts, so gossip duplicates
     /// emit a single `WelcomeReady` event.
     welcome_broadcast_hashes: BoundedSet<CommitHash>,
@@ -147,7 +149,7 @@ impl ConversationQueues {
             resolved_proposals: BoundedSet::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
             early_candidates: Vec::new(),
-            unsettled: None,
+            member_join_epoch: HashMap::new(),
             welcome_broadcast_hashes: BoundedSet::new(dedup_window),
             pending_membership_delta: None,
         }
@@ -198,28 +200,27 @@ impl ConversationQueues {
             let id = member_id_of(member.leaf());
             self.pending_updates.remove(&id);
             self.drop_approved_removals_for(&id);
+            // Drop the departed leaf so a member recycled into it later records
+            // a fresh join epoch rather than inheriting the old occupant's.
+            self.member_join_epoch.remove(&id);
         }
         for m in &delta.added {
             self.pending_updates
                 .remove(m.credential.serialized_content());
+            // Record this epoch as the member's join epoch — unsettled until the
+            // next epoch, and answerable for any epoch a later sync recomputes.
+            self.member_join_epoch.insert(member_id_of(m.index), epoch);
         }
-        // This epoch's new members are unsettled until the next epoch; replacing
-        // the set drops last epoch's adds (now settled) out.
-        let new_members = delta.added.iter().map(|m| member_id_of(m.index)).collect();
-        self.unsettled = Some((epoch, new_members));
     }
 
-    /// Settled unless the member was added in the current epoch — a just-joined
-    /// member can't be a steward or voter until the next epoch. The unsettled
-    /// set is epoch-tagged, so a member added in any prior epoch counts as
-    /// settled, as does one this node never tracked (e.g. the creator).
+    /// Settled once the epoch has advanced past the member's join epoch — a
+    /// just-joined member can't be a steward or voter until the next epoch. A
+    /// member added in any prior epoch counts as settled, as does one this node
+    /// never tracked (e.g. the creator).
     pub fn is_settled(&self, member_id: &[u8], current_epoch: u64) -> bool {
-        match &self.unsettled {
-            Some((epoch, new_members)) if *epoch == current_epoch => {
-                !new_members.contains(member_id)
-            }
-            _ => true,
-        }
+        self.member_join_epoch
+            .get(member_id)
+            .is_none_or(|&join_epoch| join_epoch < current_epoch)
     }
 
     /// The settled subset of `members` — steward-eligible this epoch.
