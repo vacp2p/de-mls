@@ -29,12 +29,14 @@ const KEN: &str = "a438374c68d626ae855c1f4fe3997bc144e55d754e405f4c663e9865e3734
 #[test]
 fn one_at_a_time_growth_past_election_keeps_group_converged() {
     const CONV: &str = "scale";
+    let mut config = fast_config();
+    config.freeze_duration = std::time::Duration::from_millis(500);
     let mut h = TestHarness::<11>::start(
         [
             ALICE, BOB, CHARLIE, DAVE, ERIN, FRANK, GRACE, HEIDI, IVAN, JUDY, KEN,
         ],
         CONV,
-        fast_config(),
+        config,
         StewardListConfig::new(1, 2).unwrap(),
     );
 
