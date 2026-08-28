@@ -99,7 +99,7 @@ where
 /// Check that a commit's MLS actions match the voted-approved set.
 /// `Some(evidence)` on mismatch.
 ///
-/// Compares both sides as sorted `(kind_tag, &member_id)` projections —
+/// Compares both sides as sorted `(kind, &member_id)` projections —
 /// no `MlsProposalOutput` allocation, no per-element clone.
 pub fn validate_commit_candidate(
     conversation: &ConversationQueues,
@@ -107,12 +107,12 @@ pub fn validate_commit_candidate(
     mls_actions: &[MlsProposalOutput],
     ctx: &RoundContext,
 ) -> Result<Option<ViolationEvidence>, ConversationError> {
-    let mut expected: Vec<(u8, Vec<u8>)> = conversation
+    let mut expected: Vec<(ActionKind, Vec<u8>)> = conversation
         .approved_proposals()
         .values()
         .filter_map(action_projection_from_request)
         .collect();
-    let mut actual: Vec<(u8, Vec<u8>)> =
+    let mut actual: Vec<(ActionKind, Vec<u8>)> =
         mls_actions.iter().map(action_projection_from_mls).collect();
     // Dedup by (kind, member): RFC §Consensus Types lets any member create a
     // Commit proposal, so several finalized proposals may name the same
@@ -141,27 +141,36 @@ pub fn validate_commit_candidate(
     )))
 }
 
-/// `(kind_tag, id)` projection of an approved voting request — an add keys on
+/// The membership change an action performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ActionKind {
+    Add,
+    Remove,
+}
+
+/// `(kind, id)` projection of an approved voting request — an add keys on
 /// the joiner's MLS credential, a remove on the target's `member_id` (leaf
 /// index). Returns `None` for non-MLS payloads (emergency/election).
-fn action_projection_from_request(req: &ConversationUpdateRequest) -> Option<(u8, Vec<u8>)> {
+fn action_projection_from_request(
+    req: &ConversationUpdateRequest,
+) -> Option<(ActionKind, Vec<u8>)> {
     match req.payload.as_ref()? {
         Payload::MemberInvite(im) => Some((
-            0,
+            ActionKind::Add,
             unvalidated_credential_of_key_package(&im.key_package_bytes).ok()?,
         )),
-        Payload::RemoveMember(rm) => Some((1, rm.member_id.clone())),
+        Payload::RemoveMember(rm) => Some((ActionKind::Remove, rm.member_id.clone())),
         _ => None,
     }
 }
 
-/// `(kind_tag, id)` projection of an MLS-staged action, matching
+/// `(kind, id)` projection of an MLS-staged action, matching
 /// [`action_projection_from_request`]: add by the credential, remove by leaf
 /// index.
-fn action_projection_from_mls(action: &MlsProposalOutput) -> (u8, Vec<u8>) {
+fn action_projection_from_mls(action: &MlsProposalOutput) -> (ActionKind, Vec<u8>) {
     match action {
-        MlsProposalOutput::Add(id) => (0, id.clone()),
-        MlsProposalOutput::Remove(id) => (1, id.clone()),
+        MlsProposalOutput::Add(id) => (ActionKind::Add, id.clone()),
+        MlsProposalOutput::Remove(id) => (ActionKind::Remove, id.clone()),
     }
 }
 
