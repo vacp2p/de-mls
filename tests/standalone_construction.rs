@@ -21,7 +21,7 @@ use de_mls::{ConversationEvent, ScoringConfig, StewardListConfig};
 
 use common::{
     MintedKeyPackage, TestProvider, make_scoring, mint_key_package, test_credential,
-    wallet::WalletMemberId,
+    wallet::WalletIdentity,
 };
 
 use crate::common::harness::fast_config;
@@ -43,7 +43,7 @@ struct Integrator {
     credential: CredentialWithKey,
     signer: SignatureKeyPair,
     consensus: DefaultConsensusPlugin,
-    member_id: WalletMemberId,
+    wallet: WalletIdentity,
     provider: TestProvider,
     /// The virtual clock this integrator drives; conversations own clones.
     clock: MockClock,
@@ -56,13 +56,13 @@ impl Integrator {
 
     fn with_key(private_key: &str) -> Self {
         let eth_signer = PrivateKeySigner::from_str(private_key).expect("valid private key");
-        let member_id = WalletMemberId::from_address(eth_signer.address());
-        let (credential, signer) = test_credential(member_id.member_id_bytes());
+        let wallet = WalletIdentity::from_address(eth_signer.address());
+        let (credential, signer) = test_credential(wallet.address_bytes());
         Self {
             credential,
             signer,
             consensus: DefaultConsensusPlugin::new(EthereumConsensusSigner::new(eth_signer)),
-            member_id,
+            wallet,
             provider: TestProvider::default(),
             clock: MockClock::new(),
         }
@@ -81,7 +81,7 @@ impl Integrator {
     /// This integrator's `app_id` — the member id doubles as it so two
     /// integrators in one test don't echo-drop each other's packets.
     fn app_id(&self) -> Arc<[u8]> {
-        Arc::from(self.member_id.member_id_bytes())
+        Arc::from(self.wallet.address_bytes())
     }
 }
 

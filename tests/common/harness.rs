@@ -44,7 +44,7 @@ use hashgraph_like_consensus::error::ConsensusError;
 
 use crate::common::test_mls_group_config;
 use crate::common::{
-    MintedKeyPackage, make_scoring, mint_key_package, test_credential, wallet::WalletMemberId,
+    MintedKeyPackage, make_scoring, mint_key_package, test_credential, wallet::WalletIdentity,
 };
 
 /// Per-conversation MLS service stack the harness runs, on virtual time.
@@ -77,7 +77,7 @@ struct Integrator {
     credential: CredentialWithKey,
     signer: SignatureKeyPair,
     consensus: DefaultConsensusPlugin,
-    member_id: WalletMemberId,
+    wallet: WalletIdentity,
     scoring_config: ScoringConfig,
     steward_list_config: StewardListConfig,
     /// One OpenMLS provider reused across every driving call (OpenMLS's native
@@ -92,13 +92,13 @@ struct Integrator {
 impl Integrator {
     fn new(private_key: &str, steward_list_config: StewardListConfig) -> Self {
         let eth_signer = PrivateKeySigner::from_str(private_key).expect("valid private key");
-        let member_id = WalletMemberId::from_address(eth_signer.address());
-        let (credential, signer) = test_credential(member_id.member_id_bytes());
+        let wallet = WalletIdentity::from_address(eth_signer.address());
+        let (credential, signer) = test_credential(wallet.address_bytes());
         Self {
             credential,
             signer,
             consensus: DefaultConsensusPlugin::new(EthereumConsensusSigner::new(eth_signer)),
-            member_id,
+            wallet,
             scoring_config: ScoringConfig::default(),
             steward_list_config,
             provider: OpenMlsRustCrypto::default(),
@@ -117,9 +117,9 @@ impl Integrator {
         mint_key_package(&self.provider, &self.credential, &self.signer)
     }
 
-    /// This integrator's `app_id` (its member-id bytes).
+    /// This integrator's `app_id` — its wallet address.
     fn app_id(&self) -> Arc<[u8]> {
-        Arc::from(self.member_id.member_id_bytes())
+        Arc::from(self.wallet.address_bytes())
     }
 }
 
@@ -224,15 +224,10 @@ impl Member {
         self.convo.as_ref().expect("member has joined")
     }
 
+    /// The `app_id` this member's conversation was built with — its wallet
+    /// address, the same bytes its credential carries.
     pub fn app_id(&self) -> &[u8] {
-        self.integ.member_id.member_id_bytes()
-    }
-
-    /// The identity this member's credential carries — valid before it joins.
-    /// Peers see it as the credential in a `MembersChanged` event and map it
-    /// onto the member's leaf index.
-    pub fn credential_id(&self) -> &[u8] {
-        self.integ.member_id.member_id_bytes()
+        self.integ.wallet.address_bytes()
     }
 
     /// This member's de-mls `member_id` (its leaf index) in the conversation —
@@ -247,7 +242,7 @@ impl Member {
     }
 
     /// This member's MLS signature public key — the key its leaf is bound to.
-    /// Ground truth for asserting what peers resolve via `member_signature_key`.
+    /// Ground truth for asserting the key peers see on a `Member`.
     pub fn signing_pubkey(&self) -> Vec<u8> {
         self.integ.signer.to_public_vec()
     }
@@ -319,10 +314,6 @@ impl Member {
             } if *id == proposal_id => Some(*approved),
             _ => None,
         })
-    }
-
-    pub fn member_id_display(&self) -> String {
-        self.integ.member_id.member_id_display().to_string()
     }
 
     /// Current conversation state. Panics if this member hasn't joined yet.
