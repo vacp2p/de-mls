@@ -6,6 +6,8 @@
 //! key rotation (an in-place leaf update keeps the position), identical on every
 //! node (the ratchet tree is the same at an epoch), and authenticated (it is
 //! read from `sender()`), so it is the one durable, agreed name for a member.
+//! The [`MemberId`] handle adds a signature-key tag on top of that index and is
+//! deliberately narrower — see its own docs for what a key rotation does to it.
 //! The id-agnostic steward-list, scoring, consensus, and wire layers carry these
 //! bytes opaquely; only this module and [`MlsService`](super::MlsService) know
 //! they encode a leaf index.
@@ -17,6 +19,14 @@ use openmls::prelude::{LeafNodeIndex, Member};
 /// `remove_member` / `member_score`. It pins the member's leaf and the
 /// signature key held when issued, so once that member leaves or its leaf is
 /// reused the handle stops resolving instead of acting on a different member.
+///
+/// The tag is a discriminator for leaf reuse, not a claim about who the member
+/// is: MLS binds no identity to a signing key, leaving that to the application's
+/// credential and its own mapping. A member that rotates its signature key in
+/// place therefore keeps its seat but stops answering to handles tagged with the
+/// old key. Not resolving is the safe default there — a rotation is authorized
+/// by the key it replaces, so a stolen key mints a well-formed one, and only the
+/// application can say whether the new key is legitimate for that member.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct MemberId {
     leaf: LeafNodeIndex,

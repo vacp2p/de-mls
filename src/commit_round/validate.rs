@@ -101,6 +101,13 @@ where
 ///
 /// Compares both sides as sorted `(kind, &member_id)` projections —
 /// no `MlsProposalOutput` allocation, no per-element clone.
+///
+/// Scope is Add and Remove. A commit may also carry an Update, and a committer
+/// rotates its own leaf through the commit's UpdatePath rather than a proposal,
+/// so a leaf's credential or signature key can change without reaching either
+/// side of this comparison. Everything keyed by leaf — peer score, join epoch,
+/// steward eligibility — follows the leaf rather than the key, and so stays with
+/// whoever holds that leaf afterwards.
 pub fn validate_commit_candidate(
     conversation: &ConversationQueues,
     sender_id: &[u8],
