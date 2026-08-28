@@ -881,12 +881,6 @@ mod tests {
     type TestConversation =
         Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, crate::MockClock>;
 
-    /// The de-mls `member_id` of the creator these helpers build — always the
-    /// sole leaf 0.
-    fn creator_id() -> Vec<u8> {
-        crate::mls_crypto::member_id_of(crate::LeafNodeIndex::new(0))
-    }
-
     /// Build a conversation with a real creator-side MLS service and the given
     /// steward list, returning it alongside the provider that backs the MLS
     /// group and the signer that seeded it (for paths that sign — the guard
@@ -935,6 +929,7 @@ mod tests {
         scoring: PeerScoringService<Sc>,
     ) -> Conversation<DefaultConsensusPlugin, Sc, crate::MockClock> {
         let (consensus, consensus_rx) = make_test_consensus_service();
+        let self_member_id = crate::mls_crypto::member_id_of(mls.own_index());
         Conversation::new(
             "g".to_string(),
             ConversationQueues::new("g", 10),
@@ -948,7 +943,7 @@ mod tests {
             ConversationStateMachine::new_as_member(),
             ConversationConfig::default(),
             crate::MockClock::new(),
-            Arc::from(creator_id().as_slice()),
+            Arc::from(self_member_id.as_slice()),
             Arc::from(&[0u8; 16][..]),
         )
     }
@@ -957,8 +952,9 @@ mod tests {
     /// provider/signer backing it — the shape every commit-mint test needs.
     fn make_steward_conversation() -> (TestConversation, TestProvider, SignatureKeyPair) {
         let (mls, provider, signer) = make_creator_mls(b"test-member-id");
+        let self_member_id = crate::mls_crypto::member_id_of(mls.own_index());
         (
-            build_conversation(mls, steward_service_steward(&creator_id())),
+            build_conversation(mls, steward_service_steward(&self_member_id)),
             provider,
             signer,
         )
@@ -1194,7 +1190,7 @@ mod tests {
         let conversation = make_conversation_working();
         let epoch = conversation.mls().current_epoch().unwrap();
         let honest = StewardElectionProposal {
-            proposed_stewards: vec![creator_id()],
+            proposed_stewards: vec![conversation.self_member_id.to_vec()],
             election_epoch: epoch,
             retry_round: 0,
         };
@@ -1407,8 +1403,7 @@ mod tests {
 
     #[test]
     fn resend_commit_rebroadcasts_the_held_candidate() {
-        let (mut conversation, _provider, _signer) =
-            make_conversation_with_steward(steward_service_steward(&creator_id()));
+        let (mut conversation, _provider, _signer) = make_steward_conversation();
 
         // No candidate built yet: nothing to resend, nothing broadcast.
         assert!(!conversation.resend_commit(), "no held candidate to resend");
@@ -1419,7 +1414,7 @@ mod tests {
             conversation_id: b"g".to_vec(),
             mls_proposals: vec![vec![0x01; 8]],
             commit_message: vec![0x02; 32],
-            steward_member_id: creator_id(),
+            steward_member_id: conversation.self_member_id.to_vec(),
         };
         let epoch = conversation.mls().current_epoch().unwrap();
         conversation
@@ -1496,7 +1491,7 @@ mod tests {
 
     #[test]
     fn is_deadlock_proposer_true_for_sole_steward() {
-        let conversation = make_conversation_with_steward(steward_service_steward(&creator_id())).0;
+        let conversation = make_steward_conversation().0;
         assert!(
             conversation.is_deadlock_proposer().unwrap(),
             "the sole steward is the deterministic deadlock proposer"
@@ -1505,8 +1500,7 @@ mod tests {
 
     #[test]
     fn request_recovery_is_noop_while_in_recovery() {
-        let (mut conversation, provider, signer) =
-            make_conversation_with_steward(steward_service_steward(&creator_id()));
+        let (mut conversation, provider, signer) = make_steward_conversation();
         conversation.enter_recovery_mode();
         conversation.request_recovery(&provider, &signer).unwrap();
         assert!(
@@ -1663,8 +1657,7 @@ mod tests {
     /// sync so a bootstrap-less joiner can adopt it.
     #[test]
     fn epoch_steward_answers_sync_request() {
-        let (mut conversation, provider, signer) =
-            make_conversation_with_steward(steward_service_steward(&creator_id()));
+        let (mut conversation, provider, signer) = make_steward_conversation();
 
         conversation
             .on_conversation_sync_request(&provider, b"joiner", &signer)
@@ -1731,8 +1724,7 @@ mod tests {
     /// anchor — any stale anchor is cleared.
     #[test]
     fn epoch_steward_request_clears_takeover_anchor() {
-        let (mut conversation, provider, signer) =
-            make_conversation_with_steward(steward_service_steward(&creator_id()));
+        let (mut conversation, provider, signer) = make_steward_conversation();
         let now = conversation.clock.timestamp();
         conversation.timing.sync_resend_anchor = Some(now);
 
