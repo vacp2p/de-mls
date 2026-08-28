@@ -22,15 +22,16 @@ consensus plug-in and its peer-score storage backend.
 
 ## What you own vs. what de-mls owns
 
-**You provide:** identity (opaque member-id bytes and the map from a member to
-its transport address), the transport itself, the OpenMLS provider (crypto +
-storage), the consensus backend (proposal/vote storage + a vote-signing key),
-key-package minting, and the registry of conversations.
+**You provide:** identity — each member's MLS credential and the map from a
+member to its transport address — the transport itself, the OpenMLS provider
+(crypto + storage), the consensus backend (proposal/vote storage + a
+vote-signing key), key-package minting, and the registry of conversations.
 
 **de-mls owns:** the protocol — MLS commits, proposal voting, steward election,
-and freeze timing — along with the per-conversation state behind it: proposal
-queues, deduplication, the steward list, peer scores, and the `Conversation`
-state machine.
+and freeze timing — along with the per-conversation state behind it: member
+identity (it hands you each member as an OpenMLS `Member` and takes back an
+opaque `MemberId` handle to act on one), proposal queues, deduplication, the
+steward list, peer scores, and the `Conversation` state machine.
 
 ## The `Conversation` API
 
@@ -47,11 +48,14 @@ use de_mls::defaults::{DefaultConsensusPlugin, InMemoryPeerScoreStorage};
 // wrap `SystemTime` in production, use `MockClock` for virtual-time tests.
 // Create a conversation you steward, or join one from a welcome:
 let mut convo: Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, _> =
-    Conversation::create(id, member_id, &provider, credential, suite, &signer,
-                         &consensus, scoring, clock, app_id, config)?;
+    Conversation::create(id, &provider, credential, group_config, &signer,
+                         &consensus, scoring, clock, app_id, config, initial_members)?;
 
-// let joined = Conversation::join(member_id, &provider, &signer,
+// let joined = Conversation::join(&provider, &signer,
 //                                 welcome_bytes, sync_bytes, …)?;  // Ok(None) = not for us
+// de-mls surfaces members as OpenMLS `Member`s (via `members_view()` and the
+// `MembersChanged` event) and takes back an opaque `MemberId` handle
+// (`MemberId::from(&member)`) for `remove_member` / `member_score`.
 
 // Drive it once per wakeup cycle, then drain its products:
 convo.process_inbound(&provider, &signer, &sender, &payload)?; // feed inbound bytes

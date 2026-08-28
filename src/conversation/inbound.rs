@@ -30,7 +30,7 @@ use crate::{
     ProposalKind, ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig, WallClock,
     commit_round::{compute_commit_hash, receive_commit_candidate},
     conversation::{ConversationQueues, member_set},
-    mls_crypto::{DecryptedMessage, MlsService},
+    mls_crypto::{DecryptedMessage, MlsService, member_id_of},
     process_result::NoopReason,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, EventMembershipChange,
@@ -121,12 +121,12 @@ where
     match &mut app_msg.payload {
         // Fast-path proposals must originate from the self-removal target.
         Some(app_message::Payload::Proposal(proposal))
-            if !authorize_fast_path_proposal(proposal, &member.member_id) =>
+            if !authorize_fast_path_proposal(proposal, &member_id_of(member.index)) =>
         {
             warn!(
                 conversation = conversation.name(),
                 proposal_id = proposal.proposal_id,
-                sender = ?member.member_id,
+                sender = ?member_id_of(member.index),
                 owner = ?proposal.proposal_owner,
                 "fast-path proposal rejected: sender is not the self-removal target"
             );
@@ -136,20 +136,31 @@ where
         // requester, so capture it here rather than trust a wire field.
         Some(app_message::Payload::ConversationSyncRequest(_)) => {
             return Ok(ProcessResult::ConversationSyncRequested {
-                requester: member.member_id,
+                requester: member_id_of(member.index),
             });
         }
         // Drop BanRequests whose target isn't in the conversation — saves a
         // useless consensus round.
-        Some(app_message::Payload::BanRequest(ban)) if !mls.is_member(&ban.user_to_ban) => {
+        Some(app_message::Payload::BanRequest(ban)) if !mls.is_member(&ban.member_id) => {
             info!(
                 conversation = conversation.name(),
-                target = ?ban.user_to_ban,
+                target = ?ban.member_id,
                 "ban request skipped: target not a member"
             );
             return Ok(ProcessResult::Noop(NoopReason::BanTargetNotMember));
         }
         _ => {}
+    }
+
+    // Chat and membership-change messages carry the MLS-authenticated sender
+    // (its verified leaf) so the integrator attributes them without trusting a
+    // wire field.
+    if matches!(
+        app_msg.payload,
+        Some(app_message::Payload::ConversationMessage(_))
+            | Some(app_message::Payload::MembershipChange(_))
+    ) {
+        return Ok(ProcessResult::AppMessage(Box::new(app_msg), member));
     }
     app_msg.try_into()
 }
@@ -228,8 +239,11 @@ where
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
         match result {
-            ProcessResult::AppMessage(msg) => {
-                self.emit_event(ConversationEvent::ConversationMessage(*msg));
+            ProcessResult::AppMessage(msg, sender) => {
+                self.emit_event(ConversationEvent::ConversationMessage {
+                    message: *msg,
+                    sender,
+                });
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::Proposal(proposal) => {
@@ -441,12 +455,35 @@ where
         let event = self.start_working();
         self.emit_event(ConversationEvent::PhaseChange(event));
 
-        let mls_members = self.mls().members()?;
-        self.sync_scoring_members(&mls_members)?;
-        self.prune_pending_updates_after_commit()?;
+        self.reconcile_membership_after_commit()?;
         self.steward_list_housekeeping(provider, signer)?;
         self.process_buffered_updates(provider, signer)?;
         self.maybe_close_recovery_window(provider, signer);
+        Ok(())
+    }
+
+    /// Apply scoring updates for changes in membership: assign a new score to each newly added leaf,
+    /// and remove the score for each departed one. If a leaf's member changed in this commit,
+    /// both actions occur—the incoming member starts with a clean slate.
+    fn reconcile_membership_after_commit(&mut self) -> Result<(), ConversationError> {
+        let delta = self.queues.take_membership_delta();
+        for member in &delta.removed {
+            self.services
+                .scoring
+                .remove_member(&member_id_of(member.leaf()))?;
+        }
+        for m in &delta.added {
+            self.services.scoring.add_member(&member_id_of(m.index))?;
+        }
+        let epoch = self.mls().current_epoch()?;
+        let max_epochs = self.config.pending_update_max_epochs;
+        let _ = self.queues.expire_pending_updates(epoch, max_epochs);
+        if !delta.added.is_empty() || !delta.removed.is_empty() {
+            self.emit_event(ConversationEvent::MembersChanged {
+                added: delta.added,
+                removed: delta.removed,
+            });
+        }
         Ok(())
     }
 

@@ -1,8 +1,10 @@
 //! Read-only queries over a conversation's state.
 
+use openmls::group::Member;
+
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, Extensions, GroupContext,
-    MemberRole, PeerScoreStorage, WallClock,
+    MemberId, MemberRole, PeerScoreStorage, WallClock, mls_crypto::member_id_of,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
@@ -23,9 +25,16 @@ where
         &self.conversation_id
     }
 
-    /// Identity bytes of the local member in this conversation.
+    /// The local member's `member_id` (leaf-index bytes) in this conversation.
     pub fn member_id_bytes(&self) -> &[u8] {
         &self.self_member_id
+    }
+
+    /// The local member's own [`MemberId`] handle.
+    pub fn own_id(&self) -> MemberId {
+        self.mls()
+            .member_id_at(self.member_id_bytes())
+            .expect("the local member is present in its own group")
     }
 
     /// App id this conversation tags on outbound packets and uses for self-echo
@@ -89,24 +98,9 @@ where
         Ok(epoch_steward == Some(self.self_member_id.as_ref()))
     }
 
-    /// Identity bytes of every current member of this conversation, as
-    /// reported by MLS.
-    pub fn members(&self) -> Result<Vec<Vec<u8>>, ConversationError> {
-        Ok(self.mls().members()?)
-    }
-
-    /// Signature public key bound to `member_id`'s MLS leaf, or `None` if it is
-    /// not a current member.
-    pub fn member_signature_key(&self, member_id: &[u8]) -> Option<Vec<u8>> {
-        self.mls().member_signature_key(member_id)
-    }
-
-    pub fn member_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, ConversationError> {
-        self.services.scoring.all_members_with_scores()
-    }
-
-    pub fn member_score(&self, member_id: &[u8]) -> Result<Option<i64>, ConversationError> {
-        self.services.scoring.score_for(member_id)
+    /// Every current member as an OpenMLS [`Member`], in leaf order.
+    pub fn members_view(&self) -> Vec<Member> {
+        self.mls().members_view()
     }
 
     /// Score at or below which a member is eligible for removal
@@ -125,19 +119,42 @@ where
         self.services.scoring.default_score()
     }
 
-    /// Identities that have an in-flight self-leave request. Used by the UI
-    /// to render a "pending leave" indicator.
-    pub fn pending_leave_member_ids(&self) -> Result<Vec<Vec<u8>>, ConversationError> {
-        let members = self.mls().members()?;
-        Ok(members
+    /// Peer score of every current member, keyed by its [`MemberId`] handle.
+    pub fn member_scores(&self) -> Result<Vec<(MemberId, i64)>, ConversationError> {
+        let mls = self.mls();
+        Ok(self
+            .services
+            .scoring
+            .all_members_with_scores()?
             .into_iter()
-            .filter(|id| self.queues.is_pending_self_leave(id))
+            .filter_map(|(id, score)| Some((mls.member_id_at(&id)?, score)))
             .collect())
     }
 
-    /// Steward role for each member. Uses live rotation so removed or
-    /// pending-leave stewards are skipped in role display.
-    pub fn member_roles(&self) -> Result<Vec<(Vec<u8>, MemberRole)>, ConversationError> {
+    /// Peer score for `member`, `None` if unscored; `MemberGone` if the handle
+    /// is stale.
+    pub fn member_score(&self, member: &MemberId) -> Result<Option<i64>, ConversationError> {
+        let leaf = self
+            .mls()
+            .leaf_of(member)
+            .ok_or(ConversationError::MemberGone)?;
+        self.services.scoring.score_for(&member_id_of(leaf))
+    }
+
+    /// Members that have an in-flight self-leave request, by [`MemberId`].
+    pub fn pending_leave(&self) -> Result<Vec<MemberId>, ConversationError> {
+        let mls = self.mls();
+        Ok(mls
+            .members()?
+            .into_iter()
+            .filter(|id| self.queues.is_pending_self_leave(id))
+            .filter_map(|id| mls.member_id_at(&id))
+            .collect())
+    }
+
+    /// Steward role of each member, keyed by its [`MemberId`] handle. Uses live
+    /// rotation so removed or pending-leave stewards are skipped in role display.
+    pub fn member_roles(&self) -> Result<Vec<(MemberId, MemberRole)>, ConversationError> {
         let mls = self.mls();
         let epoch = mls.current_epoch()?;
         let members = mls.members()?;
@@ -154,7 +171,7 @@ where
         let roles = members
             .iter()
             .cloned()
-            .map(|id| {
+            .filter_map(|id| {
                 let role = if has_list && !exhausted {
                     if live_epoch.as_deref().is_some_and(|es| es == id) {
                         MemberRole::EpochSteward
@@ -170,7 +187,7 @@ where
                 } else {
                     MemberRole::Member
                 };
-                (id, role)
+                Some((mls.member_id_at(&id)?, role))
             })
             .collect();
         Ok(roles)

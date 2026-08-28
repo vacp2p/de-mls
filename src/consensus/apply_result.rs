@@ -8,6 +8,7 @@ use tracing::info;
 
 use crate::{
     ConversationError, ConversationQueues,
+    mls_crypto::signature_key_of_key_package,
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, ViolationEvidence, ViolationType,
         conversation_update_request,
@@ -113,11 +114,12 @@ pub fn apply_consensus_result(
     if approved
         && let Some(conversation_update_request::Payload::MemberInvite(invite)) =
             request.payload.as_ref()
-        && conversation.has_approved_invite(&invite.member_id)
+        && let Ok(joiner_key) = signature_key_of_key_package(&invite.key_package_bytes)
+        && conversation.has_approved_invite(&joiner_key)
     {
         info!(
             proposal_id,
-            target = ?invite.member_id,
+            target = ?joiner_key,
             "invite proposal deduped — target already queued for admission"
         );
         return Ok(ConsensusApplyResult::NoAction);
@@ -166,9 +168,7 @@ pub fn apply_consensus_result(
     }
     // Rejected membership: caller drops the buffered pending-update.
     if !approved && let Some(target) = target_member_id_of(request) {
-        return Ok(ConsensusApplyResult::RejectedMembership {
-            target: target.to_vec(),
-        });
+        return Ok(ConsensusApplyResult::RejectedMembership { target });
     }
     Ok(ConsensusApplyResult::NoAction)
 }
@@ -223,7 +223,7 @@ fn removal_request_for(evidence: &ViolationEvidence) -> ConversationUpdateReques
     ConversationUpdateRequest::remove_member(evidence.target_member_id.clone())
 }
 
-/// Identity this approval would queue for removal in `approved_proposals`,
+/// The `member_id` this approval would queue for removal in `approved_proposals`,
 /// if any. Covers a direct `RemoveMember` request and a score-below-threshold
 /// ECP that transforms into one. Returns `None` for elections, non-removal
 /// emergencies, non-removal regular proposals, and rejections.

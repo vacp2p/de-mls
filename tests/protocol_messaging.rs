@@ -36,10 +36,11 @@ fn chat_message_delivered_to_peer() {
         h.member(1).got_chat(b"Hello from alice")
     });
 
-    // The message landed on the *other* member, decrypted, attributed to alice.
+    // The message landed on the *other* member, decrypted, attributed to alice
+    // by her MLS-authenticated signing key.
     let chat = &h.member(1).received()[0];
     assert_eq!(chat.body, b"Hello from alice");
-    assert_eq!(chat.sender, h.member(0).member_id_bytes());
+    assert_eq!(chat.sender.signature_key, h.member(0).signing_pubkey());
     // And the sender did not echo it back to itself.
     assert!(
         !h.member(0).got_chat(b"Hello from alice"),
@@ -47,9 +48,9 @@ fn chat_message_delivered_to_peer() {
     );
 }
 
-/// A receiving peer can resolve the MLS-authenticated signature key of a chat's
-/// attributed sender via `member_signature_key(sender)`, and it matches the key
-/// that sender actually signs with — the realistic sender-authentication path.
+/// A chat arrives with its MLS-authenticated sender attached, whose signing key
+/// is the key that sender actually signs with — the realistic
+/// sender-authentication path, with no self-reported wire field in the loop.
 #[test]
 fn received_chat_sender_signature_key_resolves_to_the_signer() {
     let mut h = TestHarness::<3>::bootstrap(
@@ -67,23 +68,22 @@ fn received_chat_sender_signature_key_resolves_to_the_signer() {
     });
 
     let alice_key = h.member(0).signing_pubkey();
-    // Each receiver reads the attributed sender and resolves its signing key,
-    // landing on alice's real key.
+    // Each receiver reads the authenticated sender off the chat and finds
+    // alice's real signing key on it directly.
     for receiver in [1usize, 2] {
         let chat = &h.member(receiver).received()[0];
-        assert_eq!(chat.sender, h.member(0).member_id_bytes());
         assert_eq!(
-            h.member(receiver).member_signature_key(&chat.sender),
-            Some(alice_key.clone()),
-            "receiver {receiver} resolved the wrong signing key for alice",
+            chat.sender.signature_key, alice_key,
+            "receiver {receiver} got the wrong signing key for alice",
         );
     }
 }
 
-/// Every member resolves every member's signing key identically and correctly,
-/// and an id belonging to no current member resolves to `None`.
+/// Every member sees every member's signing key identically through
+/// `members_view()`, so each resolves the same handle; a key belonging to no
+/// current member resolves to no handle.
 #[test]
-fn member_signature_key_agrees_across_the_group() {
+fn members_view_signing_keys_agree_across_the_group() {
     let h = TestHarness::<3>::bootstrap(
         [ALICE, BOB, CHARLIE],
         "sig-key-all",
@@ -94,21 +94,21 @@ fn member_signature_key_agrees_across_the_group() {
     assert!(h.membership_agrees(), "members disagree on the member set");
 
     for subject in 0..3 {
-        let id = h.member(subject).member_id_bytes().to_vec();
-        let expected = h.member(subject).signing_pubkey();
+        let key = h.member(subject).signing_pubkey();
         for viewer in 0..3 {
-            assert_eq!(
-                h.member(viewer).member_signature_key(&id),
-                Some(expected.clone()),
-                "member {viewer} resolved the wrong signing key for member {subject}",
+            assert!(
+                h.member(viewer).member_keys().contains(&key),
+                "member {viewer} does not see member {subject}'s signing key",
             );
         }
     }
 
-    // An id that belongs to no current member has no key.
-    assert_eq!(
-        h.member(0).member_signature_key(b"stranger-not-in-group"),
-        None,
-        "a non-member id must not resolve to a signing key",
+    // A key belonging to no current member is absent from every view.
+    assert!(
+        !h.member(0)
+            .member_keys()
+            .iter()
+            .any(|k| k == b"stranger-not-in-group"),
+        "a non-member key must not appear in the member set",
     );
 }

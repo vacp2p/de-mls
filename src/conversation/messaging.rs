@@ -5,12 +5,13 @@
 
 use std::error::Error as StdError;
 
+use openmls::key_packages::KeyPackage;
 use openmls_traits::{OpenMlsProvider, signatures::Signer, storage::StorageProvider};
-use tracing::info;
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
+    ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote, MemberId,
     PeerScoreStorage, WallClock,
+    mls_crypto::{member_id_of, validate_key_package},
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, ConversationSyncRequest, ConversationUpdateRequest,
         MemberInvite,
@@ -65,7 +66,6 @@ where
 
         let app_msg: AppMessage = ConversationMessage {
             message,
-            sender: self.self_member_id.to_vec(),
             conversation_id: self.conversation_id.clone(),
         }
         .into();
@@ -94,19 +94,21 @@ where
         Ok(())
     }
 
-    /// Invite a joiner whose key package the caller supplies out of band,
-    /// endorsing the add by bundling a YES vote at submit. Any member may call.
-    /// Errors unless the conversation is `Working`.
+    /// Invite someone to join by providing their key package
+    /// (which you got through some secure but external channel).
+    /// When you call this, you’re actively supporting their addition by submitting a YES vote.
+    /// Any group member can use this method.
     ///
-    /// `joiner_id` is the joiner's id, which the caller already holds (it is the
-    /// credential the key package carries);
+    /// This will only work if the group is currently active and in the “Working” state.
+    /// If the key package’s signature key already belongs to an existing group member (including yourself),
+    /// this will return an `AlreadyMember` error —
+    /// since the underlying MLS protocol won’t allow adding a key that’s already present.
     ///
     /// See [`Self::sponsor_member`] for the non-endorsing steward relay.
     pub fn add_member<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
-        joiner_id: &[u8],
         key_package_bytes: &[u8],
     ) -> Result<(), ConversationError>
     where
@@ -117,34 +119,22 @@ where
         if state != ConversationState::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
-        self.propose_add(
-            provider,
-            key_package_bytes,
-            joiner_id,
-            CreatorVote::Yes,
-            signer,
-        )
+        self.propose_add(provider, key_package_bytes, CreatorVote::Yes, signer)
     }
 
-    /// Relay a joiner that announced its own key package, without endorsing it:
-    /// the proposal is submitted unbundled ([`CreatorVote::Deferred`]) and this
-    /// member votes on it like any other. Only the primary epoch steward relays
-    /// immediately, so a single Add proposal is opened per joiner. Every other
-    /// member records the announcement in the pending-update buffer instead —
-    /// a backup proposes it from there if the epoch steward stays silent past
-    /// `backup_takeover_window` (drained by `poll`), so an offline epoch steward
-    /// doesn't strand the join. No-op outside `Working`.
+    /// Sponsor a joiner who sent their own key package, but don't endorse it: just relay the request.
+    /// Only the current epoch steward actually submits the Add proposal right away;
+    /// everyone else saves it to propose later if the steward goes
+    /// quiet (handled by `poll` after `backup_takeover_window`).
     ///
-    /// See [`Self::add_member`] for the endorsing out-of-band invite.
+    /// Relaying someone else's request, so a key package for a member already
+    /// in the group is dropped rather than reported.
     ///
-    /// `joiner_id` is the announced joiner's id, taken from the `MemberInvite`
-    /// the caller decoded (it travels alongside the key-package bytes on the
-    /// wire);
+    /// For out-of-band invites with endorsement, use [`Self::add_member`].
     pub fn sponsor_member<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
-        joiner_id: &[u8],
         key_package_bytes: &[u8],
     ) -> Result<(), ConversationError>
     where
@@ -155,36 +145,38 @@ where
             return Ok(());
         }
         if self.is_epoch_steward()? {
-            return self.propose_add(
-                provider,
-                key_package_bytes,
-                joiner_id,
-                CreatorVote::Deferred,
-                signer,
-            );
+            return self.propose_add(provider, key_package_bytes, CreatorVote::Deferred, signer);
         }
-        if joiner_id == self.member_id_bytes() || self.mls().is_member(joiner_id) {
+        let key_package = validate_key_package(provider, key_package_bytes)?;
+        if self.holds_signature_key(&key_package) {
             return Ok(());
         }
         let epoch = self.mls().current_epoch()?;
         self.queues.insert_pending_update(
             ConversationUpdateRequest::member_invite(MemberInvite {
                 key_package_bytes: key_package_bytes.to_vec(),
-                member_id: joiner_id.to_vec(),
             }),
             epoch,
         );
         Ok(())
     }
 
-    /// Shared body of [`Self::add_member`] / [`Self::sponsor_member`]: parse the
-    /// key package, skip our own and already-present members, and open the Add
-    /// proposal with the caller-chosen vote mode.
+    /// Whether the group already carries this key package's signature key —
+    /// true for our own key package as well.
+    /// The joiner has no leaf yet, so its signature key is the only identity
+    /// comparable against the live group.
+    fn holds_signature_key(&self, key_package: &KeyPackage) -> bool {
+        self.mls()
+            .has_signature_key(key_package.leaf_node().signature_key().as_slice())
+    }
+
+    /// Shared body of [`Self::add_member`] / [`Self::sponsor_member`]: open the
+    /// Add proposal carrying the joiner's key package, with the caller-chosen
+    /// vote mode.
     fn propose_add<Pr>(
         &mut self,
         provider: &Pr,
         key_package_bytes: &[u8],
-        member_id: &[u8],
         creator_vote: CreatorVote,
         signer: &impl Signer,
     ) -> Result<(), ConversationError>
@@ -192,24 +184,14 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        // Don't propose our own key package.
-        if member_id == self.member_id_bytes() {
-            return Ok(());
-        }
-        // The target is already in the group — nothing to add.
-        if self.mls().is_member(member_id) {
-            info!(
-                conversation = %self.id(),
-                member = ?member_id,
-                "add member skipped: already a member"
-            );
-            return Ok(());
+        let key_package = validate_key_package(provider, key_package_bytes)?;
+        if self.holds_signature_key(&key_package) {
+            return Err(ConversationError::AlreadyMember);
         }
         self.initiate_proposal(
             provider,
             ConversationUpdateRequest::member_invite(MemberInvite {
                 key_package_bytes: key_package_bytes.to_vec(),
-                member_id: member_id.to_vec(),
             }),
             creator_vote,
             signer,
@@ -224,7 +206,7 @@ where
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
-        member_id: &[u8],
+        member: &MemberId,
     ) -> Result<(), ConversationError>
     where
         Pr: OpenMlsProvider,
@@ -235,9 +217,14 @@ where
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
 
+        let leaf = self
+            .mls()
+            .leaf_of(member)
+            .ok_or(ConversationError::MemberGone)?;
+
         self.initiate_proposal(
             provider,
-            ConversationUpdateRequest::remove_member(member_id.to_vec()),
+            ConversationUpdateRequest::remove_member(member_id_of(leaf)),
             CreatorVote::Yes,
             signer,
         )?;

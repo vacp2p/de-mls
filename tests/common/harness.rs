@@ -31,17 +31,20 @@ use prost::Message;
 
 use de_mls::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
+use de_mls::mls_crypto::signature_key_of_key_package;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
     conversation_update_request,
 };
-use de_mls::{Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome};
+use de_mls::{
+    Conversation, ConversationConfig, CreatorVote, MemberId, MemberRole, Outbound, PollOutcome,
+};
 use de_mls::{ConversationError, ConversationEvent, ConversationState, MockClock, ScoringConfig};
 use hashgraph_like_consensus::error::ConsensusError;
 
 use crate::common::test_mls_group_config;
 use crate::common::{
-    MintedKeyPackage, make_scoring, mint_key_package, test_credential, wallet::WalletMemberId,
+    MintedKeyPackage, make_scoring, mint_key_package, test_credential, wallet::WalletIdentity,
 };
 
 /// Per-conversation MLS service stack the harness runs, on virtual time.
@@ -74,7 +77,7 @@ struct Integrator {
     credential: CredentialWithKey,
     signer: SignatureKeyPair,
     consensus: DefaultConsensusPlugin,
-    member_id: WalletMemberId,
+    wallet: WalletIdentity,
     scoring_config: ScoringConfig,
     steward_list_config: StewardListConfig,
     /// One OpenMLS provider reused across every driving call (OpenMLS's native
@@ -89,13 +92,13 @@ struct Integrator {
 impl Integrator {
     fn new(private_key: &str, steward_list_config: StewardListConfig) -> Self {
         let eth_signer = PrivateKeySigner::from_str(private_key).expect("valid private key");
-        let member_id = WalletMemberId::from_address(eth_signer.address());
-        let (credential, signer) = test_credential(member_id.member_id_bytes());
+        let wallet = WalletIdentity::from_address(eth_signer.address());
+        let (credential, signer) = test_credential(wallet.address_bytes());
         Self {
             credential,
             signer,
             consensus: DefaultConsensusPlugin::new(EthereumConsensusSigner::new(eth_signer)),
-            member_id,
+            wallet,
             scoring_config: ScoringConfig::default(),
             steward_list_config,
             provider: OpenMlsRustCrypto::default(),
@@ -114,18 +117,18 @@ impl Integrator {
         mint_key_package(&self.provider, &self.credential, &self.signer)
     }
 
-    /// This integrator's `app_id` (its member-id bytes).
+    /// This integrator's `app_id` — its wallet address.
     fn app_id(&self) -> Arc<[u8]> {
-        Arc::from(self.member_id.member_id_bytes())
+        Arc::from(self.wallet.address_bytes())
     }
 }
 
-/// A captured inbound chat message: the decrypted body plus the sender's
-/// opaque member-id bytes.
+/// A captured inbound chat message: the decrypted body plus the MLS-authenticated
+/// sender as a [`de_mls::Member`] (credential + signing key).
 #[derive(Debug, Clone)]
 pub struct ReceivedChat {
     pub body: Vec<u8>,
-    pub sender: Vec<u8>,
+    pub sender: de_mls::Member,
 }
 
 /// One protocol participant: integrator state + its `Conversation` (absent
@@ -167,7 +170,6 @@ impl Member {
         let scoring = integ.scoring();
         let convo = Conversation::create(
             conversation_id,
-            integ.member_id.member_id_bytes(),
             &integ.provider,
             integ.credential.clone(),
             &mls_group_config,
@@ -222,18 +224,25 @@ impl Member {
         self.convo.as_ref().expect("member has joined")
     }
 
+    /// The `app_id` this member's conversation was built with — its wallet
+    /// address, the same bytes its credential carries.
     pub fn app_id(&self) -> &[u8] {
-        self.integ.member_id.member_id_bytes()
+        self.integ.wallet.address_bytes()
     }
 
-    /// MLS member-id bytes (identical to `app_id` in this harness) — the value
-    /// a `RemoveMember` proposal targets.
+    /// This member's de-mls `member_id` (its leaf index) in the conversation —
+    /// the value a `RemoveMember` proposal targets and that senders/members are
+    /// reported by. A member's leaf index is the same in every node's tree, so
+    /// this doubles as the id peers use to name it. Panics if not joined.
     pub fn member_id_bytes(&self) -> &[u8] {
-        self.integ.member_id.member_id_bytes()
+        self.convo
+            .as_ref()
+            .expect("member has joined")
+            .member_id_bytes()
     }
 
     /// This member's MLS signature public key — the key its leaf is bound to.
-    /// Ground truth for asserting what peers resolve via `member_signature_key`.
+    /// Ground truth for asserting the key peers see on a `Member`.
     pub fn signing_pubkey(&self) -> Vec<u8> {
         self.integ.signer.to_public_vec()
     }
@@ -265,7 +274,7 @@ impl Member {
     }
 
     /// Per-member roles (steward / backup / member) in this conversation.
-    pub fn member_roles(&self) -> Vec<(Vec<u8>, MemberRole)> {
+    pub fn member_roles(&self) -> Vec<(MemberId, MemberRole)> {
         self.convo
             .as_ref()
             .and_then(|c| c.member_roles().ok())
@@ -273,7 +282,7 @@ impl Member {
     }
 
     /// Per-member peer scores.
-    pub fn member_scores(&self) -> Vec<(Vec<u8>, i64)> {
+    pub fn member_scores(&self) -> Vec<(MemberId, i64)> {
         self.convo
             .as_ref()
             .map(|c| c.member_scores().expect("member_scores"))
@@ -305,10 +314,6 @@ impl Member {
             } if *id == proposal_id => Some(*approved),
             _ => None,
         })
-    }
-
-    pub fn member_id_display(&self) -> String {
-        self.integ.member_id.member_id_display().to_string()
     }
 
     /// Current conversation state. Panics if this member hasn't joined yet.
@@ -363,17 +368,31 @@ impl Member {
     pub fn member_count(&self) -> usize {
         self.convo
             .as_ref()
-            .and_then(|c| c.members().ok())
-            .map(|m| m.len())
+            .map(|c| c.members_view().len())
             .unwrap_or(0)
     }
 
-    /// Signature key this member's tree binds to `member_id`, or `None` when
-    /// `member_id` is not a current member (or this member hasn't joined).
-    pub fn member_signature_key(&self, member_id: &[u8]) -> Option<Vec<u8>> {
-        self.convo
+    /// This member's own [`MemberId`] handle. Valid group-wide (the tree is
+    /// shared), so pass it to another member's `remove_member`.
+    pub fn member_id(&self) -> MemberId {
+        self.convo.as_ref().expect("member has joined").own_id()
+    }
+
+    /// Sorted signature keys of every member in this member's own tree view —
+    /// the group's identity set, for agreement and membership checks.
+    pub fn member_keys(&self) -> Vec<Vec<u8>> {
+        let mut keys: Vec<Vec<u8>> = self
+            .convo
             .as_ref()
-            .and_then(|c| c.member_signature_key(member_id))
+            .map(|c| {
+                c.members_view()
+                    .into_iter()
+                    .map(|m| m.signature_key)
+                    .collect()
+            })
+            .unwrap_or_default();
+        keys.sort();
+        keys
     }
 
     /// Every [`ConversationEvent`] this member has emitted, in order.
@@ -397,11 +416,15 @@ impl Member {
         self.events
             .iter()
             .filter_map(|e| match e {
-                ConversationEvent::ConversationMessage(AppMessage {
-                    payload: Some(app_message::Payload::ConversationMessage(cm)),
-                }) => Some(ReceivedChat {
+                ConversationEvent::ConversationMessage {
+                    message:
+                        AppMessage {
+                            payload: Some(app_message::Payload::ConversationMessage(cm)),
+                        },
+                    sender,
+                } => Some(ReceivedChat {
                     body: cm.message.clone(),
-                    sender: cm.sender.clone(),
+                    sender: sender.clone(),
                 }),
                 _ => None,
             })
@@ -457,12 +480,12 @@ impl Member {
     /// submissions plus peers' surfaced for a vote. Counts `MemberInvite` only:
     /// a group that outgrows `sn_max` also votes on a steward election, and that
     /// is not a duplicate invitation.
-    pub fn observed_invite_proposals(&self, member_id: &[u8]) -> Vec<u32> {
+    pub fn observed_invite_proposals(&self, joiner_key: &[u8]) -> Vec<u32> {
         let invites_target = |req: &ConversationUpdateRequest| {
             matches!(
                 req.payload.as_ref(),
                 Some(conversation_update_request::Payload::MemberInvite(im))
-                    if im.member_id == member_id
+                    if signature_key_of_key_package(&im.key_package_bytes).is_ok_and(|k| k == joiner_key)
             )
         };
         let mut ids: Vec<u32> = self
@@ -498,7 +521,7 @@ impl Member {
             .flatten()
             .filter_map(|r| match r.payload.as_ref() {
                 Some(conversation_update_request::Payload::MemberInvite(im)) => {
-                    Some(im.member_id.clone())
+                    signature_key_of_key_package(&im.key_package_bytes).ok()
                 }
                 _ => None,
             })
@@ -523,24 +546,34 @@ impl Member {
             .expect("send message");
     }
 
+    /// Invite `key_package`. A joiner already in the group is a no-op, which is
+    /// how a relaying integrator treats it — every other failure panics.
     pub fn add_member(&mut self, key_package: &MintedKeyPackage) {
-        self.convo
-            .as_mut()
-            .expect("member has joined")
-            .add_member(
-                &self.integ.provider,
-                &self.integ.signer,
-                key_package.member_id(),
-                key_package.as_bytes(),
-            )
-            .expect("add member");
+        match self.try_add_member(key_package) {
+            Ok(()) | Err(ConversationError::AlreadyMember) => {}
+            Err(e) => panic!("add member: {e}"),
+        }
     }
 
-    pub fn remove_member(&mut self, member_id: &[u8]) {
+    /// [`Self::add_member`] with the error surfaced, for tests asserting that a
+    /// key package is turned away.
+    pub fn try_add_member(
+        &mut self,
+        key_package: &MintedKeyPackage,
+    ) -> Result<(), ConversationError> {
+        self.convo.as_mut().expect("member has joined").add_member(
+            &self.integ.provider,
+            &self.integ.signer,
+            key_package.as_bytes(),
+        )
+    }
+
+    /// Propose removing `target` (another member's [`MemberId`] handle).
+    pub fn remove_member(&mut self, target: MemberId) {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .remove_member(&self.integ.provider, &self.integ.signer, member_id)
+            .remove_member(&self.integ.provider, &self.integ.signer, &target)
             .expect("remove member");
     }
 
@@ -622,10 +655,7 @@ impl Member {
         Outbound {
             conversation_id: conversation_id.to_string(),
             sender: self.app_id().to_vec(),
-            payload: build_key_package_announcement(
-                key_package.as_bytes(),
-                key_package.member_id(),
-            ),
+            payload: build_key_package_announcement(key_package.as_bytes()),
         }
     }
 
@@ -710,7 +740,6 @@ impl Member {
         let _ = convo.sponsor_member(
             &self.integ.provider,
             &self.integ.signer,
-            &invite.member_id,
             &invite.key_package_bytes,
         );
     }
@@ -730,7 +759,6 @@ impl Member {
         // `join` opens the welcome internally; only the addressed joiner gets
         // `Some`.
         match Conversation::join(
-            self.integ.member_id.member_id_bytes(),
             &self.integ.provider,
             &self.integ.signer,
             &welcome.welcome_bytes,
@@ -771,13 +799,12 @@ impl Member {
     }
 }
 
-/// Encode a key package and its owner's `member_id` into the wire format used
-/// for KP announcements. Returns the prost-encoded `MemberInvite` bytes ready
-/// for broadcast on the welcome subtopic.
-pub fn build_key_package_announcement(key_package_bytes: &[u8], member_id: &[u8]) -> Vec<u8> {
+/// Encode a key package into the wire format used for KP announcements.
+/// Returns the prost-encoded `MemberInvite` bytes ready for broadcast on the
+/// welcome subtopic.
+pub fn build_key_package_announcement(key_package_bytes: &[u8]) -> Vec<u8> {
     MemberInvite {
         key_package_bytes: key_package_bytes.to_vec(),
-        member_id: member_id.to_vec(),
     }
     .encode_to_vec()
 }
@@ -917,13 +944,8 @@ impl<const N: usize> TestHarness<N> {
 
     /// Every member sees the same set of MLS members (order-independent).
     pub fn membership_agrees(&self) -> bool {
-        let canonical = |m: &Member| {
-            let mut ids = m.convo().members().unwrap_or_default();
-            ids.sort();
-            ids
-        };
-        let first = canonical(&self.members[0]);
-        self.members.iter().all(|m| canonical(m) == first)
+        let first = self.members[0].member_keys();
+        self.members.iter().all(|m| m.member_keys() == first)
     }
 
     pub fn member(&self, index: usize) -> &Member {

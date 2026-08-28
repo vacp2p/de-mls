@@ -1,24 +1,19 @@
-//! Test-side wallet identity adapter.
+//! Test-side wallet identity.
 //!
-//! Bridges an Ethereum address to the library's identity-agnostic
-//! interface: builds a [`WalletMemberId`] that implements
-//! [`de_mls::member_id::MemberId`]. The low-level core fixtures use this to
-//! key per-member MLS state. (Constructing a `User` from a private key lives
-//! in the gateway test suite, which owns the reference integrator.)
-
-use std::str::FromStr;
-
+//! An integrator brings its own identity; the fixtures use an Ethereum address
+//! as one. It is what the test credential carries and what a conversation's
+//! `app_id` is taken from.
 use alloy::primitives::Address;
 
-/// Wallet-flavoured [`MemberId`] used by the core fixtures. Holds the
-/// 20-byte Ethereum address bytes and its EIP-55 checksummed hex form.
+/// The wallet a fixture speaks for: the 20-byte Ethereum address and its
+/// EIP-55 checksummed hex form.
 #[derive(Debug, Clone)]
-pub struct WalletMemberId {
+pub struct WalletIdentity {
     bytes: Vec<u8>,
     display: String,
 }
 
-impl WalletMemberId {
+impl WalletIdentity {
     /// Build from a parsed [`Address`].
     pub fn from_address(addr: Address) -> Self {
         Self {
@@ -27,17 +22,8 @@ impl WalletMemberId {
         }
     }
 
-    /// Parse a `0x…`-prefixed wallet hex string.
-    pub fn from_hex(hex: &str) -> Self {
-        let addr = Address::from_str(hex.trim()).expect("valid wallet hex");
-        Self::from_address(addr)
-    }
-
-    pub fn member_id_bytes(&self) -> &[u8] {
+    /// The raw address bytes: the identity the test credential carries.
+    pub fn address_bytes(&self) -> &[u8] {
         &self.bytes
-    }
-
-    pub fn member_id_display(&self) -> &str {
-        &self.display
     }
 }

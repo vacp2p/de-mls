@@ -24,14 +24,13 @@ message AppMessage {
 }
 
 message BanRequest {
-  bytes user_to_ban = 1;
+  bytes member_id = 1;
   string conversation_id = 2;
 }
 
 message ConversationMessage {
   bytes message = 1;
-  bytes sender = 2;
-  string conversation_id = 3;
+  string conversation_id = 2;
 }
 
 message EventMembershipChange {
@@ -106,7 +105,6 @@ message EmergencyCriteriaProposal {
 
 message MemberInvite {
   bytes key_package_bytes = 1;
-  bytes member_id = 2;
 }
 
 message RemoveMember {

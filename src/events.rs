@@ -8,7 +8,7 @@
 //! Events are fire-and-forget — recording one never blocks on the integrator.
 
 use crate::{
-    ConversationState,
+    ConversationState, Member, MemberId,
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest, MemberWelcome},
 };
 
@@ -16,14 +16,10 @@ use crate::{
 /// on. Drained via [`crate::Conversation::drain_events`].
 #[derive(Debug, Clone)]
 pub enum ConversationEvent {
-    /// A decrypted message addressed to the group's chat stream. The payload is
-    /// either a `ConversationMessage` (text a member sent) or an
-    /// `EventMembershipChange` (a system notice that someone joined) —
-    /// both belong in the same stream, so the application renders whichever it
-    /// finds. Proposals, votes, and ban requests are not chat traffic; they
-    /// surface through [`Self::VoteRequested`] and the membership and consensus
-    /// events instead.
-    ConversationMessage(AppMessage),
+    /// A decrypted group chat message with the MLS-authenticated [`Member`] who signed it.
+    /// Sender info comes from MLS, Payload is either a chat (`ConversationMessage`)
+    /// or a membership event (`EventMembershipChange`).
+    ConversationMessage { message: AppMessage, sender: Member },
 
     /// The local member has left the group — its own removal just committed,
     /// whether a self-leave it asked for or a removal the group decided.
@@ -152,5 +148,14 @@ pub enum ConversationEvent {
         member_id: Vec<u8>,
         previous: i64,
         score: i64,
+    },
+
+    /// A merged commit changed the member set: `added` carries each new member as
+    /// an OpenMLS [`Member`] (leaf index + credential + keys), `removed` the
+    /// departed members as [`MemberId`] handles (tagged before the commit, so a
+    /// reused leaf yields distinct handles in `added` and `removed`).
+    MembersChanged {
+        added: Vec<Member>,
+        removed: Vec<MemberId>,
     },
 }

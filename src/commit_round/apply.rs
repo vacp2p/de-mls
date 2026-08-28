@@ -157,7 +157,8 @@ where
     Pr: OpenMlsProvider,
     <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
 {
-    mls.merge_own_commit(provider)?;
+    let delta = mls.merge_own_commit(provider)?;
+    conversation.store_membership_delta(delta);
 
     // The merge is the commit point (epoch advanced by one); derive it rather
     // than reading MLS again, so an already-applied commit can't become an error.
@@ -246,12 +247,11 @@ where
         return reject_staged(mls, provider, violation.target_score_op());
     }
 
-    // The remote wins. Clear our own pending commit (if any) before applying it:
-    // de-mls's split staging flow doesn't auto-clear it, and a leftover would
-    // block the next MLS operation. Safe — the staged remote is held separately
-    // and survives this discard (see `discard_own_then_merge_remote_*` test).
+    // The remote wins. Clear our own pending commit (if any) before applying it.
+    // Safe — the staged remote is held separately and survives this discard.
     mls.discard_own_commit(provider)?;
-    mls.merge_staged_commit(provider)?;
+    let delta = mls.merge_staged_commit(provider)?;
+    conversation.store_membership_delta(delta);
     // The merge is the commit point (epoch advanced by one); derive it rather
     // than reading MLS again, so an already-applied commit can't become an error.
     let committed_batch =
@@ -292,17 +292,16 @@ fn finalize_committed_batch(
     current_epoch: u64,
 ) -> Vec<ConversationUpdateRequest> {
     conversation.insert_committed_hash(commit_hash);
-    let snapshot = if let Some(target) = conversation.take_urgent_commit_target() {
+    // Stamp join epochs and clear resolved pending/approved entries now, before
+    // the steward-list reconcile reads settled membership.
+    conversation.apply_membership_delta_bookkeeping(current_epoch);
+    if let Some(target) = conversation.take_urgent_commit_target() {
         // Urgent commit: leave the rest of the queue for the next cycle.
         conversation.drop_approved_removals_for(&target);
         Vec::new()
     } else {
         conversation.drain_approved_proposals()
-    };
-    // Stamp join epochs for members this commit added, so the next reconcile
-    // doesn't count them toward an election they can't yet participate in.
-    conversation.note_member_joins(&snapshot, current_epoch);
-    snapshot
+    }
 }
 
 #[cfg(test)]
@@ -399,7 +398,9 @@ mod tests {
         );
         assert_eq!(mls.current_epoch().unwrap(), epoch_before + 1);
         assert!(
-            mls.is_member(b"bob"),
+            mls.members_view()
+                .iter()
+                .any(|m| m.credential.serialized_content() == b"bob"),
             "our own commit (add bob) was applied"
         );
     }

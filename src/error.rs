@@ -47,6 +47,12 @@ pub enum ConversationError {
     #[error("Empty members list")]
     EmptyMembersList,
 
+    #[error("Member is no longer in the group")]
+    MemberGone,
+
+    #[error("Key package belongs to a member already in the group")]
+    AlreadyMember,
+
     #[error("Invalid config size")]
     InvalidConfigSize,
 

@@ -27,8 +27,8 @@ fn steward_auto_commits_approved_work_on_inactivity() {
     // File a removal, then never ask for a commit: the steward's commit
     // inactivity timer (driven by `poll`) must build, vote-resolve, and merge
     // the removal on its own.
-    let bob_id = h.member(1).member_id_bytes().to_vec();
-    h.member_mut(0).remove_member(&bob_id);
+    let bob_id = h.member(1).member_id();
+    h.member_mut(0).remove_member(bob_id);
 
     h.process_until("steward auto-commits the removal", |h| {
         h.member(0).member_count() == 1
@@ -102,9 +102,9 @@ fn backup_steward_proposes_buffered_joiner_when_epoch_steward_silent() {
 
     // Evict member 2 so we can re-announce it as a fresh joiner.
     let target = 2usize;
-    let target_id = h.member(target).member_id_bytes().to_vec();
+    let target_id = h.member(target).member_id();
     let driver = (0..3).find(|&i| i != target).unwrap();
-    h.member_mut(driver).remove_member(&target_id);
+    h.member_mut(driver).remove_member(target_id);
     h.process_until("target evicted", |h| h.member(driver).member_count() == 2);
 
     // Identify the two remaining stewards' roles.

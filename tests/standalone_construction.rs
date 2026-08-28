@@ -21,7 +21,7 @@ use de_mls::{ConversationEvent, ScoringConfig, StewardListConfig};
 
 use common::{
     MintedKeyPackage, TestProvider, make_scoring, mint_key_package, test_credential,
-    wallet::WalletMemberId,
+    wallet::WalletIdentity,
 };
 
 use crate::common::harness::fast_config;
@@ -43,7 +43,7 @@ struct Integrator {
     credential: CredentialWithKey,
     signer: SignatureKeyPair,
     consensus: DefaultConsensusPlugin,
-    member_id: WalletMemberId,
+    wallet: WalletIdentity,
     provider: TestProvider,
     /// The virtual clock this integrator drives; conversations own clones.
     clock: MockClock,
@@ -56,13 +56,13 @@ impl Integrator {
 
     fn with_key(private_key: &str) -> Self {
         let eth_signer = PrivateKeySigner::from_str(private_key).expect("valid private key");
-        let member_id = WalletMemberId::from_address(eth_signer.address());
-        let (credential, signer) = test_credential(member_id.member_id_bytes());
+        let wallet = WalletIdentity::from_address(eth_signer.address());
+        let (credential, signer) = test_credential(wallet.address_bytes());
         Self {
             credential,
             signer,
             consensus: DefaultConsensusPlugin::new(EthereumConsensusSigner::new(eth_signer)),
-            member_id,
+            wallet,
             provider: TestProvider::default(),
             clock: MockClock::new(),
         }
@@ -81,7 +81,7 @@ impl Integrator {
     /// This integrator's `app_id` — the member id doubles as it so two
     /// integrators in one test don't echo-drop each other's packets.
     fn app_id(&self) -> Arc<[u8]> {
-        Arc::from(self.member_id.member_id_bytes())
+        Arc::from(self.wallet.address_bytes())
     }
 }
 
@@ -90,7 +90,6 @@ fn create_builds_a_working_steward_session_without_user() {
     let integrator = Integrator::new();
     let conversation: TestConversation = Conversation::create(
         "standalone",
-        integrator.member_id.member_id_bytes(),
         &integrator.provider,
         integrator.credential.clone(),
         &test_mls_group_config(),
@@ -133,7 +132,6 @@ fn join_completes_in_one_call() {
 
     let mut creator: TestConversation = Conversation::create(
         "standalone-welcome",
-        alice.member_id.member_id_bytes(),
         &alice.provider,
         alice.credential.clone(),
         &test_mls_group_config(),
@@ -151,12 +149,7 @@ fn join_completes_in_one_call() {
     // the add, so her bundled YES resolves consensus on its own.
     let bob_kp = bob.mint_key_package();
     creator
-        .add_member(
-            &alice.provider,
-            &alice.signer,
-            bob_kp.member_id(),
-            bob_kp.as_bytes(),
-        )
+        .add_member(&alice.provider, &alice.signer, bob_kp.as_bytes())
         .expect("add member");
 
     // Drive the creator until the welcome is minted.
@@ -186,7 +179,6 @@ fn join_completes_in_one_call() {
     // never minted the key package can't open it.
     let bystander = Integrator::with_key(ALICE);
     let bystander_join: Option<TestConversation> = Conversation::join(
-        bystander.member_id.member_id_bytes(),
         &bystander.provider,
         &bystander.signer,
         &welcome.welcome_bytes,
@@ -207,7 +199,6 @@ fn join_completes_in_one_call() {
     // run the join side-effects, apply the bundled sync. Only the addressed
     // joiner — holding the KP provider — gets `Some`.
     let joined: TestConversation = Conversation::join(
-        bob.member_id.member_id_bytes(),
         &bob.provider,
         &bob.signer,
         &welcome.welcome_bytes,
@@ -222,7 +213,7 @@ fn join_completes_in_one_call() {
     .expect("welcome addresses bob");
     assert_eq!(joined.id(), "standalone-welcome");
     assert_eq!(joined.state(), ConversationState::Working);
-    assert_eq!(joined.members().expect("members").len(), 2);
+    assert_eq!(joined.members_view().len(), 2);
     let (epoch, _) = joined.epoch_and_retry().expect("epoch");
     assert_eq!(epoch, 1, "joiner lands on the post-add epoch");
 }
@@ -245,7 +236,6 @@ fn create_with_members_seeds_initial_members_at_genesis() {
 
     let creator: TestConversation = Conversation::create(
         "genesis",
-        alice.member_id.member_id_bytes(),
         &alice.provider,
         alice.credential.clone(),
         &test_mls_group_config(),
@@ -255,17 +245,14 @@ fn create_with_members_seeds_initial_members_at_genesis() {
         alice.clock.clone(),
         alice.app_id(),
         config.clone(),
-        &[
-            (bob_kp.member_id(), bob_kp.as_bytes()),
-            (charlie_kp.member_id(), charlie_kp.as_bytes()),
-        ],
+        &[bob_kp.as_bytes(), charlie_kp.as_bytes()],
     )
     .expect("create with members");
 
     // Genesis is immediate: at epoch 1 with all three members, no polling.
     let (epoch, _) = creator.epoch_and_retry().expect("epoch");
     assert_eq!(epoch, 1, "the genesis commit landed at creation");
-    assert_eq!(creator.members().expect("members").len(), 3);
+    assert_eq!(creator.members_view().len(), 3);
     assert_eq!(creator.state(), ConversationState::Working);
     assert!(
         creator.is_steward(),
@@ -294,7 +281,6 @@ fn create_with_members_seeds_initial_members_at_genesis() {
     // and a steward — the property genesis beats the incremental baseline on.
     for member in [&bob, &charlie] {
         let joined: TestConversation = Conversation::join(
-            member.member_id.member_id_bytes(),
             &member.provider,
             &member.signer,
             &welcome.welcome_bytes,
@@ -309,7 +295,7 @@ fn create_with_members_seeds_initial_members_at_genesis() {
         .expect("welcome addresses the member");
         assert_eq!(joined.id(), "genesis");
         assert_eq!(joined.state(), ConversationState::Working);
-        assert_eq!(joined.members().expect("members").len(), 3);
+        assert_eq!(joined.members_view().len(), 3);
         let (e, _) = joined.epoch_and_retry().expect("epoch");
         assert_eq!(e, 1, "member lands on the genesis epoch");
         assert!(joined.is_steward(), "an initial member stewards genesis");
@@ -335,7 +321,6 @@ fn create_with_members_founds_a_subset_steward_group() {
 
     let creator: TestConversation = Conversation::create(
         "genesis-subset",
-        alice.member_id.member_id_bytes(),
         &alice.provider,
         alice.credential.clone(),
         &test_mls_group_config(),
@@ -345,17 +330,13 @@ fn create_with_members_founds_a_subset_steward_group() {
         alice.clock.clone(),
         alice.app_id(),
         config.clone(),
-        &[
-            (bob_kp.member_id(), bob_kp.as_bytes()),
-            (charlie_kp.member_id(), charlie_kp.as_bytes()),
-            (dave_kp.member_id(), dave_kp.as_bytes()),
-        ],
+        &[bob_kp.as_bytes(), charlie_kp.as_bytes(), dave_kp.as_bytes()],
     )
     .expect("create with members");
 
     let (epoch, _) = creator.epoch_and_retry().expect("epoch");
     assert_eq!(epoch, 1);
-    assert_eq!(creator.members().expect("members").len(), 4);
+    assert_eq!(creator.members_view().len(), 4);
 
     let welcome = creator
         .drain_events()
@@ -373,7 +354,6 @@ fn create_with_members_founds_a_subset_steward_group() {
     let mut convos = vec![creator];
     for member in [&bob, &charlie, &dave] {
         let joined: TestConversation = Conversation::join(
-            member.member_id.member_id_bytes(),
             &member.provider,
             &member.signer,
             &welcome.welcome_bytes,
@@ -386,7 +366,7 @@ fn create_with_members_founds_a_subset_steward_group() {
         )
         .expect("join")
         .expect("welcome addresses the member");
-        assert_eq!(joined.members().expect("members").len(), 4);
+        assert_eq!(joined.members_view().len(), 4);
         convos.push(joined);
     }
 
