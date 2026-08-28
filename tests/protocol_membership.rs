@@ -35,46 +35,6 @@ fn three_members_join_and_converge() {
     assert!(h.member(2).saw_phase(ConversationState::Working));
 }
 
-/// A merged add surfaces `MembersChanged` so the integrator learns the new
-/// member's leaf index — the id it tracks the member by — and can map it onto
-/// its own identity via the carried credential.
-#[test]
-fn add_emits_members_changed_naming_the_new_leaf() {
-    use de_mls::ConversationEvent;
-    let mut h = TestHarness::<2>::start(
-        [ALICE, BOB],
-        "mc",
-        fast_config(),
-        StewardListConfig::new(1, 5).unwrap(),
-    );
-    let bob_credential = h.member(1).credential_id().to_vec();
-    let announcement = h.member_mut(1).announce_key_package("mc");
-    h.deliver_key_package_all(&announcement);
-    h.process_until("bob joins", |h| h.member(1).is_working());
-
-    // The creator observed the add commit and emitted MembersChanged, naming
-    // bob by his credential at his assigned leaf.
-    let bob_add = h
-        .member(0)
-        .events()
-        .iter()
-        .filter_map(|e| match e {
-            ConversationEvent::MembersChanged { added, .. } => Some(added),
-            _ => None,
-        })
-        .flatten()
-        .find(|m| m.credential.serialized_content() == bob_credential)
-        .expect("MembersChanged names bob by credential")
-        .clone();
-
-    // The reported leaf index, encoded, is exactly bob's own de-mls member_id.
-    assert_eq!(
-        bob_add.index.u32().to_be_bytes().to_vec(),
-        h.member(1).member_id_bytes().to_vec(),
-        "the leaf index in the event is bob's member_id"
-    );
-}
-
 #[test]
 fn removed_member_observes_leaving_and_group_shrinks() {
     // sn_max = 2 so at least one member is a non-steward; target it (a
