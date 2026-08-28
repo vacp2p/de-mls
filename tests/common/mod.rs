@@ -44,7 +44,7 @@ pub fn test_mls_group_config() -> MlsGroupCreateConfig {
 /// an integrator keeps for itself now that de-mls takes both as raw bytes.
 pub struct MintedKeyPackage {
     pub bytes: Vec<u8>,
-    pub member_id: Vec<u8>,
+    pub signature_key: Vec<u8>,
 }
 
 impl MintedKeyPackage {
@@ -52,8 +52,9 @@ impl MintedKeyPackage {
         &self.bytes
     }
 
-    pub fn member_id(&self) -> &[u8] {
-        &self.member_id
+    /// The joiner id de-mls tracks this key package by until it has a leaf.
+    pub fn signature_key(&self) -> &[u8] {
+        &self.signature_key
     }
 }
 
@@ -65,7 +66,7 @@ pub fn mint_key_package(
     credential: &CredentialWithKey,
     signer: &SignatureKeyPair,
 ) -> MintedKeyPackage {
-    let member_id = credential.credential.serialized_content().to_vec();
+    let signature_key = credential.signature_key.as_slice().to_vec();
     let config = test_mls_group_config();
     let bundle = KeyPackage::builder()
         .build(config.ciphersuite(), provider, signer, credential.clone())
@@ -74,7 +75,10 @@ pub fn mint_key_package(
         .key_package()
         .tls_serialize_detached()
         .expect("kp tls");
-    MintedKeyPackage { bytes, member_id }
+    MintedKeyPackage {
+        bytes,
+        signature_key,
+    }
 }
 
 /// Build a fresh peer-scoring plug-in.

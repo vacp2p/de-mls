@@ -31,7 +31,7 @@ use prost::Message;
 
 use de_mls::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
-use de_mls::mls_crypto::unvalidated_credential_of_key_package;
+use de_mls::mls_crypto::signature_key_of_key_package;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
     conversation_update_request,
@@ -489,12 +489,12 @@ impl Member {
     /// submissions plus peers' surfaced for a vote. Counts `MemberInvite` only:
     /// a group that outgrows `sn_max` also votes on a steward election, and that
     /// is not a duplicate invitation.
-    pub fn observed_invite_proposals(&self, member_id: &[u8]) -> Vec<u32> {
+    pub fn observed_invite_proposals(&self, joiner_key: &[u8]) -> Vec<u32> {
         let invites_target = |req: &ConversationUpdateRequest| {
             matches!(
                 req.payload.as_ref(),
                 Some(conversation_update_request::Payload::MemberInvite(im))
-                    if unvalidated_credential_of_key_package(&im.key_package_bytes).is_ok_and(|c| c == member_id)
+                    if signature_key_of_key_package(&im.key_package_bytes).is_ok_and(|k| k == joiner_key)
             )
         };
         let mut ids: Vec<u32> = self
@@ -530,7 +530,7 @@ impl Member {
             .flatten()
             .filter_map(|r| match r.payload.as_ref() {
                 Some(conversation_update_request::Payload::MemberInvite(im)) => {
-                    unvalidated_credential_of_key_package(&im.key_package_bytes).ok()
+                    signature_key_of_key_package(&im.key_package_bytes).ok()
                 }
                 _ => None,
             })
@@ -562,7 +562,7 @@ impl Member {
             && convo
                 .members_view()
                 .iter()
-                .any(|m| m.credential.serialized_content() == key_package.member_id())
+                .any(|m| m.signature_key.as_slice() == key_package.signature_key())
         {
             return;
         }

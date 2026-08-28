@@ -12,7 +12,7 @@ use crate::{
     BufferedCommitCandidate, ConversationError, ConversationQueues, StewardListService,
     commit_round::context::RoundContext,
     mls_crypto::{
-        MlsProposalOutput, MlsService, StagedCandidateResult, unvalidated_credential_of_key_package,
+        MlsProposalOutput, MlsService, StagedCandidateResult, signature_key_of_key_package,
     },
     protos::de_mls::messages::v1::{
         CommitCandidate, ConversationUpdateRequest, ViolationEvidence,
@@ -149,7 +149,7 @@ enum ActionKind {
 }
 
 /// `(kind, id)` projection of an approved voting request — an add keys on
-/// the joiner's MLS credential, a remove on the target's `member_id` (leaf
+/// the joiner's signature key, a remove on the target's `member_id` (leaf
 /// index). Returns `None` for non-MLS payloads (emergency/election).
 fn action_projection_from_request(
     req: &ConversationUpdateRequest,
@@ -157,7 +157,7 @@ fn action_projection_from_request(
     match req.payload.as_ref()? {
         Payload::MemberInvite(im) => Some((
             ActionKind::Add,
-            unvalidated_credential_of_key_package(&im.key_package_bytes).ok()?,
+            signature_key_of_key_package(&im.key_package_bytes).ok()?,
         )),
         Payload::RemoveMember(rm) => Some((ActionKind::Remove, rm.member_id.clone())),
         _ => None,
@@ -165,8 +165,7 @@ fn action_projection_from_request(
 }
 
 /// `(kind, id)` projection of an MLS-staged action, matching
-/// [`action_projection_from_request`]: add by the credential, remove by leaf
-/// index.
+/// [`action_projection_from_request`]: add by the signature key, remove by leaf index.
 fn action_projection_from_mls(action: &MlsProposalOutput) -> (ActionKind, Vec<u8>) {
     match action {
         MlsProposalOutput::Add(id) => (ActionKind::Add, id.clone()),

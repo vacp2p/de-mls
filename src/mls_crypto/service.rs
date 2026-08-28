@@ -64,18 +64,19 @@ where
         .map_err(MlsError::storage)
 }
 
-/// The serialized leaf credential of a key package — the id a joiner is tracked
-/// by until the Add commit gives it a leaf. Reads it without validating the key
-/// package; validation happens at commit.
-pub fn unvalidated_credential_of_key_package(
-    key_package_bytes: &[u8],
-) -> Result<Vec<u8>, MlsError> {
+/// The leaf signature key of a key package — the id a joiner is tracked by
+/// until the Add commit gives it a leaf. Reads it without validating the key
+/// package; validation happens at commit. Keyed on the signature key rather
+/// than the credential because MLS requires signature keys to be unique within
+/// a group, while a credential is integrator-supplied and may repeat across
+/// members.
+pub fn signature_key_of_key_package(key_package_bytes: &[u8]) -> Result<Vec<u8>, MlsError> {
     let (kp_in, _) =
         KeyPackageIn::tls_deserialize_bytes(key_package_bytes).map_err(MlsError::KeyPackageTls)?;
     Ok(kp_in
         .unverified_credential()
-        .credential
-        .serialized_content()
+        .signature_key
+        .as_slice()
         .to_vec())
 }
 
@@ -453,14 +454,14 @@ impl MlsService {
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 let self_removed = staged.self_removed();
                 let mut actions = Vec::new();
-                // An Add targets a not-yet-member, identified by its key-package credential.
+                // An Add targets a not-yet-member, identified by its leaf signature key.
                 for add in staged.add_proposals() {
                     let id = add
                         .add_proposal()
                         .key_package()
                         .leaf_node()
-                        .credential()
-                        .serialized_content()
+                        .signature_key()
+                        .as_slice()
                         .to_vec();
                     actions.push(MlsProposalOutput::Add(id));
                 }

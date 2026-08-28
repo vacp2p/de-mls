@@ -245,10 +245,7 @@ fn create_with_members_seeds_initial_members_at_genesis() {
         alice.clock.clone(),
         alice.app_id(),
         config.clone(),
-        &[
-            (bob_kp.member_id(), bob_kp.as_bytes()),
-            (charlie_kp.member_id(), charlie_kp.as_bytes()),
-        ],
+        &[bob_kp.as_bytes(), charlie_kp.as_bytes()],
     )
     .expect("create with members");
 
@@ -333,11 +330,7 @@ fn create_with_members_founds_a_subset_steward_group() {
         alice.clock.clone(),
         alice.app_id(),
         config.clone(),
-        &[
-            (bob_kp.member_id(), bob_kp.as_bytes()),
-            (charlie_kp.member_id(), charlie_kp.as_bytes()),
-            (dave_kp.member_id(), dave_kp.as_bytes()),
-        ],
+        &[bob_kp.as_bytes(), charlie_kp.as_bytes(), dave_kp.as_bytes()],
     )
     .expect("create with members");
 

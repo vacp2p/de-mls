@@ -223,7 +223,7 @@ fn non_steward_add_member_costs_exactly_one_proposal() {
     );
 
     let erin_kp = h.member_mut(4).mint_key_package();
-    let erin_id = erin_kp.member_id().to_vec();
+    let erin_id = erin_kp.signature_key().to_vec();
     h.member_mut(1).add_member(&erin_kp);
     h.process_until("erin joins", |h| h.member(4).is_working());
 
@@ -276,7 +276,7 @@ fn invitation_racing_a_sponsored_join_admits_the_member_once() {
 
     // Two key packages for erin, proposed by two different members.
     let invited_kp = h.member_mut(4).mint_key_package();
-    let erin_id = invited_kp.member_id().to_vec();
+    let erin_id = invited_kp.signature_key().to_vec();
     let announced_kp = h.member_mut(4).announce_key_package("race");
 
     h.deliver_key_package_to(0, &announced_kp); // steward sponsors the request
@@ -326,7 +326,7 @@ fn repeated_add_for_one_joiner_opens_one_proposal() {
     });
 
     let erin_kp_a = h.member_mut(4).mint_key_package();
-    let erin_id = erin_kp_a.member_id().to_vec();
+    let erin_id = erin_kp_a.signature_key().to_vec();
     let erin_kp_b = h.member_mut(4).mint_key_package();
 
     // Two proposals for erin, back to back, before any poll resolves the first.

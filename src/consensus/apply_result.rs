@@ -8,7 +8,7 @@ use tracing::info;
 
 use crate::{
     ConversationError, ConversationQueues,
-    mls_crypto::unvalidated_credential_of_key_package,
+    mls_crypto::signature_key_of_key_package,
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, ViolationEvidence, ViolationType,
         conversation_update_request,
@@ -114,12 +114,12 @@ pub fn apply_consensus_result(
     if approved
         && let Some(conversation_update_request::Payload::MemberInvite(invite)) =
             request.payload.as_ref()
-        && let Ok(credential) = unvalidated_credential_of_key_package(&invite.key_package_bytes)
-        && conversation.has_approved_invite(&credential)
+        && let Ok(joiner_key) = signature_key_of_key_package(&invite.key_package_bytes)
+        && conversation.has_approved_invite(&joiner_key)
     {
         info!(
             proposal_id,
-            target = ?credential,
+            target = ?joiner_key,
             "invite proposal deduped — target already queued for admission"
         );
         return Ok(ConsensusApplyResult::NoAction);

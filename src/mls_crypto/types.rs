@@ -28,7 +28,7 @@ pub enum MlsCommitInput {
 /// `member_id` (leaf index).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MlsProposalOutput {
-    /// Add a joiner, identified by its credential until it has a leaf index.
+    /// Add a joiner, identified by its signature key until it has a leaf index.
     Add(Vec<u8>),
     /// Remove a member by its `member_id` (leaf index).
     Remove(Vec<u8>),

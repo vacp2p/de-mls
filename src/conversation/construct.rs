@@ -22,7 +22,7 @@ use crate::{
     ConversationQueues, ConversationServices, ConversationStateMachine, PeerScoreStorage,
     PeerScoringService, StewardListService, WallClock,
     consensus::outcome_bus::OutcomeBus,
-    mls_crypto::{MlsCommitInput, MlsService, member_id_of},
+    mls_crypto::{MlsCommitInput, MlsService, member_id_of, signature_key_of_key_package},
     protos::de_mls::messages::v1::MemberWelcome,
 };
 
@@ -34,9 +34,9 @@ where
 {
     /// Create a new conversation as the steward.
     /// If you want a single-steward group, do not pass any `initial_members`.
-    /// If you want to start with a group of members,  provide their
-    ///  `(member_id, key_package_bytes)` in `initial_members` so all are added in a
-    ///  single genesis commit—group starts at epoch 1 with all present.
+    /// If you want to start with a group of members, provide their key packages
+    /// in `initial_members` so all are added in a single genesis commit—group
+    /// starts at epoch 1 with all present.
     /// In both cases, the creator is installed as a steward and the group is ready to use.
     #[allow(clippy::too_many_arguments)]
     pub fn create<Pr>(
@@ -50,7 +50,7 @@ where
         clock: Wc,
         app_id: Arc<[u8]>,
         config: ConversationConfig,
-        initial_members: &[(&[u8], &[u8])],
+        initial_members: &[&[u8]],
     ) -> Result<Self, ConversationError>
     where
         Pr: OpenMlsProvider,
@@ -84,7 +84,7 @@ where
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
-        initial_members: &[(&[u8], &[u8])],
+        initial_members: &[&[u8]],
     ) -> Result<(), ConversationError>
     where
         Pr: OpenMlsProvider,
@@ -95,10 +95,12 @@ where
         }
         let updates: Vec<MlsCommitInput> = initial_members
             .iter()
-            .map(|(_, kp)| MlsCommitInput::Add(kp.to_vec()))
+            .map(|kp| MlsCommitInput::Add(kp.to_vec()))
             .collect();
-        let joiner_identities: Vec<Vec<u8>> =
-            initial_members.iter().map(|(id, _)| id.to_vec()).collect();
+        let joiner_identities: Vec<Vec<u8>> = initial_members
+            .iter()
+            .map(|kp| signature_key_of_key_package(kp))
+            .collect::<Result<_, _>>()?;
 
         // Genesis is the creator's unilateral seed: build the batched add-commit
         // and merge it inline, skipping the consensus/freeze lifecycle.

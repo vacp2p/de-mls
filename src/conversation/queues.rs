@@ -205,8 +205,8 @@ impl ConversationQueues {
             self.member_join_epoch.remove(&id);
         }
         for m in &delta.added {
-            self.pending_updates
-                .remove(m.credential.serialized_content());
+            // Buffered invites are keyed by the joiner's signature key
+            self.pending_updates.remove(m.signature_key.as_slice());
             // Record this epoch as the member's join epoch — unsettled until the
             // next epoch, and answerable for any epoch a later sync recomputes.
             self.member_join_epoch.insert(member_id_of(m.index), epoch);

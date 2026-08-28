@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use sha2::{Digest, Sha256};
 
-use crate::mls_crypto::unvalidated_credential_of_key_package;
+use crate::mls_crypto::signature_key_of_key_package;
 use crate::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, ViolationType, conversation_update_request,
 };
@@ -25,13 +25,13 @@ pub fn member_set(members: &[Vec<u8>]) -> HashSet<&[u8]> {
 }
 
 /// The target of a membership-changing `ConversationUpdateRequest`: a removal's
-/// `member_id` (leaf index), or an invite's joiner credential — read from the
+/// `member_id` (leaf index), or an invite's joiner signature key — read from the
 /// key package, since the invite carries only that. `None` for other payloads,
 /// or an unparseable key package.
 pub fn target_member_id_of(request: &ConversationUpdateRequest) -> Option<Vec<u8>> {
     match request.payload.as_ref()? {
         conversation_update_request::Payload::MemberInvite(m) => {
-            unvalidated_credential_of_key_package(&m.key_package_bytes).ok()
+            signature_key_of_key_package(&m.key_package_bytes).ok()
         }
         conversation_update_request::Payload::RemoveMember(m) => Some(m.member_id.clone()),
         _ => None,
