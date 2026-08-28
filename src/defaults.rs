@@ -86,9 +86,7 @@ impl ConsensusPlugin for DefaultConsensusPlugin {
 // Reference plug-in type aliases
 // ═══════════════════════════════════════════════════════════════════
 
-/// Reference peer-scoring plug-in: [`PeerScoringService`] over in-memory
-/// storage. The per-event score deltas are supplied at construction (see
-/// [`crate::default_score_deltas`]).
+/// Library-owned [`PeerScoringService`] using in-memory storage.
 pub type DefaultPeerScoring = PeerScoringService<InMemoryPeerScoreStorage>;
 
 #[cfg(test)]

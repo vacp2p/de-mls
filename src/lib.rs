@@ -57,7 +57,8 @@ pub mod conversation;
 /// Consensus plug-in contract, outcome application, and voting.
 pub mod consensus;
 
-/// Peer-scoring plug-in: vocabulary, traits, and reference service.
+/// Peer scoring: vocabulary, the library-owned service, and the one trait an
+/// integrator implements ([`peer_scoring::PeerScoreStorage`]).
 pub mod peer_scoring;
 
 /// Steward-list plug-in: deterministic list and rotation queries.

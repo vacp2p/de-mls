@@ -21,7 +21,7 @@ use crate::{
     CommitRoundResult, ConsensusEngine, ConsensusPlugin, ConversationConfig, ConversationError,
     ConversationEvent, ConversationQueues, ConversationState, ConversationStateMachine,
     OperatingMode, Outbound, PeerScoreStorage, PeerScoringService, PhaseTimer, ProcessResult,
-    ProposalKind, StewardListService, Timestamp, WallClock,
+    ProposalKind, ScoreChange, ScoreOp, ScoreSnapshot, StewardListService, Timestamp, WallClock,
     consensus::outcome_bus::OutcomeReceiver,
     decode_inbound_payload, finalize_commit_round, member_set,
     mls_crypto::{CommitArtifacts, MlsCommitInput, MlsService},
@@ -558,6 +558,51 @@ where
         }
     }
 
+    /// Apply `ops` to the peer-score table, emitting [`ConversationEvent::MemberScoreChanged`]
+    /// for each member whose score moved.
+    ///
+    /// This is the only way the library notifies the integrator about a member's score change.
+    /// The library just reports that the score changed;
+    /// it's up to application to decide what the score means (see RFC §Peer Scoring).
+    pub(crate) fn apply_score_ops(&mut self, ops: &[ScoreOp]) -> Result<(), ConversationError> {
+        let changes = self.services.scoring.apply_ops(ops)?;
+        self.emit_score_changes(changes);
+        Ok(())
+    }
+
+    /// Adopt a bootstrap score snapshot, emitting
+    /// [`ConversationEvent::MemberScoreChanged`] for each member it moved.
+    ///
+    /// The snapshot counterpart of [`Self::apply_score_ops`]: every score
+    /// mutation on a `Conversation` goes through one of the two, so reporting
+    /// can't be forgotten at a call site.
+    pub(crate) fn apply_score_snapshot(
+        &mut self,
+        snapshot: &ScoreSnapshot,
+    ) -> Result<(), ConversationError> {
+        let changes = self.services.scoring.apply_snapshot(snapshot)?;
+        self.emit_score_changes(changes);
+        Ok(())
+    }
+
+    /// Emit one [`ConversationEvent::MemberScoreChanged`] per moved score.
+    fn emit_score_changes(&self, changes: Vec<ScoreChange>) {
+        for change in changes {
+            info!(
+                conversation = %self.conversation_id,
+                member = ?change.member_id,
+                previous = change.previous,
+                score = change.score,
+                "peer score changed"
+            );
+            self.emit_event(ConversationEvent::MemberScoreChanged {
+                member_id: change.member_id,
+                previous: change.previous,
+                score: change.score,
+            });
+        }
+    }
+
     /// Drain every pending [`ConversationEvent`] accumulated since the last
     /// call. Returns events in insertion order. Callers (UI fanout,
     /// audit log) invoke this once per polling cycle.
@@ -832,8 +877,8 @@ mod tests {
     use crate::defaults::DefaultConsensusPlugin;
     use crate::defaults::InMemoryPeerScoreStorage;
     use crate::test_fixtures::{
-        TestMls, TestProvider, make_creator_mls, make_test_consensus_service,
-        steward_service_member, steward_service_steward,
+        FailingPeerScoreStorage, TestMls, TestProvider, make_creator_mls,
+        make_test_consensus_service, steward_service_member, steward_service_steward,
     };
     use crate::{PeerScoringService, ScoringConfig, StewardListService};
     use std::collections::HashMap;
@@ -869,12 +914,24 @@ mod tests {
     }
 
     fn build_conversation(mls: TestMls, steward_list: StewardListService) -> TestConversation {
-        build_conversation_scored::<InMemoryPeerScoreStorage>(mls, steward_list)
+        build_conversation_scored(
+            mls,
+            steward_list,
+            PeerScoringService::new(
+                InMemoryPeerScoreStorage::default(),
+                HashMap::new(),
+                ScoringConfig::default(),
+            ),
+        )
     }
 
-    fn build_conversation_scored<Sc: PeerScoreStorage + Default>(
+    /// Build a conversation over a caller-supplied scoring service, so a test
+    /// that needs real deltas or a failing backend gets one built that way
+    /// rather than replacing a throwaway after the fact.
+    fn build_conversation_scored<Sc: PeerScoreStorage>(
         mls: TestMls,
         steward_list: StewardListService,
+        scoring: PeerScoringService<Sc>,
     ) -> Conversation<DefaultConsensusPlugin, Sc, crate::MockClock> {
         let (consensus, consensus_rx) = make_test_consensus_service();
         Conversation::new(
@@ -882,11 +939,7 @@ mod tests {
             ConversationQueues::new("g", 10),
             ConversationServices {
                 mls,
-                scoring: PeerScoringService::new(
-                    Sc::default(),
-                    HashMap::new(),
-                    ScoringConfig::default(),
-                ),
+                scoring,
                 steward_list,
                 consensus,
                 consensus_rx,
@@ -921,6 +974,128 @@ mod tests {
         })
     }
 
+    /// A conversation whose scoring carries the real RFC deltas, so a batch of
+    /// ops actually moves a score (the shared builder wires an empty table).
+    fn conversation_with_real_deltas() -> TestConversation {
+        let (mls, _provider, _signer) = make_creator_mls(b"test-member-id");
+        build_conversation_scored(
+            mls,
+            steward_service_member(),
+            PeerScoringService::new(
+                InMemoryPeerScoreStorage::default(),
+                crate::default_score_deltas(),
+                ScoringConfig::default(),
+            ),
+        )
+    }
+
+    /// A score change reaches the integrator as an event — and as nothing
+    /// else. The library reports the movement and proposes no removal of its
+    /// own, so it must leave the outbound queue empty (RFC §Peer Scoring
+    /// deviation: initiation is the integrator's call).
+    #[test]
+    fn score_change_emits_an_event_and_proposes_nothing() {
+        let mut convo = conversation_with_real_deltas();
+        convo.services.scoring.add_member(b"alice").unwrap();
+        let _ = convo.drain_events();
+        let _ = convo.drain_outbound();
+
+        // CensorshipInactivity is -40 against a default 100: 100 → 60 → 20.
+        let penalty = ScoreOp {
+            member_id: b"alice".to_vec(),
+            event: crate::ScoreEvent::CensorshipInactivity,
+        };
+        convo
+            .apply_score_ops(&[penalty.clone(), penalty])
+            .expect("score ops apply");
+
+        let reported: Vec<_> = convo
+            .drain_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                ConversationEvent::MemberScoreChanged {
+                    member_id,
+                    previous,
+                    score,
+                } => Some((member_id, previous, score)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reported,
+            vec![(b"alice".to_vec(), 100, 20)],
+            "one event per member, netted across the batch"
+        );
+        assert!(
+            convo.drain_outbound().is_empty(),
+            "a score change must not put a removal proposal on the wire"
+        );
+    }
+
+    /// The integrator can decide a threshold crossing from the event alone:
+    /// `previous` and `score` straddle `score_threshold()`, in either
+    /// direction, with no state kept on its side.
+    #[test]
+    fn a_threshold_crossing_is_derivable_from_one_event() {
+        let mut convo = conversation_with_real_deltas();
+        convo.services.scoring.add_member(b"alice").unwrap();
+        let threshold = convo.score_threshold();
+
+        // 100 → 20 → -20: the second batch takes alice across the line.
+        let penalty = ScoreOp {
+            member_id: b"alice".to_vec(),
+            event: crate::ScoreEvent::CensorshipInactivity,
+        };
+        convo
+            .apply_score_ops(&[penalty.clone(), penalty.clone()])
+            .expect("score ops apply");
+        let _ = convo.drain_events();
+        convo.apply_score_ops(&[penalty]).expect("score op applies");
+
+        let fell_below = convo.drain_events().into_iter().any(|e| match e {
+            ConversationEvent::MemberScoreChanged {
+                previous, score, ..
+            } => previous > threshold && score <= threshold,
+            _ => false,
+        });
+        assert!(fell_below, "the crossing is visible in the event pair");
+    }
+
+    /// A score-storage failure must reach the integrator as an `Error` event
+    /// and emit no `MemberScoreChanged`, since nothing landed to report.
+    /// `poll` relies on this returning rather than panicking: it logs, emits,
+    /// and finishes the commit round.
+    #[test]
+    fn score_storage_failure_surfaces_and_reports_no_change() {
+        let (mls, _provider, _signer) = make_creator_mls(b"test-member-id");
+        let mut convo = build_conversation_scored(
+            mls,
+            steward_service_member(),
+            PeerScoringService::new(
+                FailingPeerScoreStorage::failing_after(1),
+                crate::default_score_deltas(),
+                ScoringConfig::default(),
+            ),
+        );
+        convo.services.scoring.add_member(b"alice").unwrap();
+        let _ = convo.drain_events();
+
+        let err = convo
+            .apply_score_ops(&[ScoreOp {
+                member_id: b"alice".to_vec(),
+                event: crate::ScoreEvent::CensorshipInactivity,
+            }])
+            .expect_err("storage write fails");
+        assert!(matches!(err, ConversationError::ScoreStorage(_)));
+        assert!(
+            !convo
+                .drain_events()
+                .iter()
+                .any(|e| matches!(e, ConversationEvent::MemberScoreChanged { .. })),
+            "nothing landed, so nothing is reported"
+        );
+    }
+
     /// A candidate that cannot be minted is not a phase-change detail — it
     /// stalls the round and every retry after it. The integrator has no other
     /// way to see it, so freeze entry must surface the failure rather than
@@ -946,35 +1121,6 @@ mod tests {
             !errors.is_empty(),
             "a failed candidate mint must reach the integrator as an Error event"
         );
-    }
-
-    /// A [`PeerScoreStorage`] whose every read/write fails — for asserting that
-    /// post-commit scoring errors don't wedge the state machine.
-    #[derive(Debug)]
-    struct ScoringFault;
-    impl std::fmt::Display for ScoringFault {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "scoring storage fault")
-        }
-    }
-    impl std::error::Error for ScoringFault {}
-
-    #[derive(Default)]
-    struct FailingScoreStorage;
-    impl PeerScoreStorage for FailingScoreStorage {
-        type Error = ScoringFault;
-        fn get(&self, _member_id: &[u8]) -> Result<Option<i64>, Self::Error> {
-            Err(ScoringFault)
-        }
-        fn set(&mut self, _member_id: &[u8], _score: i64) -> Result<(), Self::Error> {
-            Err(ScoringFault)
-        }
-        fn remove(&mut self, _member_id: &[u8]) -> Result<(), Self::Error> {
-            Err(ScoringFault)
-        }
-        fn all_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, Self::Error> {
-            Err(ScoringFault)
-        }
     }
 
     /// First tick with approved work auto-anchors the timer and returns `None`.
@@ -1302,8 +1448,15 @@ mod tests {
     #[test]
     fn merged_commit_reaches_working_even_if_scoring_storage_fails() {
         let (mls, provider, signer) = make_creator_mls(b"test-member-id");
-        let mut conversation =
-            build_conversation_scored::<FailingScoreStorage>(mls, steward_service_member());
+        let mut conversation = build_conversation_scored(
+            mls,
+            steward_service_member(),
+            PeerScoringService::new(
+                FailingPeerScoreStorage::always_failing(),
+                HashMap::new(),
+                ScoringConfig::default(),
+            ),
+        );
         // Mid commit-round, as after a merge lands.
         conversation.start_selection();
 

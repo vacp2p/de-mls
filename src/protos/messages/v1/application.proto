@@ -139,8 +139,7 @@ message ConversationSync {
   // Auto-vote default and consensus tie-break rule
   // (RFC §Creating Voting Proposal).
   bool liveness_criteria_yes = 10;
-  // At or below this score, a member is eligible for SCORE_BELOW_THRESHOLD
-  // ECP removal (RFC §Peer Scoring).
+  // At or below this score, a member can count as malicious
   int64 threshold_peer_score = 11;
   // Max age (in epochs) of a buffered membership update before the epoch
   // steward drops it.
@@ -150,6 +149,8 @@ message ConversationSync {
   // `MLS members \ unsettled_members` and re-derives the deterministic list to
   // verify `steward_members` instead of trusting it.
   repeated bytes unsettled_members = 13;
+  // Score a new member starts at (RFC §Peer Scoring `default_peer_score`).
+  int64 default_peer_score = 14;
 }
 
 // A member that joined without a bootstrap asks a steward to re-send the

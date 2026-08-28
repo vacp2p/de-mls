@@ -26,8 +26,8 @@ use prost::Message;
 use tracing::{error, info, warn};
 
 use crate::{
-    ConsensusPlugin, ConversationEvent, PeerScoreStorage, ProcessResult, ProposalKind,
-    ScoreSnapshot, StewardList, StewardListConfig, WallClock,
+    ConsensusPlugin, ConversationEvent, DEFAULT_PEER_SCORE, PeerScoreStorage, ProcessResult,
+    ProposalKind, ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig, WallClock,
     commit_round::{compute_commit_hash, receive_commit_candidate},
     conversation::{ConversationQueues, member_set},
     mls_crypto::{DecryptedMessage, MlsService},
@@ -541,14 +541,7 @@ where
         {
             return Ok(());
         }
-        let local_default_peer_score = self.services.scoring.default_score();
-        if !validate_conversation_sync(
-            &conversation_id,
-            &sync,
-            current_epoch,
-            &members,
-            local_default_peer_score,
-        )? {
+        if !validate_conversation_sync(&conversation_id, &sync, current_epoch, &members)? {
             return Ok(());
         }
 
@@ -619,6 +612,11 @@ where
         self.services
             .scoring
             .set_threshold(sync.threshold_peer_score);
+        // Before the snapshot: it rebases members off our assumed default onto
+        // the group's, which is exactly the set the sparse `peer_scores` omits.
+        self.services
+            .scoring
+            .set_default_score(synced_default_peer_score(sync))?;
         let snapshot = ScoreSnapshot {
             diverged: sync
                 .peer_scores
@@ -626,9 +624,9 @@ where
                 .map(|ps| (ps.member_id.clone(), ps.score))
                 .collect(),
         };
-        // Record the bootstrap scores; the steward that sent the sync owns
-        // any `ViolationType::SCORE_BELOW_THRESHOLD` removal, so the joiner doesn't sweep.
-        self.services.scoring.apply_snapshot(&snapshot)?;
+        // Record the bootstrap scores, reporting how far each member had
+        // already diverged from the default this node would have assumed.
+        self.apply_score_snapshot(&snapshot)?;
         self.config.liveness_criteria_yes = sync.liveness_criteria_yes;
         self.config.pending_update_max_epochs = sync.pending_update_max_epochs;
         if let Some(timing) = &sync.timing {
@@ -645,16 +643,16 @@ where
 /// (removed since the list was elected) are tolerated as long as at
 /// least one listed steward is still present.
 ///
-/// `local_default_peer_score` is the joiner's configured starting score
-/// for new members (not synced; per-node). Rejecting when it sits at
-/// or below the synced threshold prevents a misconfiguration where every
-/// new member added by this joiner starts already eligible for removal.
+/// The peer-score parameters are adopted, not judged: where the group puts its
+/// starting score, and where it puts the removal line, are the integrator's
+/// choices and the library acts on neither. They go through
+/// [`ScoringConfig::validate`] — the same rule a locally built config passes at
+/// construction — which asks only that the starting score be positive.
 fn validate_conversation_sync(
     conversation_id: &str,
     sync: &ConversationSync,
     current_epoch: u64,
     members: &[Vec<u8>],
-    local_default_peer_score: i64,
 ) -> Result<bool, ConversationError> {
     if sync.election_epoch > current_epoch {
         info!(
@@ -719,16 +717,36 @@ fn validate_conversation_sync(
         return Ok(false);
     }
 
-    if local_default_peer_score <= sync.threshold_peer_score {
+    // The same `ScoringConfig::validate` a locally built config passes at
+    // construction, so the two ends can't drift apart. A zero
+    // `default_peer_score` is proto3's "absent" and resolves to the RFC
+    // default, so a sender that never set the field is still joinable.
+    if let Err(e) = (ScoringConfig {
+        default_score: synced_default_peer_score(sync),
+        threshold: sync.threshold_peer_score,
+    })
+    .validate()
+    {
         info!(
             conversation = conversation_id,
-            local_default_peer_score,
-            threshold_peer_score = sync.threshold_peer_score,
-            "conversation sync rejected: default_peer_score at or below threshold would mark new members removable on add"
+            error = %e,
+            "conversation sync rejected: peer-score config"
         );
         return Ok(false);
     }
     Ok(true)
+}
+
+/// `default_peer_score` the sync asks for. proto3 scalars carry no presence,
+/// so a zero is indistinguishable from an unset field and means "whatever the
+/// program defaults to" — never a literal starting score of zero, which is not
+/// a score to start from.
+fn synced_default_peer_score(sync: &ConversationSync) -> i64 {
+    if sync.default_peer_score == 0 {
+        DEFAULT_PEER_SCORE
+    } else {
+        sync.default_peer_score
+    }
 }
 
 /// Name of the first zero-valued field in `timing`, or `None` if all
@@ -860,32 +878,56 @@ mod conversation_sync_tests {
             threshold_peer_score: threshold,
             pending_update_max_epochs: 3,
             unsettled_members: vec![],
+            default_peer_score: 100,
         }
     }
 
-    /// Joiner's `default_peer_score` strictly above the synced threshold
-    /// — new members added by this joiner start safely above the bar.
+    /// The synced pair goes through the same `ScoringConfig::validate` a local
+    /// config passes at construction: a positive starting score, above the
+    /// removal threshold.
     #[test]
-    fn validate_accepts_default_above_threshold() {
+    fn validate_accepts_a_sound_peer_score_pair() {
         let sync = valid_sync_with(0);
-        assert!(validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()], 100).unwrap());
+        assert!(validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()]).unwrap());
     }
 
-    /// Joiner's `default_peer_score` equal to the threshold — new members
-    /// would start at threshold and `score <= threshold` already qualifies
-    /// them for removal.
+    /// A starting score at or below the threshold would admit members already
+    /// countable as malicious.
     #[test]
-    fn validate_rejects_default_equal_to_threshold() {
-        let sync = valid_sync_with(50);
-        assert!(!validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()], 50).unwrap());
+    fn validate_rejects_a_default_not_above_the_threshold() {
+        let mut sync = valid_sync_with(0);
+        for threshold in [100, 500] {
+            sync.threshold_peer_score = threshold;
+            assert!(
+                !validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()]).unwrap(),
+                "default 100 against threshold {threshold} must be rejected"
+            );
+        }
     }
 
-    /// Joiner's `default_peer_score` below the threshold — every new
-    /// member added by this joiner starts removable.
+    /// An unset `default_peer_score` — proto3 gives zero, with no way to tell
+    /// it from "never written" — means the program default, so a sender that
+    /// predates the field stays joinable.
     #[test]
-    fn validate_rejects_default_below_threshold() {
-        let sync = valid_sync_with(100);
-        assert!(!validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()], 50).unwrap());
+    fn validate_reads_an_absent_default_as_the_program_default() {
+        let mut sync = valid_sync_with(0);
+        sync.default_peer_score = 0;
+        assert!(validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()]).unwrap());
+        assert_eq!(synced_default_peer_score(&sync), DEFAULT_PEER_SCORE);
+    }
+
+    /// A negative default was written on purpose and is not a score to start
+    /// from.
+    #[test]
+    fn validate_rejects_a_negative_default() {
+        let mut sync = valid_sync_with(0);
+        for default in [-1, i64::MIN] {
+            sync.default_peer_score = default;
+            assert!(
+                !validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()]).unwrap(),
+                "default_peer_score {default} must be rejected"
+            );
+        }
     }
 
     /// The carried delta reconstructs the pool, so a list
@@ -901,11 +943,11 @@ mod conversation_sync_tests {
 
         // The list correctly derived from the pool is accepted.
         sync.steward_members = vec![b"alice".to_vec()];
-        assert!(validate_conversation_sync("g", &sync, 0, &members, 100).unwrap());
+        assert!(validate_conversation_sync("g", &sync, 0, &members).unwrap());
 
         // A list naming the excluded member does not re-derive → rejected.
         sync.steward_members = vec![b"bob".to_vec()];
-        assert!(!validate_conversation_sync("g", &sync, 0, &members, 100).unwrap());
+        assert!(!validate_conversation_sync("g", &sync, 0, &members).unwrap());
     }
 
     /// A fabricated `unsettled_members` id (not in the current set) is rejected,
@@ -917,7 +959,7 @@ mod conversation_sync_tests {
         sync.sn_max = 1;
         sync.steward_members = vec![b"alice".to_vec()];
         sync.unsettled_members = vec![b"ghost".to_vec()];
-        assert!(!validate_conversation_sync("g", &sync, 0, &members, 100).unwrap());
+        assert!(!validate_conversation_sync("g", &sync, 0, &members).unwrap());
     }
 
     #[test]

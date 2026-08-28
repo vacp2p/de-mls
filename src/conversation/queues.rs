@@ -798,8 +798,9 @@ mod tests {
     /// A score-below-threshold removal is a live change for its target across
     /// its whole lifecycle: while the ECP is still voting (via the in-flight
     /// index) and after it resolves into a queued `RemoveMember` (via the
-    /// approved queue). `active_proposal_targets` sees it the whole time, so
-    /// the steward never files a duplicate.
+    /// approved queue). `active_proposal_targets` sees it the whole time, so a
+    /// second `propose_score_removal` for the same target is a no-op rather
+    /// than a duplicate round.
     #[test]
     fn score_removal_target_stays_covered_through_its_lifecycle() {
         use crate::apply_consensus_result;

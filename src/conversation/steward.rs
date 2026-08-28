@@ -303,11 +303,10 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        // Sparse snapshot — only members whose score has diverged
-        // from `default_score`. Joiners init every member at default
-        // via membership sync before applying the snapshot, so
-        // missing entries imply default. Saves wire size at scale
-        // (Waku message budget concern past ~1k members).
+        // Sparse snapshot — only members whose score has diverged from
+        // `default_score`, which rides along in `default_peer_score` so the
+        // joiner adopts the same pivot and reads the omissions as we meant
+        // them. Saves wire size at scale (Waku budget past ~1k members).
         let scores: Vec<PeerScore> = self
             .services
             .scoring
@@ -348,6 +347,7 @@ where
             sn_max: list.config().sn_max as u32,
             allow_subset_candidates: self.services.steward_list.config().allow_subset_candidates,
             peer_scores: scores,
+            default_peer_score: self.services.scoring.default_score(),
             timing: Some(timing),
             retry_round: list.retry_round(),
             max_reelection_attempts: self.services.steward_list.max_retries(),
@@ -378,76 +378,6 @@ where
         if let Some(payload) = self.build_conversation_sync_payload(provider, signer)? {
             self.broadcast(payload);
         }
-        Ok(())
-    }
-
-    /// Steward-only: file `ScoreBelowThreshold` ECPs for any member whose
-    /// score fell at or below the removal threshold. Skips self and any
-    /// target already covered by a pending removal.
-    pub(crate) fn check_and_initiate_score_removals<Pr>(
-        &mut self,
-        provider: &Pr,
-        signer: &impl Signer,
-    ) -> Result<(), ConversationError>
-    where
-        Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
-    {
-        // Reactive entry: callers chain into this after a scoring apply
-        // emitted a downward cross, so we expect at least one tracked
-        // member to be at-or-below threshold. The scan is the source of
-        // truth — events just trigger the look.
-        let (epoch, to_remove, self_id_arc, conversation_id) = {
-            let epoch = self.mls().current_epoch()?;
-            let self_id_arc = Arc::clone(&self.self_member_id);
-            let is_steward = self.services.steward_list.is_steward(&self_id_arc);
-            if !is_steward {
-                return Ok(());
-            }
-            // Skip a target that already has a removal in flight or approved.
-            // The in-flight index now includes score-removal ECPs, so this one
-            // check covers both a live ECP session and a queued RemoveMember —
-            // the target stays covered across the ECP's whole lifecycle, so no
-            // duplicate is filed.
-            let active = self.queues.active_proposal_targets();
-            let self_id: &[u8] = &self_id_arc;
-            let mut to_remove: Vec<(Vec<u8>, i64)> = Vec::new();
-            for id in self.services.scoring.members_below_threshold()? {
-                if id.as_slice() == self_id || active.contains(id.as_slice()) {
-                    continue;
-                }
-                if let Some(score) = self.services.scoring.score_for(&id)? {
-                    to_remove.push((id, score));
-                }
-            }
-            (epoch, to_remove, self_id_arc, self.conversation_id.clone())
-        };
-
-        for (target_id, current_score) in to_remove {
-            let evidence =
-                ViolationEvidence::score_below_threshold(target_id.clone(), epoch, current_score)
-                    .with_creator(self_id_arc.to_vec());
-            let request = evidence.into_update_request()?;
-
-            info!(
-                conversation = %conversation_id,
-                target = ?target_id,
-                score = current_score,
-                "initiating SCORE_BELOW_THRESHOLD removal"
-            );
-            // `ViolationType::SCORE_BELOW_THRESHOLD`is self-executing: threshold crossed ⇒
-            // member must be removed. The steward's vote is YES by
-            // protocol, so we bundle it at submit and skip the vote request.
-            if let Err(e) = self.initiate_proposal(provider, request, CreatorVote::Yes, signer) {
-                error!(
-                    conversation = %conversation_id,
-                    target = ?target_id,
-                    error = %e,
-                    "SCORE_BELOW_THRESHOLD vote failed to start"
-                );
-            }
-        }
-
         Ok(())
     }
 
@@ -604,6 +534,52 @@ where
             .into_update_request()?;
         info!(conversation = %self.conversation_id, epoch, "initiating Deadlock ECP");
         // Bundled YES: filing it is this member's own vote that the deadlock is real.
+        self.initiate_proposal(provider, request, CreatorVote::Yes, signer)?;
+        Ok(())
+    }
+
+    /// Ask the group to remove `target` because its score is too low.
+    ///
+    /// This is the emergency route, unlike the plain
+    /// [`Conversation::remove_member`] vote: on YES the proposal turns into a
+    /// `RemoveMember` and commits right away instead of waiting for the
+    /// inactivity timer.
+    ///
+    /// de-mls never calls this itself. It only reports score changes through
+    /// [`ConversationEvent::MemberScoreChanged`]; deciding a score is too low
+    /// is your call. Any member can propose, and it still needs ⌈2n/3⌉
+    /// consensus, so nobody removes anyone on their own. The proposal carries
+    /// this node's score for `target`, which peers weigh against their own.
+    ///
+    /// Fails if `target` has no score here.
+    pub fn propose_score_removal<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+        target: &[u8],
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let Some(score) = self.services.scoring.score_for(target)? else {
+            return Err(ConversationError::InvalidConversationUpdateRequest);
+        };
+        let (self_id, epoch) = {
+            let mls = self.mls();
+            (Arc::clone(&self.self_member_id), mls.current_epoch()?)
+        };
+        let request = ViolationEvidence::score_below_threshold(target.to_vec(), epoch, score)
+            .with_creator(self_id.to_vec())
+            .into_update_request()?;
+        info!(
+            conversation = %self.conversation_id,
+            target = ?target,
+            score,
+            epoch,
+            "initiating SCORE_BELOW_THRESHOLD ECP"
+        );
+        // Bundled YES: proposing it is this member's own vote for the removal.
         self.initiate_proposal(provider, request, CreatorVote::Yes, signer)?;
         Ok(())
     }

@@ -7,7 +7,7 @@ use std::error::Error as StdError;
 use hashgraph_like_consensus::{storage::ConsensusStorage, types::ConsensusEvent};
 use openmls_traits::{OpenMlsProvider, signatures::Signer, storage::StorageProvider};
 use prost::Message;
-use tracing::{error, info};
+use tracing::info;
 
 use crate::{
     ConsensusApplyResult, ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
@@ -123,10 +123,10 @@ where
             }
         }
 
-        // Empty for everything but emergency-criteria payloads.
+        // Score changes are only triggered for emergency proposals
         let score_ops = emergency_score_ops(&request, approved);
         if !score_ops.is_empty() {
-            self.handle_emergency_scored(provider, proposal_id, &score_ops, signer)?;
+            self.handle_emergency_scored(proposal_id, &score_ops)?;
         }
 
         // Free the resolved session so the store keeps only live ones; late
@@ -241,22 +241,13 @@ where
         shared
     }
 
-    /// Emergency proposal resolved: apply the score ops, lift the partial
-    /// freeze (removing it from the emergency set), and resume from
-    /// `Reelection` if the emergency put us there. Ends with a below-threshold
-    /// sweep — the score ops may have pushed someone over the removal line.
-    fn handle_emergency_scored<Pr>(
+    // Handle finished emergency: update scores, clear emergency, and go back to normal if needed.
+    fn handle_emergency_scored(
         &mut self,
-        provider: &Pr,
         proposal_id: u32,
         score_ops: &[ScoreOp],
-        signer: &impl Signer,
-    ) -> Result<(), ConversationError>
-    where
-        Pr: OpenMlsProvider,
-        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
-    {
-        self.services.scoring.apply_ops(score_ops)?;
+    ) -> Result<(), ConversationError> {
+        self.apply_score_ops(score_ops)?;
         self.queues.remove_emergency(proposal_id);
         let resumed_event = if self.current_state() == ConversationState::Reelection {
             Some(self.start_working())
@@ -264,10 +255,6 @@ where
             None
         };
         self.emit_phase_change(resumed_event);
-
-        if let Err(e) = self.check_and_initiate_score_removals(provider, signer) {
-            error!(conversation = %self.conversation_id, error = %e, "score-removal check failed");
-        }
         Ok(())
     }
 }

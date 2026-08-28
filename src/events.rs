@@ -116,4 +116,41 @@ pub enum ConversationEvent {
     /// Ends the degraded state a [`Self::ConversationSyncMissing`] opened, and
     /// the poll-driven sync requests stop.
     ConversationSyncApplied,
+
+    /// `member_id`'s peer score moved (RFC §Peer Scoring), from `previous` to
+    /// `score`. Reported net of whatever caused it, so `score` is what
+    /// [`crate::Conversation::member_score`] returns right now, and a member
+    /// whose gains and penalties cancel out is not reported at all.
+    ///
+    /// Two inputs produce one, and they are different kinds of statement:
+    ///
+    /// - **Observed events** — a violation or a successful commit this node saw
+    ///   for itself. "This score moved, `previous` → `score`": a delta.
+    /// - **Synchronization** — a `ConversationSync` carrying what the group
+    ///   already holds. "This score *is* `score`": current state, not
+    ///   movement. `previous` is then what this node had assumed (the default
+    ///   it seeded on join), so a joiner learns where everyone stands rather
+    ///   than watching them get there.
+    ///
+    /// A fact, not a judgment. The library reads nothing into the movement:
+    /// the member keeps every protocol right it had, and no removal is
+    /// proposed on its own. Interpreting it is the integrator's policy —
+    /// compare either end against [`crate::Conversation::score_threshold`] to
+    /// catch a removal-threshold crossing in either direction, band the range
+    /// however suits the application, or watch the trend. Acting on it means
+    /// calling [`crate::Conversation::remove_member`], or
+    /// [`crate::Conversation::propose_score_removal`] to raise the emergency
+    /// removal the group then votes on.
+    ///
+    /// Peer-score tables are local — they travel only in the joiner bootstrap
+    /// of `ConversationSync`, and each member scores what it observes — so two
+    /// members hold different scores for the same peer and reach any given
+    /// line at different moments, or never. Treat it as this node's reading,
+    /// not a group verdict, and don't let it drive protocol decisions that
+    /// members have to agree on.
+    MemberScoreChanged {
+        member_id: Vec<u8>,
+        previous: i64,
+        score: i64,
+    },
 }
