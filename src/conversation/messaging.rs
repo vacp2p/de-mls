@@ -5,6 +5,7 @@
 
 use std::error::Error as StdError;
 
+use openmls::key_packages::KeyPackage;
 use openmls_traits::{OpenMlsProvider, signatures::Signer, storage::StorageProvider};
 
 use crate::{
@@ -93,9 +94,15 @@ where
         Ok(())
     }
 
-    /// Invite a joiner whose key package the caller supplies out of band,
-    /// endorsing the add by bundling a YES vote at submit. Any member may call.
-    /// Errors unless the conversation is `Working`.
+    /// Invite someone to join by providing their key package
+    /// (which you got through some secure but external channel).
+    /// When you call this, you’re actively supporting their addition by submitting a YES vote.
+    /// Any group member can use this method.
+    ///
+    /// This will only work if the group is currently active and in the “Working” state.
+    /// If the key package’s signature key already belongs to an existing group member (including yourself),
+    /// this will return an `AlreadyMember` error —
+    /// since the underlying MLS protocol won’t allow adding a key that’s already present.
     ///
     /// See [`Self::sponsor_member`] for the non-endorsing steward relay.
     pub fn add_member<Pr>(
@@ -120,6 +127,9 @@ where
     /// everyone else saves it to propose later if the steward goes
     /// quiet (handled by `poll` after `backup_takeover_window`).
     ///
+    /// Relaying someone else's request, so a key package for a member already
+    /// in the group is dropped rather than reported.
+    ///
     /// For out-of-band invites with endorsement, use [`Self::add_member`].
     pub fn sponsor_member<Pr>(
         &mut self,
@@ -137,7 +147,10 @@ where
         if self.is_epoch_steward()? {
             return self.propose_add(provider, key_package_bytes, CreatorVote::Deferred, signer);
         }
-        validate_key_package(provider, key_package_bytes)?;
+        let key_package = validate_key_package(provider, key_package_bytes)?;
+        if self.holds_signature_key(&key_package) {
+            return Ok(());
+        }
         let epoch = self.mls().current_epoch()?;
         self.queues.insert_pending_update(
             ConversationUpdateRequest::member_invite(MemberInvite {
@@ -146,6 +159,15 @@ where
             epoch,
         );
         Ok(())
+    }
+
+    /// Whether the group already carries this key package's signature key —
+    /// true for our own key package as well.
+    /// The joiner has no leaf yet, so its signature key is the only identity
+    /// comparable against the live group.
+    fn holds_signature_key(&self, key_package: &KeyPackage) -> bool {
+        self.mls()
+            .has_signature_key(key_package.leaf_node().signature_key().as_slice())
     }
 
     /// Shared body of [`Self::add_member`] / [`Self::sponsor_member`]: open the
@@ -162,7 +184,10 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        validate_key_package(provider, key_package_bytes)?;
+        let key_package = validate_key_package(provider, key_package_bytes)?;
+        if self.holds_signature_key(&key_package) {
+            return Err(ConversationError::AlreadyMember);
+        }
         self.initiate_proposal(
             provider,
             ConversationUpdateRequest::member_invite(MemberInvite {

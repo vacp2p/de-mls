@@ -555,26 +555,26 @@ impl Member {
             .expect("send message");
     }
 
+    /// Invite `key_package`. A joiner already in the group is a no-op, which is
+    /// how a relaying integrator treats it — every other failure panics.
     pub fn add_member(&mut self, key_package: &MintedKeyPackage) {
-        // App-side dedup: a correct integrator doesn't invite an identity
-        // already in the group — de-mls no longer guesses membership.
-        if let Some(convo) = self.convo.as_ref()
-            && convo
-                .members_view()
-                .iter()
-                .any(|m| m.signature_key.as_slice() == key_package.signature_key())
-        {
-            return;
+        match self.try_add_member(key_package) {
+            Ok(()) | Err(ConversationError::AlreadyMember) => {}
+            Err(e) => panic!("add member: {e}"),
         }
-        self.convo
-            .as_mut()
-            .expect("member has joined")
-            .add_member(
-                &self.integ.provider,
-                &self.integ.signer,
-                key_package.as_bytes(),
-            )
-            .expect("add member");
+    }
+
+    /// [`Self::add_member`] with the error surfaced, for tests asserting that a
+    /// key package is turned away.
+    pub fn try_add_member(
+        &mut self,
+        key_package: &MintedKeyPackage,
+    ) -> Result<(), ConversationError> {
+        self.convo.as_mut().expect("member has joined").add_member(
+            &self.integ.provider,
+            &self.integ.signer,
+            key_package.as_bytes(),
+        )
     }
 
     /// Propose removing `target` (another member's [`MemberId`] handle).

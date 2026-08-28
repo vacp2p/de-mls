@@ -334,8 +334,15 @@ where
                     if urgent_target.is_some() {
                         continue;
                     }
+                    let joiner_key = signature_key_of_key_package(&im.key_package_bytes)?;
+                    // The joiner may have arrived by another path since the
+                    // vote. MLS rejects a duplicate signature key, and that
+                    // failure would poison every retry of this batch.
+                    if mls.has_signature_key(&joiner_key) {
+                        continue;
+                    }
                     updates.push(MlsCommitInput::Add(im.key_package_bytes.clone()));
-                    joiner_identities.push(signature_key_of_key_package(&im.key_package_bytes)?);
+                    joiner_identities.push(joiner_key);
                 }
                 Some(Payload::RemoveMember(rm)) => {
                     if let Some(target) = urgent_target.as_deref()

@@ -193,6 +193,16 @@ impl MlsService {
         self.resolve_member_id(member_id).is_some()
     }
 
+    /// Whether some current member already holds `signature_key`. The one
+    /// identity check available for a joiner that has no leaf yet: MLS rejects
+    /// a commit adding a signature key the group already carries, so a caller
+    /// asking for one can be turned away before the proposal reaches consensus.
+    pub fn has_signature_key(&self, signature_key: &[u8]) -> bool {
+        self.group
+            .members()
+            .any(|m| m.signature_key.as_slice() == signature_key)
+    }
+
     /// Current MLS epoch — the single source of truth; keep no parallel counter.
     pub fn current_epoch(&self) -> Result<u64, MlsError> {
         Ok(self.group.epoch().as_u64())

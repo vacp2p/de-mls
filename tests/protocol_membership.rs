@@ -6,7 +6,7 @@
 mod common;
 
 use common::harness::{TestHarness, fast_config};
-use de_mls::{ConversationState, StewardListConfig};
+use de_mls::{ConversationError, ConversationState, StewardListConfig};
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -349,4 +349,46 @@ fn repeated_add_for_one_joiner_opens_one_proposal() {
         1,
         "erin is added once"
     );
+}
+
+/// A key package whose signature key already sits in the group is turned away
+/// at the caller. MLS rejects the commit adding a duplicate signature key, and
+/// that failure would land on a steward minting an approved batch — stalling
+/// the round and every retry of it — long after the caller could act on it.
+#[test]
+fn adding_a_member_already_in_the_group_is_refused() {
+    let mut h = TestHarness::<3>::bootstrap(
+        [ALICE, BOB, CHARLIE],
+        "dup-add",
+        fast_config(),
+        StewardListConfig::new(1, 2).unwrap(),
+    );
+
+    // A fresh key package for bob, who is already a member: different key
+    // package, same signature key.
+    let bob_kp = h.member_mut(1).mint_key_package();
+
+    assert!(
+        matches!(
+            h.member_mut(0).try_add_member(&bob_kp),
+            Err(ConversationError::AlreadyMember)
+        ),
+        "a key package for a current member is refused"
+    );
+    let own_kp = h.member_mut(0).mint_key_package();
+    assert!(
+        matches!(
+            h.member_mut(0).try_add_member(&own_kp),
+            Err(ConversationError::AlreadyMember)
+        ),
+        "our own key package is refused — our signature key is in the tree"
+    );
+
+    h.process(std::time::Duration::from_millis(500));
+    assert_eq!(
+        h.member(0).member_count(),
+        3,
+        "the refused adds opened no proposal"
+    );
+    assert!(h.converged(), "the group is unchanged and converged");
 }
