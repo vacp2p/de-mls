@@ -70,6 +70,38 @@ fn removed_member_observes_leaving_and_group_shrinks() {
 }
 
 #[test]
+fn any_member_can_drive_a_score_removal_through_consensus() {
+    // The emergency removal route: de-mls never raises this ECP on its own, so
+    // a member files it, and it must work from a non-steward too — nothing
+    // gates emergency proposals on the steward list.
+    let mut h = TestHarness::<3>::bootstrap(
+        [ALICE, BOB, CHARLIE],
+        "sbt",
+        fast_config(),
+        StewardListConfig::new(1, 2).unwrap(),
+    );
+
+    let proposer = (0..3)
+        .find(|&i| !h.member(i).is_steward())
+        .expect("a non-steward exists");
+    let target = (0..3)
+        .find(|&i| i != proposer && !h.member(i).is_epoch_steward())
+        .expect("a target that isn't committing its own removal");
+
+    let target_id = h.member(target).member_id_bytes().to_vec();
+    h.member_mut(proposer).propose_score_removal(&target_id);
+
+    h.process_until("score removal committed", |h| {
+        h.member(proposer).member_count() == 2
+    });
+
+    assert!(
+        h.member(target).saw_leaving(),
+        "the removed member observes its own removal"
+    );
+}
+
+#[test]
 fn welcome_fans_out_to_every_member_with_a_single_minter() {
     // alice creator + bob joined; then bob (a non-creator) adds charlie.
     let mut h = TestHarness::<3>::start(

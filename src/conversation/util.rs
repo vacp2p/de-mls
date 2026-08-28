@@ -45,8 +45,9 @@ pub fn target_member_id_of(request: &ConversationUpdateRequest) -> Option<&[u8]>
 
 /// Member a proposal will add or remove once it lands — the membership target,
 /// plus a score-below-threshold ECP, which transforms into a RemoveMember on
-/// approval. Lets the in-flight index dedup a repeated or buffered change
-/// against a live score-removal for the whole voting window, not just after it
+/// approval. Nothing in de-mls raises that ECP; an integrator acting on a low
+/// score can. Covering it here lets the in-flight index dedup a repeated or
+/// buffered change against one for its whole voting window, not just after it
 /// becomes a RemoveMember.
 pub fn in_flight_target(request: &ConversationUpdateRequest) -> Option<&[u8]> {
     if let Some(id) = target_member_id_of(request) {

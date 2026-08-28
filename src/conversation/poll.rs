@@ -211,43 +211,24 @@ where
                 return Ok(self.recover_from_finalize_error());
             }
         };
-        // Penalties for candidates we dropped while ranking. We saw the
-        // misbehavior directly, so no consensus round is needed to score it
-        // (RFC §Peer Scoring). If a penalty drops someone to the removal
-        // threshold, the sweep below (steward-only) files a removal proposal
-        // against them.
-        //
-        // On failure the penalties are lost, so surface it — but keep going,
-        // or the state machine never reaches its terminal transition.
-        // `score_ops_applied` gates the sweep on whether they actually landed.
-        let score_ops_applied = if finalize_result.score_ops.is_empty() {
-            false
-        } else {
-            match self.services.scoring.apply_ops(&finalize_result.score_ops) {
-                Ok(()) => true,
-                Err(e) => {
-                    error!(conversation = %conversation_id, error = %e, "applying commit-round score ops failed");
-                    self.emit_event(ConversationEvent::Error {
-                        operation: "apply_commit_round_score_ops".to_owned(),
-                        message: e.to_string(),
-                    });
-                    false
-                }
-            }
-        };
+        // Penalties for misbehavior we saw ourselves, so no group vote.
+        // The commit has already merged: propagating would skip the terminal
+        // transition below and wedge the round in `Selection`. Report and
+        // carry on — no protocol path reads peer scores.
+        if !finalize_result.score_ops.is_empty()
+            && let Err(e) = self.apply_score_ops(&finalize_result.score_ops)
+        {
+            error!(conversation = %conversation_id, error = %e, "applying commit-round score ops failed");
+            self.emit_event(ConversationEvent::Error {
+                operation: "apply_commit_round_score_ops".to_owned(),
+                message: e.to_string(),
+            });
+        }
 
         if !finalize_result.committed_batch.is_empty() {
             self.emit_event(ConversationEvent::CommitApplied(std::mem::take(
                 &mut finalize_result.committed_batch,
             )));
-        }
-
-        // `check_and_initiate_score_removals` re-scans `members_below_threshold`
-        // and calls `initiate_proposal` for any uncovered target.
-        if score_ops_applied
-            && let Err(e) = self.check_and_initiate_score_removals(provider, signer)
-        {
-            error!(conversation = %conversation_id, error = %e, "score-removal check failed (commit-round finalize)");
         }
 
         match finalize_result.outcome {
@@ -296,15 +277,14 @@ where
                 // unanswered and the miss attributes to a live steward other
                 // than ourselves. Self-penalties are skipped — the node that
                 // failed to commit sees its own state and needn't score itself.
-                let (transition_event, scored_steward) = if has_proposals {
+                let transition_event = if has_proposals {
                     // Approved batch (and in-flight votes) survive so
                     // the recovered steward commits the same proposals
                     // once the next election lands.
                     let event = self.start_reelection();
 
                     // Local observation → direct peer-score penalty, recorded
-                    // the same by every honest member; a threshold crossing
-                    // still removes through SCORE_BELOW_THRESHOLD consensus.
+                    // the same by every honest member.
                     let score_target = {
                         let mls = self.mls();
                         let violation_epoch = mls.current_epoch()?;
@@ -317,26 +297,18 @@ where
                             .filter(|id| !id.is_empty() && *id != self_member_id)
                             .map(|id| id.to_vec())
                     };
-                    let scored = score_target.is_some();
                     if let Some(steward_id) = score_target {
-                        self.services.scoring.apply_op(&ScoreOp {
+                        self.apply_score_ops(&[ScoreOp {
                             member_id: steward_id,
                             event: ScoreEvent::CensorshipInactivity,
-                        })?;
+                        }])?;
                     }
 
-                    (event, scored)
+                    event
                 } else {
                     self.queues.commit_round.clear();
-                    let event = self.start_working();
-                    (event, false)
+                    self.start_working()
                 };
-
-                if scored_steward
-                    && let Err(e) = self.check_and_initiate_score_removals(provider, signer)
-                {
-                    error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze timeout)");
-                }
 
                 let entered_reelection = transition_event == ConversationState::Reelection;
                 self.emit_event(ConversationEvent::PhaseChange(transition_event));

@@ -70,14 +70,14 @@ pub fn apply_consensus_result(
     // On YES the approved queue becomes its record (below).
     conversation.remove_voting_proposal(proposal_id);
 
-    let evidence = extract_emergency_evidence(request).cloned();
-    let is_emergency = evidence.is_some();
-
     if let Some(election) = extract_election_proposal(request).cloned() {
         return Ok(apply_election_result(approved, election));
     }
 
     // ── Emergency and regular proposals ──
+
+    let evidence = extract_emergency_evidence(request).cloned();
+    let is_emergency = evidence.is_some();
 
     // Should the approved ECP transform into a RemoveMember?
     let transforms_to_removal =
@@ -123,20 +123,6 @@ pub fn apply_consensus_result(
         return Ok(ConsensusApplyResult::NoAction);
     }
 
-    // `transforms_to_removal` implies `evidence` is `Some`; `filter` lets the
-    // branches below bind it without an unwrap.
-    let sbt_evidence = evidence.as_ref().filter(|_| transforms_to_removal);
-
-    if approved {
-        if let Some(ev) = sbt_evidence {
-            // ECP below threshold becomes a RemoveMember.
-            conversation.insert_approved_proposal(proposal_id, removal_request_for(ev));
-        } else if !is_emergency {
-            conversation.insert_approved_proposal(proposal_id, request.clone());
-        }
-        // Other emergencies produce no MLS operation, so nothing to stage.
-    }
-
     if let Some(ev) = evidence.as_ref() {
         if approved {
             info!(
@@ -154,13 +140,23 @@ pub fn apply_consensus_result(
         }
     }
 
-    if let Some(ev) = sbt_evidence {
-        // Fast removal: restrict the next commit to this target so it
-        // doesn't drag along unrelated approved work.
+    // Below-threshold ECP: it becomes a `RemoveMember`, and the next commit is
+    // restricted to that target so the removal doesn't drag along unrelated
+    // approved work. `transforms_to_removal` implies `approved` and `evidence`
+    // is `Some`; `filter` binds it without an unwrap.
+    if let Some(ev) = evidence.as_ref().filter(|_| transforms_to_removal) {
+        conversation.insert_approved_proposal(proposal_id, removal_request_for(ev));
         let target = ev.target_member_id.clone();
         conversation.set_urgent_commit_target(target.clone());
         return Ok(ConsensusApplyResult::UrgentRemoval { target });
     }
+
+    // Regular proposals stage for the next commit; other emergencies produce
+    // no MLS operation, so there is nothing to stage.
+    if approved && !is_emergency {
+        conversation.insert_approved_proposal(proposal_id, request.clone());
+    }
+
     if evidence.as_ref().is_some_and(is_deadlock) && approved {
         // Layer 3: any member can produce the next commit.
         return Ok(ConsensusApplyResult::RecoveryModeOpened);
@@ -419,18 +415,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ecp_score_below_threshold_no_does_not_mark_urgent() {
-        let mut conversation = ConversationQueues::new("urgent-no", 10);
-        let request = score_below_threshold_request(member(7), member(1));
-
-        let result = apply_consensus_result(&mut conversation, 101, false, &request).unwrap();
-
-        assert!(matches!(result, ConsensusApplyResult::NoAction));
-        assert!(conversation.urgent_commit_target().is_none());
-        assert_eq!(conversation.approved_proposals_count(), 0);
-    }
-
     fn deadlock_request(creator: Vec<u8>) -> ConversationUpdateRequest {
         ViolationEvidence::deadlock(0)
             .with_creator(creator)
@@ -454,14 +438,26 @@ mod tests {
         assert!(conversation.urgent_commit_target().is_none());
     }
 
+    /// A rejected emergency does nothing at all, whatever it proposed. Every
+    /// branch that acts is gated on `approved`, so this holds for the whole
+    /// family — and it is what keeps a below-threshold removal a group
+    /// decision: any member can raise one, but a NO leaves no trace.
     #[test]
-    fn ecp_deadlock_no_returns_no_action() {
-        let mut conversation = ConversationQueues::new("deadlock-no", 10);
+    fn rejected_emergency_leaves_no_trace() {
+        for (name, request) in [
+            ("deadlock-no", deadlock_request(member(1))),
+            (
+                "score-below-threshold-no",
+                score_below_threshold_request(member(7), member(1)),
+            ),
+        ] {
+            let mut conversation = ConversationQueues::new(name, 10);
+            let result = apply_consensus_result(&mut conversation, 201, false, &request).unwrap();
 
-        let request = deadlock_request(member(1));
-        let result = apply_consensus_result(&mut conversation, 201, false, &request).unwrap();
-
-        assert!(matches!(result, ConsensusApplyResult::NoAction));
+            assert!(matches!(result, ConsensusApplyResult::NoAction), "{name}");
+            assert!(conversation.urgent_commit_target().is_none(), "{name}");
+            assert_eq!(conversation.approved_proposals_count(), 0, "{name}");
+        }
     }
 
     /// A regular (non-emergency) `RemoveMember` reached via consensus YES

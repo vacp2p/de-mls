@@ -109,6 +109,22 @@ where
         self.services.scoring.score_for(member_id)
     }
 
+    /// Score at or below which a member is eligible for removal
+    /// (RFC §Peer Scoring `threshold_peer_score`), adopted from
+    /// `ConversationSync` at join so members share the line.
+    pub fn score_threshold(&self) -> i64 {
+        self.services.scoring.threshold()
+    }
+
+    /// Score a member starts at (RFC §Peer Scoring `default_peer_score`), also
+    /// adopted from `ConversationSync`. Pairs with [`Self::score_threshold`] to
+    /// give the range a score sits in, which is what an application needs to
+    /// render one or band it — neither is knowable from the local config once
+    /// the group's values are in force.
+    pub fn score_default(&self) -> i64 {
+        self.services.scoring.default_score()
+    }
+
     /// Identities that have an in-flight self-leave request. Used by the UI
     /// to render a "pending leave" indicator.
     pub fn pending_leave_member_ids(&self) -> Result<Vec<Vec<u8>>, ConversationError> {

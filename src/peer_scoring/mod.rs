@@ -2,8 +2,8 @@
 //! library-owned [`PeerScoringService`], and score-derivation helpers.
 //!
 //! Submodules:
-//! - `types` — `ScoreEvent`, `ScoreOp`, `ScoringConfig`,
-//!   `ScoreSnapshot`, `ScoringMemberDiff` + RFC defaults.
+//! - `types` — `ScoreEvent`, `ScoreOp`, `ScoringConfig`, `ScoreSnapshot`,
+//!   `ScoreChange` (what a score move reports), `ScoringMemberDiff` + RFC defaults.
 //! - `storage` — `PeerScoreStorage` trait (integrator-supplied backend).
 //! - `service` — `PeerScoringService`, the library-owned scoring logic.
 //! - `helpers` — pure functions: `scoring_member_diff` (scoring-table vs.
@@ -18,6 +18,6 @@ pub use helpers::{emergency_score_ops, scoring_member_diff};
 pub use service::PeerScoringService;
 pub use storage::PeerScoreStorage;
 pub use types::{
-    DEFAULT_PEER_SCORE, DEFAULT_THRESHOLD_PEER_SCORE, ScoreEvent, ScoreOp, ScoreSnapshot,
-    ScoringConfig, ScoringMemberDiff, default_score_deltas,
+    DEFAULT_PEER_SCORE, DEFAULT_THRESHOLD_PEER_SCORE, ScoreChange, ScoreEvent, ScoreOp,
+    ScoreSnapshot, ScoringConfig, ScoringMemberDiff, default_score_deltas,
 };

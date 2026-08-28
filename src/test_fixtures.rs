@@ -8,6 +8,8 @@
 //! reaches into an `unreachable!()` branch, that's a sign the test is touching
 //! state it shouldn't be (and the panic location pinpoints the leak).
 
+use std::collections::HashMap;
+
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use openmls::credentials::{BasicCredential, CredentialWithKey};
@@ -88,4 +90,83 @@ pub(crate) fn steward_service_steward(member_id: &[u8]) -> StewardListService {
         .install_list(0, &[member_id.to_vec()], 1, 0)
         .expect("install single-member steward list");
     service
+}
+
+/// Peer-score storage whose writes fail from the `fail_after`-th `set` on.
+///
+/// The shipped [`crate::defaults::InMemoryPeerScoreStorage`] is `Infallible`,
+/// so without this the entire reason [`crate::PeerScoreStorage`] is fallible
+/// goes unexercised: nothing else in the crate can produce a
+/// [`crate::ConversationError::ScoreStorage`].
+#[derive(Debug, Default)]
+pub(crate) struct FailingPeerScoreStorage {
+    scores: HashMap<Vec<u8>, i64>,
+    /// Successful `set` calls to allow before failing. `None` never fails.
+    pub fail_after: Option<usize>,
+    /// Fail `get` and `all_scores` too, not just writes.
+    fail_reads: bool,
+    writes: usize,
+}
+
+/// The failure a [`FailingPeerScoreStorage`] injects.
+#[derive(Debug, thiserror::Error)]
+#[error("peer-score storage write failed")]
+pub(crate) struct ScoreStorageFailure;
+
+impl FailingPeerScoreStorage {
+    /// Fail every `set` once `n` have succeeded in total.
+    pub(crate) fn failing_after(n: usize) -> Self {
+        Self {
+            fail_after: Some(n),
+            ..Default::default()
+        }
+    }
+
+    /// Fail every operation, reads included — for a test that only needs the
+    /// scoring backend to be broken.
+    pub(crate) fn always_failing() -> Self {
+        Self {
+            fail_reads: true,
+            fail_after: Some(0),
+            ..Default::default()
+        }
+    }
+
+    /// Allow `n` more writes from wherever the counter now stands, then fail.
+    /// Lets a test set up state freely and cut off a later batch partway.
+    pub(crate) fn allow_further(&mut self, n: usize) {
+        self.fail_after = Some(self.writes + n);
+    }
+}
+
+impl crate::PeerScoreStorage for FailingPeerScoreStorage {
+    type Error = ScoreStorageFailure;
+
+    fn get(&self, member_id: &[u8]) -> Result<Option<i64>, Self::Error> {
+        if self.fail_reads {
+            return Err(ScoreStorageFailure);
+        }
+        Ok(self.scores.get(member_id).copied())
+    }
+
+    fn set(&mut self, member_id: &[u8], score: i64) -> Result<(), Self::Error> {
+        if self.fail_after.is_some_and(|n| self.writes >= n) {
+            return Err(ScoreStorageFailure);
+        }
+        self.writes += 1;
+        self.scores.insert(member_id.to_vec(), score);
+        Ok(())
+    }
+
+    fn remove(&mut self, member_id: &[u8]) -> Result<(), Self::Error> {
+        self.scores.remove(member_id);
+        Ok(())
+    }
+
+    fn all_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, Self::Error> {
+        if self.fail_reads {
+            return Err(ScoreStorageFailure);
+        }
+        Ok(self.scores.iter().map(|(k, v)| (k.clone(), *v)).collect())
+    }
 }

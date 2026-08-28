@@ -1,13 +1,15 @@
 //! [`PeerScoringService`] — the library's per-conversation peer-score
-//! tracker. It owns the RFC scoring logic (delta application, threshold
-//! evaluation, snapshot bootstrap); the integrator injects only the
-//! [`PeerScoreStorage`] backend and a [`ScoringConfig`] (deltas, threshold,
-//! default).
+//! tracker. It owns the RFC scoring logic (delta application, snapshot
+//! bootstrap, change reporting); the integrator supplies the
+//! [`PeerScoreStorage`] backend, a [`ScoringConfig`] (starting score and
+//! removal threshold), and optionally deltas overriding
+//! [`ScoreEvent::default_delta`].
 
 use std::collections::HashMap;
 
 use crate::{
-    ConversationError, PeerScoreStorage, ScoreEvent, ScoreOp, ScoreSnapshot, ScoringConfig,
+    ConversationError, PeerScoreStorage, ScoreChange, ScoreEvent, ScoreOp, ScoreSnapshot,
+    ScoringConfig,
 };
 
 /// Lift a backend's `Self::Error` into [`ConversationError`].
@@ -15,8 +17,8 @@ fn storage_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> Conversati
     ConversationError::ScoreStorage(Box::new(e))
 }
 
-/// One per conversation: applies [`ScoreEvent`] deltas to each member and
-/// answers threshold queries, over the `storage` backend.
+/// Tracks peer scores for a conversation. Applies delta changes, records results,
+/// but doesn't enforce thresholds — that's up to the integrator.
 pub struct PeerScoringService<S: PeerScoreStorage> {
     storage: S,
     score_deltas: HashMap<ScoreEvent, i64>,
@@ -24,7 +26,14 @@ pub struct PeerScoringService<S: PeerScoreStorage> {
 }
 
 impl<S: PeerScoreStorage> PeerScoringService<S> {
-    pub fn new(storage: S, score_deltas: HashMap<ScoreEvent, i64>, config: ScoringConfig) -> Self {
+    /// You can override just the score events you want — any you leave out use their default values.
+    pub fn new(
+        storage: S,
+        score_delta_overrides: HashMap<ScoreEvent, i64>,
+        config: ScoringConfig,
+    ) -> Self {
+        let mut score_deltas = crate::default_score_deltas();
+        score_deltas.extend(score_delta_overrides);
         Self {
             storage,
             score_deltas,
@@ -32,9 +41,10 @@ impl<S: PeerScoreStorage> PeerScoringService<S> {
         }
     }
 
-    /// Signed score delta for `event`. Events not in the table contribute 0.
+    /// Returns the score change for an event—uses your override if set.
+    /// Always succeeds since all events used are present in the map.
     fn score_delta(&self, event: ScoreEvent) -> i64 {
-        self.score_deltas.get(&event).copied().unwrap_or(0)
+        self.score_deltas.get(&event).copied().unwrap()
     }
 
     /// Start tracking a member at the configured default score.
@@ -48,48 +58,86 @@ impl<S: PeerScoreStorage> PeerScoringService<S> {
         self.storage.remove(member_id).map_err(storage_err)
     }
 
-    /// Apply an incremental delta to an already-tracked member. Unlike
-    /// `add_member` / `apply_snapshot`, this never creates an entry — a
-    /// stale op must not resurrect a removed member. The coordinator
-    /// `add_member`s first; a drop means member set and scores are out of sync.
-    pub fn apply_op(&mut self, op: &ScoreOp) -> Result<(), ConversationError> {
-        let Some(current) = self.storage.get(&op.member_id).map_err(storage_err)? else {
-            tracing::debug!(
-                member = ?op.member_id,
-                event = ?op.event,
-                "score op dropped: member not tracked (add_member first)"
-            );
-            return Ok(());
-        };
-        let delta = self.score_delta(op.event);
-        let new_score = current.saturating_add(delta);
-        self.storage
-            .set(&op.member_id, new_score)
-            .map_err(storage_err)
-    }
+    /// Applies a batch of [`ScoreOp`]s and returns how each affected member's score changed.
+    ///
+    /// For each member, only the net result is shown—multiple changes cancel out if they sum to zero.
+    /// If a member isn’t tracked, the op is ignored.
+    ///
+    /// Each member’s score is looked up once, and all updates are stored in order of first change.
+    ///
+    /// If saving to storage fails, the whole batch is dropped and no score changes are reported,
+    /// but the score table itself remains correct.
+    pub fn apply_ops(&mut self, ops: &[ScoreOp]) -> Result<Vec<ScoreChange>, ConversationError> {
+        // (member, score before the batch, score so far), in first-touch order.
+        let mut touched: Vec<(Vec<u8>, i64, i64)> = Vec::new();
 
-    /// Apply a batch of [`ScoreOp`]s.
-    pub fn apply_ops(&mut self, ops: &[ScoreOp]) -> Result<(), ConversationError> {
         for op in ops {
-            self.apply_op(op)?;
-        }
-        Ok(())
-    }
+            let index = match touched.iter().position(|(id, _, _)| *id == op.member_id) {
+                Some(index) => index,
+                None => {
+                    // Don't add missing members here; ignore ops for members not tracked.
+                    let Some(score) = self.storage.get(&op.member_id).map_err(storage_err)? else {
+                        tracing::debug!(
+                            member = ?op.member_id,
+                            event = ?op.event,
+                            "score op dropped: member not tracked (add_member first)"
+                        );
+                        continue;
+                    };
+                    touched.push((op.member_id.clone(), score, score));
+                    touched.len() - 1
+                }
+            };
 
-    /// Apply a snapshot of absolute scores (ConversationSync bootstrap).
-    /// Unknown members are auto-tracked at the snapshot value — unlike
-    /// [`Self::apply_op`], which ignores them — because a snapshot may
-    /// arrive before the MLS membership view catches up.
-    pub fn apply_snapshot(&mut self, snapshot: &ScoreSnapshot) -> Result<(), ConversationError> {
-        for (member_id, new_score) in &snapshot.diverged {
+            let score = touched[index].2.saturating_add(self.score_delta(op.event));
+            touched[index].2 = score;
             self.storage
-                .set(member_id, *new_score)
+                .set(&op.member_id, score)
                 .map_err(storage_err)?;
         }
-        Ok(())
+
+        Ok(touched
+            .into_iter()
+            .filter(|(_, previous, score)| previous != score)
+            .map(|(member_id, previous, score)| ScoreChange {
+                member_id,
+                previous,
+                score,
+            })
+            .collect())
     }
 
-    /// Sparse snapshot of non-default scores for ConversationSync send.
+    /// Sets member scores from a snapshot, adding any new members at the given values.
+    /// Unlike [`Self::apply_ops`], this tracks unknown members,
+    /// since the snapshot might arrive before membership updates.
+    ///
+    /// Returns [`ScoreChange`]s, showing how each score changed
+    /// (compared to `default_score` for new members).
+    pub fn apply_snapshot(
+        &mut self,
+        snapshot: &ScoreSnapshot,
+    ) -> Result<Vec<ScoreChange>, ConversationError> {
+        let default = self.config.default_score;
+        let mut changes = Vec::new();
+        for (member_id, score) in &snapshot.diverged {
+            let previous = self
+                .storage
+                .get(member_id)
+                .map_err(storage_err)?
+                .unwrap_or(default);
+            self.storage.set(member_id, *score).map_err(storage_err)?;
+            if *score != previous {
+                changes.push(ScoreChange {
+                    member_id: member_id.clone(),
+                    previous,
+                    score: *score,
+                });
+            }
+        }
+        Ok(changes)
+    }
+
+    /// Snapshot of scores that aren't set to the default, for ConversationSync.
     pub fn snapshot(&self) -> Result<ScoreSnapshot, ConversationError> {
         let default = self.config.default_score;
         let diverged = self
@@ -102,39 +150,22 @@ impl<S: PeerScoreStorage> PeerScoringService<S> {
         Ok(ScoreSnapshot { diverged })
     }
 
+    // Returns the score for a given member, or None if they're not tracked.
     pub fn score_for(&self, member_id: &[u8]) -> Result<Option<i64>, ConversationError> {
         self.storage.get(member_id).map_err(storage_err)
     }
 
-    /// Members at or below the removal threshold (RFC §Peer Scoring MUST:
-    /// the periodic threshold evaluation). The coordinator sweeps this
-    /// after a score change and initiates `ViolationType::SCORE_BELOW_THRESHOLD` removals.
-    pub fn members_below_threshold(&self) -> Result<Vec<Vec<u8>>, ConversationError> {
-        let threshold = self.config.threshold;
-        Ok(self
-            .storage
-            .all_scores()
-            .map_err(storage_err)?
-            .into_iter()
-            .filter(|(_, score)| *score <= threshold)
-            .map(|(id, _)| id)
-            .collect())
-    }
-
-    /// Complete set of tracked members with their scores (includes
-    /// default-scored members). Used for member-set diffing and UI reads.
+    /// Returns all tracked members and their scores (even those with the default score)
     pub fn all_members_with_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, ConversationError> {
         self.storage.all_scores().map_err(storage_err)
     }
 
-    /// Current removal threshold. Coordinator reads this when building
-    /// `ConversationSync` so joiners adopt the same value.
+    /// The current score threshold for removing members. Used by the coordinator and shown to joiners.
     pub fn threshold(&self) -> i64 {
         self.config.threshold
     }
 
-    /// Update the threshold in place. The next [`Self::members_below_threshold`]
-    /// sweep surfaces any newly re-classified member.
+    /// Sets a new score removal threshold (from ConversationSync).
     pub fn set_threshold(&mut self, threshold: i64) {
         self.config.threshold = threshold;
     }
@@ -143,6 +174,37 @@ impl<S: PeerScoreStorage> PeerScoringService<S> {
     pub fn default_score(&self) -> i64 {
         self.config.default_score
     }
+
+    /// Run [`ScoringConfig::validate`] over the config this service was built
+    /// with, so construction rejects what an incoming sync would also reject.
+    pub fn validate_config(&self) -> Result<(), ConversationError> {
+        self.config.validate()
+    }
+
+    /// Updates the group's `default_peer_score`, changing members who still have the old default.
+    ///
+    /// This keeps everyone in sync after a ConversationSync.
+    /// Members not listed in the sync snapshot are assumed to have the default,
+    /// so we switch any local member at the old default to the new one.
+    /// Members mentioned in the snapshot will get their scores updated right after,
+    /// so this won't affect them.
+    ///
+    /// No [`ScoreChange`] is triggered here—no one's actual standing changed, just what "default" means.
+    pub fn set_default_score(&mut self, default_score: i64) -> Result<(), ConversationError> {
+        let previous = self.config.default_score;
+        self.config.default_score = default_score;
+        if previous == default_score {
+            return Ok(());
+        }
+        for (member_id, score) in self.storage.all_scores().map_err(storage_err)? {
+            if score == previous {
+                self.storage
+                    .set(&member_id, default_score)
+                    .map_err(storage_err)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -150,7 +212,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::default_score_deltas;
     use crate::defaults::InMemoryPeerScoreStorage;
+    use crate::test_fixtures::FailingPeerScoreStorage;
 
     fn make_service() -> PeerScoringService<InMemoryPeerScoreStorage> {
         let deltas = HashMap::from([
@@ -179,27 +243,143 @@ mod tests {
         }
     }
 
+    /// Apply a single op and return the change it reported, if any.
+    fn apply_one<S: PeerScoreStorage>(
+        svc: &mut PeerScoringService<S>,
+        op: ScoreOp,
+    ) -> Result<Option<ScoreChange>, ConversationError> {
+        Ok(svc.apply_ops(&[op])?.pop())
+    }
+
+    /// A batch that pushes a member down and then lifts it back reports where
+    /// it *landed*, not where it passed through. Reporting the low-water mark
+    /// would contradict `score_for` in the same breath, and an integrator
+    /// acting on the event would act on a member who is fine.
+    #[test]
+    fn apply_ops_reports_the_net_result_not_the_low_water_mark() -> R {
+        let mut svc = make_service();
+        svc.add_member(b"alice")?;
+        // 100 -50-> 50 -20-> 70: passes below 60, ends above it.
+        let changes = svc.apply_ops(&[
+            op(b"alice", ScoreEvent::BrokenCommit),
+            op(b"alice", ScoreEvent::EmergencyYesCreator),
+        ])?;
+        assert_eq!(
+            changes,
+            vec![ScoreChange {
+                member_id: b"alice".to_vec(),
+                previous: 100,
+                score: 70,
+            }]
+        );
+        assert_eq!(
+            svc.score_for(b"alice")?,
+            Some(70),
+            "event agrees with state"
+        );
+        Ok(())
+    }
+
+    /// Deltas that cancel leave the score where they found it, so there is
+    /// nothing to report.
+    #[test]
+    fn apply_ops_is_silent_when_a_batch_nets_to_zero() -> R {
+        let mut svc = PeerScoringService::new(
+            InMemoryPeerScoreStorage::default(),
+            HashMap::from([
+                (ScoreEvent::BrokenCommit, -50),
+                (ScoreEvent::EmergencyNoCreator, 50),
+            ]),
+            ScoringConfig::default(),
+        );
+        svc.add_member(b"alice")?;
+        let changes = svc.apply_ops(&[
+            op(b"alice", ScoreEvent::BrokenCommit),
+            op(b"alice", ScoreEvent::EmergencyNoCreator),
+        ])?;
+        assert!(changes.is_empty());
+        assert_eq!(svc.score_for(b"alice")?, Some(100));
+        Ok(())
+    }
+
+    /// One change per member however many ops touched them, in first-touch
+    /// order so a batch reports deterministically.
+    #[test]
+    fn apply_ops_reports_once_per_member_in_first_touch_order() -> R {
+        let mut svc = make_service();
+        svc.add_member(b"alice")?;
+        svc.add_member(b"bob")?;
+        let changes = svc.apply_ops(&[
+            op(b"bob", ScoreEvent::BrokenCommit),
+            op(b"alice", ScoreEvent::BrokenCommit),
+            op(b"bob", ScoreEvent::BrokenCommit),
+        ])?;
+        let reported: Vec<_> = changes
+            .iter()
+            .map(|c| (c.member_id.clone(), c.previous, c.score))
+            .collect();
+        assert_eq!(
+            reported,
+            vec![(b"bob".to_vec(), 100, 0), (b"alice".to_vec(), 100, 50),]
+        );
+        Ok(())
+    }
+
+    /// An op against a member the table doesn't track is dropped, and a drop
+    /// is not a change.
+    #[test]
+    fn untracked_member_reports_nothing() -> R {
+        let mut svc = make_service();
+        assert!(apply_one(&mut svc, op(b"ghost", ScoreEvent::BrokenCommit))?.is_none());
+        assert_eq!(svc.score_for(b"ghost")?, None);
+        Ok(())
+    }
+
+    /// Bootstrap measures an untracked member from `default_score`, so a
+    /// joiner sees how far each member had already diverged from where it
+    /// would otherwise have assumed they stood.
+    #[test]
+    fn apply_snapshot_reports_divergence_from_the_default() -> R {
+        let mut svc = make_service();
+        let changes = svc.apply_snapshot(&ScoreSnapshot {
+            diverged: vec![(b"alice".to_vec(), -10), (b"bob".to_vec(), 40)],
+        })?;
+        assert_eq!(
+            changes,
+            vec![
+                ScoreChange {
+                    member_id: b"alice".to_vec(),
+                    previous: 100,
+                    score: -10,
+                },
+                ScoreChange {
+                    member_id: b"bob".to_vec(),
+                    previous: 100,
+                    score: 40,
+                },
+            ]
+        );
+        Ok(())
+    }
+
+    /// A re-sent sync carrying what the table already holds is not a change.
+    #[test]
+    fn apply_snapshot_is_silent_on_a_resend() -> R {
+        let mut svc = make_service();
+        let snapshot = ScoreSnapshot {
+            diverged: vec![(b"alice".to_vec(), -10)],
+        };
+        assert_eq!(svc.apply_snapshot(&snapshot)?.len(), 1);
+        assert!(svc.apply_snapshot(&snapshot)?.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn add_member_gets_default_score() -> R {
         let mut svc = make_service();
         svc.add_member(b"alice")?;
         assert_eq!(svc.score_for(b"alice")?, Some(100));
-        assert!(!svc.members_below_threshold()?.contains(&b"alice".to_vec()));
-        Ok(())
-    }
-
-    #[test]
-    fn add_member_below_threshold_lands_below() -> R {
-        let mut svc = PeerScoringService::new(
-            InMemoryPeerScoreStorage::default(),
-            HashMap::new(),
-            ScoringConfig {
-                default_score: -10,
-                threshold: 0,
-            },
-        );
-        svc.add_member(b"alice")?;
-        assert!(svc.members_below_threshold()?.contains(&b"alice".to_vec()));
+        assert!(svc.score_for(b"alice")?.unwrap() > svc.threshold());
         Ok(())
     }
 
@@ -223,16 +403,8 @@ mod tests {
     fn apply_event_decreases_score() -> R {
         let mut svc = make_service();
         svc.add_member(b"alice")?;
-        svc.apply_op(&op(b"alice", ScoreEvent::EmergencyNoCreator))?;
+        apply_one(&mut svc, op(b"alice", ScoreEvent::EmergencyNoCreator))?;
         assert_eq!(svc.score_for(b"alice")?, Some(50));
-        Ok(())
-    }
-
-    #[test]
-    fn apply_op_unknown_member_is_noop() -> R {
-        let mut svc = make_service();
-        svc.apply_op(&op(b"unknown", ScoreEvent::EmergencyNoCreator))?;
-        assert_eq!(svc.score_for(b"unknown")?, None);
         Ok(())
     }
 
@@ -245,7 +417,7 @@ mod tests {
             ScoreEvent::MisbehavingCommit,
             ScoreEvent::SuccessfulCommit,
         ] {
-            svc.apply_op(&op(b"alice", event))?;
+            apply_one(&mut svc, op(b"alice", event))?;
         }
         assert_eq!(svc.score_for(b"alice")?, Some(30));
         Ok(())
@@ -256,7 +428,6 @@ mod tests {
         let mut svc = make_service();
         svc.add_member(b"alice")?;
         svc.add_member(b"bob")?;
-        // Drop alice across threshold (-50 + -50 = 0 ≤ 0) and bob too.
         let ops = vec![
             op(b"alice", ScoreEvent::BrokenCommit),
             op(b"alice", ScoreEvent::BrokenCommit),
@@ -264,9 +435,8 @@ mod tests {
             op(b"bob", ScoreEvent::BrokenCommit),
         ];
         svc.apply_ops(&ops)?;
-        let below = svc.members_below_threshold()?;
-        assert!(below.contains(&b"alice".to_vec()));
-        assert!(below.contains(&b"bob".to_vec()));
+        assert_eq!(svc.score_for(b"alice")?, Some(0));
+        assert_eq!(svc.score_for(b"bob")?, Some(0));
         Ok(())
     }
 
@@ -276,7 +446,7 @@ mod tests {
         svc.add_member(b"alice")?;
         svc.add_member(b"bob")?;
         svc.add_member(b"charlie")?;
-        svc.apply_op(&op(b"alice", ScoreEvent::SuccessfulCommit))?;
+        apply_one(&mut svc, op(b"alice", ScoreEvent::SuccessfulCommit))?;
         let snap = svc.snapshot()?;
         let ids: Vec<&[u8]> = snap.diverged.iter().map(|(id, _)| id.as_slice()).collect();
         assert_eq!(ids, vec![b"alice".as_slice()]);
@@ -294,9 +464,6 @@ mod tests {
         })?;
         assert_eq!(svc.score_for(b"alice")?, Some(-10));
         assert_eq!(svc.score_for(b"bob")?, Some(50));
-        let below = svc.members_below_threshold()?;
-        assert!(below.contains(&b"alice".to_vec()));
-        assert!(!below.contains(&b"bob".to_vec()));
         Ok(())
     }
 
@@ -309,47 +476,204 @@ mod tests {
             diverged: vec![(b"newcomer".to_vec(), -10)],
         })?;
         assert_eq!(svc.score_for(b"newcomer")?, Some(-10));
-        assert!(
-            svc.members_below_threshold()?
-                .contains(&b"newcomer".to_vec())
-        );
         Ok(())
     }
 
+    /// Adopting the group's default moves members this node had merely assumed
+    /// were unremarkable. `peer_scores` omits members at the sender's default,
+    /// so anything left on the old one is exactly a member the sender left out
+    /// — the group's default is the right reading for them.
     #[test]
-    fn members_below_threshold_filters_correctly() -> R {
+    fn adopting_a_default_rebases_members_left_on_the_old_one() -> R {
         let mut svc = make_service();
         svc.add_member(b"alice")?;
         svc.add_member(b"bob")?;
-        svc.add_member(b"charlie")?;
-        for event in [ScoreEvent::EmergencyNoCreator, ScoreEvent::BrokenCommit] {
-            svc.apply_op(&op(b"alice", event))?;
-        }
-        for _ in 0..2 {
-            svc.apply_op(&op(b"charlie", ScoreEvent::EmergencyNoCreator))?;
-        }
-        let below = svc.members_below_threshold()?;
-        assert!(below.contains(&b"alice".to_vec()));
-        assert!(below.contains(&b"charlie".to_vec()));
-        assert!(!below.contains(&b"bob".to_vec()));
+        // bob diverges; alice stays on the assumed default.
+        svc.apply_ops(&[op(b"bob", ScoreEvent::BrokenCommit)])?;
+
+        svc.set_default_score(80)?;
+
+        assert_eq!(
+            svc.score_for(b"alice")?,
+            Some(80),
+            "rebased onto the group's"
+        );
+        assert_eq!(
+            svc.score_for(b"bob")?,
+            Some(50),
+            "a real score is untouched"
+        );
+        assert_eq!(svc.default_score(), 80);
         Ok(())
     }
 
+    /// Adopting the same value changes nothing — a re-sent sync must not
+    /// disturb the table.
     #[test]
-    fn set_threshold_changes_below_threshold_set() -> R {
+    fn adopting_an_unchanged_default_is_a_noop() -> R {
         let mut svc = make_service();
         svc.add_member(b"alice")?;
-        // Apply via snapshot to set an absolute score without going
-        // through the delta table.
+        svc.set_default_score(100)?;
+        assert_eq!(svc.score_for(b"alice")?, Some(100));
+        Ok(())
+    }
+
+    /// The whole point of adopting: after a sync, a member the sender omitted
+    /// must end up on the sender's default, not on the one this node guessed.
+    #[test]
+    fn adopt_then_snapshot_reproduces_the_senders_table() -> R {
+        // Sender runs a default of 80.
+        let mut sender = PeerScoringService::new(
+            InMemoryPeerScoreStorage::default(),
+            crate::default_score_deltas(),
+            ScoringConfig {
+                default_score: 80,
+                threshold: 0,
+            },
+        );
+        sender.add_member(b"alice")?;
+        sender.add_member(b"bob")?;
+        sender.apply_ops(&[op(b"bob", ScoreEvent::BrokenCommit)])?;
+        let wire = sender.snapshot()?;
+        assert!(
+            !wire.diverged.iter().any(|(id, _)| id == b"alice"),
+            "alice sits at the sender's default and is omitted"
+        );
+
+        // Joiner guessed 100, seeded both, then adopts and applies.
+        let mut joiner = make_service();
+        joiner.add_member(b"alice")?;
+        joiner.add_member(b"bob")?;
+        joiner.set_default_score(80)?;
+        joiner.apply_snapshot(&wire)?;
+
+        let mut sent = sender.all_members_with_scores()?;
+        let mut got = joiner.all_members_with_scores()?;
+        sent.sort();
+        got.sort();
+        assert_eq!(got, sent, "omitted member landed on the sender's default");
+        Ok(())
+    }
+
+    // ── Config validation ──────────────────────────────────────────
+
+    #[test]
+    fn validate_config_rejects_a_non_positive_default() {
+        let svc = PeerScoringService::new(
+            InMemoryPeerScoreStorage::default(),
+            default_score_deltas(),
+            ScoringConfig {
+                default_score: 0,
+                threshold: 0,
+            },
+        );
+        assert!(svc.validate_config().is_err());
+    }
+
+    // ── Storage failure ────────────────────────────────────────────
+
+    /// The whole point of a fallible [`PeerScoreStorage`]. A backend that
+    /// can't write must surface, not silently keep a stale table.
+    #[test]
+    fn storage_failure_propagates() {
+        let mut svc = PeerScoringService::new(
+            FailingPeerScoreStorage::failing_after(1),
+            default_score_deltas(),
+            ScoringConfig::default(),
+        );
+        svc.add_member(b"alice").expect("first write succeeds");
+        let err = svc
+            .apply_ops(&[op(b"alice", ScoreEvent::BrokenCommit)])
+            .expect_err("second write fails");
+        assert!(matches!(err, ConversationError::ScoreStorage(_)));
+    }
+
+    /// A batch cut off partway leaves the ops that landed applied and reports
+    /// none of them. Documented as acceptable *because* the table stays
+    /// readable — so the surviving score must be the applied one, not a
+    /// rollback and not the original.
+    #[test]
+    fn storage_failure_mid_batch_keeps_what_landed() -> R {
+        let mut svc = PeerScoringService::new(
+            FailingPeerScoreStorage::default(),
+            default_score_deltas(),
+            ScoringConfig::default(),
+        );
+        svc.add_member(b"alice")?;
+        svc.add_member(b"bob")?;
+        // Let alice's penalty through, then fail on bob's.
+        svc.storage.allow_further(1);
+        let err = svc
+            .apply_ops(&[
+                op(b"alice", ScoreEvent::BrokenCommit),
+                op(b"bob", ScoreEvent::BrokenCommit),
+            ])
+            .expect_err("bob's write fails");
+        assert!(matches!(err, ConversationError::ScoreStorage(_)));
+        assert_eq!(svc.score_for(b"alice")?, Some(50), "alice's op landed");
+        assert_eq!(svc.score_for(b"bob")?, Some(100), "bob's did not");
+        Ok(())
+    }
+
+    // ── ConversationSync round trip ────────────────────────────────
+
+    /// The sync contract: what one member sends must rebuild the same table on
+    /// another. The encoding is sparse — a member sitting at `default_score`
+    /// is omitted — so the round trip has to survive that omission rather than
+    /// dropping the member.
+    #[test]
+    fn snapshot_round_trips_through_apply_snapshot() -> R {
+        let mut sender = make_service();
+        for id in [b"alice".as_slice(), b"bob", b"carol"] {
+            sender.add_member(id)?;
+        }
+        sender.apply_ops(&[
+            op(b"alice", ScoreEvent::BrokenCommit),
+            op(b"carol", ScoreEvent::SuccessfulCommit),
+        ])?;
+        // bob never moved, so the sparse snapshot must omit him.
+        let wire = sender.snapshot()?;
+        assert!(!wire.diverged.iter().any(|(id, _)| id == b"bob"));
+
+        let mut joiner = make_service();
+        for id in [b"alice".as_slice(), b"bob", b"carol"] {
+            joiner.add_member(id)?;
+        }
+        joiner.apply_snapshot(&wire)?;
+
+        let mut sent = sender.all_members_with_scores()?;
+        let mut got = joiner.all_members_with_scores()?;
+        sent.sort();
+        got.sort();
+        assert_eq!(got, sent, "joiner reproduces the sender's table");
+        Ok(())
+    }
+
+    /// Underflow is the untested half of the saturating arithmetic: a member
+    /// already at the floor must not wrap around to a positive score. Driven
+    /// through a snapshot so the config itself stays one `validate` accepts.
+    #[test]
+    fn score_saturates_no_underflow() -> R {
+        let mut svc = PeerScoringService::new(
+            InMemoryPeerScoreStorage::default(),
+            HashMap::from([(ScoreEvent::BrokenCommit, i64::MIN)]),
+            ScoringConfig::default(),
+        );
         svc.apply_snapshot(&ScoreSnapshot {
-            diverged: vec![(b"alice".to_vec(), -10)],
+            diverged: vec![(b"alice".to_vec(), i64::MIN)],
         })?;
+        apply_one(&mut svc, op(b"alice", ScoreEvent::BrokenCommit))?;
+        assert_eq!(svc.score_for(b"alice")?, Some(i64::MIN));
+        Ok(())
+    }
 
-        svc.set_threshold(-50);
-        assert!(!svc.members_below_threshold()?.contains(&b"alice".to_vec()));
-
-        svc.set_threshold(-5);
-        assert!(svc.members_below_threshold()?.contains(&b"alice".to_vec()));
+    /// An empty batch touches nothing and reports nothing.
+    #[test]
+    fn empty_batch_is_a_noop() -> R {
+        let mut svc = make_service();
+        svc.add_member(b"alice")?;
+        assert!(svc.apply_ops(&[])?.is_empty());
+        assert_eq!(svc.score_for(b"alice")?, Some(100));
         Ok(())
     }
 
@@ -364,24 +688,25 @@ mod tests {
             },
         );
         svc.add_member(b"alice")?;
-        svc.apply_op(&op(b"alice", ScoreEvent::SuccessfulCommit))?;
+        apply_one(&mut svc, op(b"alice", ScoreEvent::SuccessfulCommit))?;
         assert_eq!(svc.score_for(b"alice")?, Some(i64::MAX));
         Ok(())
     }
 
     #[test]
-    fn unknown_event_yields_zero_delta() -> R {
+    fn an_omitted_event_keeps_its_default_delta() -> R {
         let mut svc = PeerScoringService::new(
             InMemoryPeerScoreStorage::default(),
             HashMap::from([(ScoreEvent::EmergencyNoCreator, -50)]),
-            ScoringConfig {
-                default_score: 100,
-                threshold: 0,
-            },
+            ScoringConfig::default(),
         );
         svc.add_member(b"alice")?;
-        svc.apply_op(&op(b"alice", ScoreEvent::SuccessfulCommit))?;
-        assert_eq!(svc.score_for(b"alice")?, Some(100));
+        // Overridden entry takes the caller's value.
+        apply_one(&mut svc, op(b"alice", ScoreEvent::EmergencyNoCreator))?;
+        assert_eq!(svc.score_for(b"alice")?, Some(50));
+        // Omitted entry keeps the RFC default (+10), not 0.
+        apply_one(&mut svc, op(b"alice", ScoreEvent::SuccessfulCommit))?;
+        assert_eq!(svc.score_for(b"alice")?, Some(60));
         Ok(())
     }
 }

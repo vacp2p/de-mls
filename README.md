@@ -95,20 +95,38 @@ shape and swaps the store for one backed by a database.
 
 ## Peer scoring
 
-de-mls owns the peer-scoring protocol: it turns observed events into score
-deltas, evaluates scores against the removal threshold, and drives
-`SCORE_BELOW_THRESHOLD` removals through consensus. You supply only two
-things — a `PeerScoreStorage` backend (the per-conversation member→score
-table) and a `ScoringConfig` (per-event deltas, default score, threshold) —
-which are combined into the library-owned `PeerScoringService`. There is no
-scoring-behavior trait to override; score updates are a protocol decision, so
-the library keeps a single implementation.
+de-mls turns observed protocol events into score deltas and keeps the
+per-member table. What a score *means* is your policy: a member whose score
+moves surfaces as a `MemberScoreChanged { member_id, previous, score }` event
+and keeps every protocol right it had. Compare either end against
+`score_threshold()`, band the range however suits your UI, or watch the trend.
+Act on it with `remove_member`, or `propose_score_removal` to raise the
+`SCORE_BELOW_THRESHOLD` emergency the group votes on — any member may raise
+one, and on YES it commits immediately instead of waiting out the inactivity
+timer.
+
+Scores are per-node. They travel once, in the joiner's `ConversationSync`
+bootstrap; after that each member scores what it observes, so two members hold
+different scores for the same peer. Use them to inform a person, not to drive
+a decision members have to agree on. That bootstrap is also the one case where
+a `MemberScoreChanged` means "the score *is* this" rather than "the score
+moved by this much".
+
+You supply a `PeerScoreStorage` backend and a `ScoringConfig` — the starting
+score and the removal threshold — which de-mls combines into its own
+`PeerScoringService`. Per-event deltas are a separate argument that
+*overrides* `default_score_deltas()` entry by entry, so you can retune one
+event without restating the rest. There is no scoring-behavior trait: score
+updates are a protocol decision, so the library keeps one implementation.
+Unlike the scores themselves the config is group-wide, set by the creator and
+adopted by joiners from `ConversationSync` — which matters because the wire
+format is sparse (members sitting at the default are omitted), so both ends
+have to agree on what "default" means.
 
 `de_mls::defaults::InMemoryPeerScoreStorage` is a ready in-memory backend; a
 durable integrator can back the table with sqlite or a key-value store.
-Storage methods are fallible (the trait carries an associated `Error` type),
-so a durable backend surfaces I/O failures rather than swallowing a score
-write.
+Storage methods are fallible, so a durable backend surfaces I/O failures
+rather than swallowing a score write.
 
 ## Steward list
 

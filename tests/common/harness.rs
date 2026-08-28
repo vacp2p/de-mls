@@ -553,6 +553,16 @@ impl Member {
             .expect("request recovery");
     }
 
+    /// File a `ScoreBelowThreshold` ECP against `member_id` — the emergency
+    /// removal route an integrator drives off a low score.
+    pub fn propose_score_removal(&mut self, member_id: &[u8]) {
+        self.convo
+            .as_mut()
+            .expect("member has joined")
+            .propose_score_removal(&self.integ.provider, &self.integ.signer, member_id)
+            .expect("propose score removal");
+    }
+
     /// Cast a manual vote on `proposal_id` (cancels any pending auto-vote).
     pub fn vote(&mut self, proposal_id: u32, vote: bool) {
         self.convo
