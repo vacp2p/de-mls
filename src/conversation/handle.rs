@@ -6,11 +6,7 @@
 //! via additional `impl` blocks.
 
 use std::error::Error as StdError;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Mutex, time::Duration};
 
 use openmls_traits::storage::StorageProvider;
 use openmls_traits::{OpenMlsProvider, signatures::Signer};
@@ -168,13 +164,13 @@ pub struct Conversation<Cp: ConsensusPlugin, Sc: PeerScoreStorage, Wc: WallClock
     pub(crate) recovery_rounds: u32,
     /// Time-driven state walked once per polling cycle.
     pub(crate) timing: Timing,
-    /// The local member's `member_id` (leaf-index bytes), derived from its own
-    /// leaf index at construction. Read via [`Conversation::member_id_bytes`].
-    pub(crate) self_member_id: Arc<[u8]>,
+    /// The local member's `member_id`: its own leaf index, big-endian. Read
+    /// via [`Conversation::member_id_bytes`].
+    pub(crate) self_member_id: [u8; 4],
     /// Per-instance app id supplied at construction. Tagged on every
     /// outbound packet and used for self-echo filtering in
     /// [`Conversation::process_inbound`]. Read via [`Conversation::app_id`].
-    pub(crate) app_id: Arc<[u8]>,
+    pub(crate) app_id: Box<[u8]>,
     /// Pending [`ConversationEvent`]s waiting for a caller to drain. Interior
     /// `Mutex` so producer-side `emit_event` stays `&self`; consumers
     /// drain via [`Self::drain_events`] once per polling cycle.
@@ -203,8 +199,8 @@ where
         state_machine: ConversationStateMachine,
         config: ConversationConfig,
         clock: Wc,
-        self_member_id: Arc<[u8]>,
-        app_id: Arc<[u8]>,
+        self_member_id: [u8; 4],
+        app_id: Box<[u8]>,
     ) -> Self {
         Self {
             conversation_id,
@@ -335,9 +331,7 @@ where
                         continue;
                     }
                     let joiner_key = signature_key_of_key_package(&im.key_package_bytes)?;
-                    // The joiner may have arrived by another path since the
-                    // vote. MLS rejects a duplicate signature key, and that
-                    // failure would poison every retry of this batch.
+                    // Skip if the joiner is already a group member to avoid MLS duplicate errors.
                     if mls
                         .group()
                         .members()
@@ -456,7 +450,7 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let self_member_id = Arc::clone(&self.self_member_id);
+        let self_member_id = self.self_member_id;
         match self.build_local_candidate(provider, signer, &self_member_id)? {
             Some(payload) => {
                 self.broadcast(payload);
@@ -936,7 +930,7 @@ mod tests {
         scoring: PeerScoringService<Sc>,
     ) -> Conversation<DefaultConsensusPlugin, Sc, crate::MockClock> {
         let (consensus, consensus_rx) = make_test_consensus_service();
-        let self_member_id = crate::mls_crypto::member_id_of(mls.group().own_leaf_index());
+        let self_member_id = mls.group().own_leaf_index().u32().to_be_bytes();
         Conversation::new(
             "g".to_string(),
             ConversationQueues::new("g", 10),
@@ -950,8 +944,8 @@ mod tests {
             ConversationStateMachine::new_as_member(),
             ConversationConfig::default(),
             crate::MockClock::new(),
-            Arc::from(self_member_id.as_slice()),
-            Arc::from(&[0u8; 16][..]),
+            self_member_id,
+            Box::from(&[0u8; 16][..]),
         )
     }
 

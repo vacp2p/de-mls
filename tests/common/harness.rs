@@ -19,7 +19,6 @@
 #![allow(dead_code)]
 
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::signers::local::PrivateKeySigner;
@@ -118,8 +117,8 @@ impl Integrator {
     }
 
     /// This integrator's `app_id` — its wallet address.
-    fn app_id(&self) -> Arc<[u8]> {
-        Arc::from(self.wallet.address_bytes())
+    fn app_id(&self) -> &[u8] {
+        self.wallet.address_bytes()
     }
 }
 

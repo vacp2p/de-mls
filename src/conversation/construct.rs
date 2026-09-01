@@ -8,7 +8,6 @@
 //! conversation ready to drop into a registry.
 
 use std::error::Error as StdError;
-use std::sync::Arc;
 
 use openmls::credentials::CredentialWithKey;
 use openmls::group::MlsGroupCreateConfig;
@@ -48,7 +47,7 @@ where
         consensus: &Cp,
         scoring: PeerScoringService<Sc>,
         clock: Wc,
-        app_id: Arc<[u8]>,
+        app_id: &[u8],
         config: ConversationConfig,
         initial_members: &[&[u8]],
     ) -> Result<Self, ConversationError>
@@ -168,7 +167,7 @@ where
         consensus: &Cp,
         scoring: PeerScoringService<Sc>,
         clock: Wc,
-        app_id: Arc<[u8]>,
+        app_id: &[u8],
         config: ConversationConfig,
     ) -> Result<Option<Self>, ConversationError>
     where
@@ -207,7 +206,7 @@ where
         mut scoring: PeerScoringService<Sc>,
         consensus: &Cp,
         clock: Wc,
-        app_id: Arc<[u8]>,
+        app_id: &[u8],
         config: ConversationConfig,
         is_creation: bool,
     ) -> Result<Self, ConversationError> {
@@ -216,7 +215,7 @@ where
 
         // Identity is the member's leaf index: the creator seeds at leaf 0, a
         // joiner takes the leaf the welcome placed it on.
-        let self_member_id_bytes = member_id_of(mls.group().own_leaf_index());
+        let self_member_id = mls.group().own_leaf_index().u32().to_be_bytes();
         let queues = ConversationQueues::new(conversation_id, config.dedup_window);
 
         // The conversation id is the deterministic-sort salt every member must
@@ -228,8 +227,8 @@ where
         // Creator path: bootstrap the list with self as sole steward at
         // epoch 0. Joiner path leaves the member set empty until `ConversationSync`.
         if is_creation {
-            steward_list.install_list(0, std::slice::from_ref(&self_member_id_bytes), 1, 0)?;
-            scoring.add_member(&self_member_id_bytes)?;
+            steward_list.install_list(0, &[self_member_id.to_vec()], 1, 0)?;
+            scoring.add_member(&self_member_id)?;
         }
 
         let state_machine = ConversationStateMachine::new_as_member();
@@ -261,8 +260,8 @@ where
             state_machine,
             config,
             clock,
-            Arc::from(self_member_id_bytes.as_slice()),
-            app_id,
+            self_member_id,
+            Box::from(app_id),
         );
         // Surface the opening phase so a caller draining conversation events sees
         // the conversation's starting state without a separate query.

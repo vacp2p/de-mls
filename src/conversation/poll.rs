@@ -6,7 +6,7 @@
 //! `poll()` once per wakeup cycle and reacts to the returned [`PollOutcome`].
 
 use std::error::Error as StdError;
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
@@ -192,7 +192,7 @@ where
         // subset of the approved set they hold, and selection picks the best.
         let allow_subset =
             in_recovery || self.services.steward_list.config().allow_subset_candidates;
-        let self_member_id = Arc::clone(&self.self_member_id);
+        let self_member_id = self.self_member_id;
         let mut finalize_result = match self.finalize_commit_round(
             provider,
             allow_subset,

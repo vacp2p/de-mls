@@ -7,7 +7,6 @@
 mod common;
 
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::signers::local::PrivateKeySigner;
@@ -81,8 +80,8 @@ impl Integrator {
 
     /// This integrator's `app_id` — the member id doubles as it so two
     /// integrators in one test don't echo-drop each other's packets.
-    fn app_id(&self) -> Arc<[u8]> {
-        Arc::from(self.wallet.address_bytes())
+    fn app_id(&self) -> &[u8] {
+        self.wallet.address_bytes()
     }
 }
 
