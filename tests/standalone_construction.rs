@@ -13,6 +13,7 @@ use std::time::Duration;
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use openmls::credentials::CredentialWithKey;
+use openmls::prelude::OpenMlsProvider;
 use openmls_basic_credential::SignatureKeyPair;
 
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
@@ -120,6 +121,50 @@ fn create_builds_a_working_steward_session_without_user() {
         )),
         "create buffers an opening Working PhaseChange"
     );
+}
+
+/// Read access reaches OpenMLS's own API: values de-mls surfaces no accessor
+/// for, and a secret exporter that takes the provider the integrator already
+/// holds.
+#[test]
+fn mls_group_is_readable_through_openmls() {
+    let integrator = Integrator::new();
+    let conversation: TestConversation = Conversation::create(
+        "standalone-read",
+        &integrator.provider,
+        integrator.credential.clone(),
+        &test_mls_group_config(),
+        &integrator.signer,
+        &integrator.consensus,
+        integrator.scoring(),
+        integrator.clock.clone(),
+        integrator.app_id(),
+        de_mls::ConversationConfig::default(),
+        &[],
+    )
+    .expect("create");
+
+    let group = conversation.mls_group();
+
+    // Read straight through OpenMLS, with no de-mls accessor behind them.
+    assert_eq!(group.group_id().as_slice(), b"standalone-read");
+    assert_eq!(group.own_leaf_index().u32(), 0);
+    assert_eq!(group.members().count(), 1);
+
+    // The tree agrees with what de-mls reports.
+    let (epoch, _retry) = conversation.epoch_and_retry().expect("epoch");
+    assert_eq!(group.epoch().as_u64(), epoch);
+
+    // A secret exporter runs off the crypto provider the integrator already holds.
+    let exported = group
+        .export_secret(
+            integrator.provider.crypto(),
+            "de-mls-read-test",
+            b"context",
+            32,
+        )
+        .expect("export_secret");
+    assert_eq!(exported.len(), 32);
 }
 
 /// Sub-second timers so the solo creator's bundled-YES consensus and the

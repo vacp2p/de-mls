@@ -179,6 +179,15 @@ impl MlsService {
         &self.conversation_id
     }
 
+    /// The MLS group, for reading.
+    ///
+    /// Every OpenMLS read takes `&self`, so a shared borrow reaches the whole
+    /// read API. Operations that change the tree are this service's own, and
+    /// keep de-mls's view in step with the epoch they advance.
+    pub fn group(&self) -> &MlsGroup {
+        &self.group
+    }
+
     /// Returns the `member_id` of all current members.
     pub fn members(&self) -> Result<Vec<Vec<u8>>, MlsError> {
         Ok(self

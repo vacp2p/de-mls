@@ -4,7 +4,7 @@ use openmls::group::Member;
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, Extensions, GroupContext,
-    MemberId, MemberRole, PeerScoreStorage, WallClock, mls_crypto::member_id_of,
+    MemberId, MemberRole, MlsGroup, PeerScoreStorage, WallClock, mls_crypto::member_id_of,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
@@ -14,6 +14,21 @@ where
     Sc: PeerScoreStorage,
     Wc: WallClock,
 {
+    /// The conversation's MLS group, for reading.
+    ///
+    /// Every OpenMLS read takes `&self`, so this borrow reaches the whole read
+    /// API — members, extensions, capabilities, exporters — through OpenMLS
+    /// itself rather than through a de-mls accessor per value. Secret exporters
+    /// take the provider the caller already holds.
+    ///
+    /// Tree writes stay with de-mls. A commit advances the epoch, the protocol
+    /// admits one per round, and consensus picks it; membership and
+    /// group-context changes are requested through the proposal API so the
+    /// group agrees on them before any tree changes.
+    pub fn mls_group(&self) -> &MlsGroup {
+        self.mls().group()
+    }
+
     /// Current state of the conversation's state machine.
     pub fn state(&self) -> ConversationState {
         self.current_state()
