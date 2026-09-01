@@ -151,7 +151,7 @@ where
         if self.holds_signature_key(&key_package) {
             return Ok(());
         }
-        let epoch = self.mls().current_epoch()?;
+        let epoch = self.mls().group().epoch().as_u64();
         self.queues.insert_pending_update(
             ConversationUpdateRequest::member_invite(MemberInvite {
                 key_package_bytes: key_package_bytes.to_vec(),
@@ -166,8 +166,11 @@ where
     /// The joiner has no leaf yet, so its signature key is the only identity
     /// comparable against the live group.
     fn holds_signature_key(&self, key_package: &KeyPackage) -> bool {
+        let key = key_package.leaf_node().signature_key().as_slice();
         self.mls()
-            .has_signature_key(key_package.leaf_node().signature_key().as_slice())
+            .group()
+            .members()
+            .any(|m| m.signature_key.as_slice() == key)
     }
 
     /// Shared body of [`Self::add_member`] / [`Self::sponsor_member`]: open the

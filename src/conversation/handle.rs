@@ -338,7 +338,11 @@ where
                     // The joiner may have arrived by another path since the
                     // vote. MLS rejects a duplicate signature key, and that
                     // failure would poison every retry of this batch.
-                    if mls.has_signature_key(&joiner_key) {
+                    if mls
+                        .group()
+                        .members()
+                        .any(|m| m.signature_key.as_slice() == joiner_key)
+                    {
                         continue;
                     }
                     updates.push(MlsCommitInput::Add(im.key_package_bytes.clone()));
@@ -378,7 +382,7 @@ where
 
         // Welcome bytes are buffered here but deferred until our merge, so
         // joiners can't advance epoch ahead of the steward.
-        let epoch = mls.current_epoch()?;
+        let epoch = mls.group().epoch().as_u64();
         let max_candidates = mls.members()?.len();
         self.queues.commit_round.add(
             candidate.clone(),
@@ -932,7 +936,7 @@ mod tests {
         scoring: PeerScoringService<Sc>,
     ) -> Conversation<DefaultConsensusPlugin, Sc, crate::MockClock> {
         let (consensus, consensus_rx) = make_test_consensus_service();
-        let self_member_id = crate::mls_crypto::member_id_of(mls.own_index());
+        let self_member_id = crate::mls_crypto::member_id_of(mls.group().own_leaf_index());
         Conversation::new(
             "g".to_string(),
             ConversationQueues::new("g", 10),
@@ -955,7 +959,7 @@ mod tests {
     /// provider/signer backing it — the shape every commit-mint test needs.
     fn make_steward_conversation() -> (TestConversation, TestProvider, SignatureKeyPair) {
         let (mls, provider, signer) = make_creator_mls(b"test-member-id");
-        let self_member_id = crate::mls_crypto::member_id_of(mls.own_index());
+        let self_member_id = crate::mls_crypto::member_id_of(mls.group().own_leaf_index());
         (
             build_conversation(mls, steward_service_steward(&self_member_id)),
             provider,
@@ -1191,7 +1195,7 @@ mod tests {
     fn validate_election_list_recomputes_from_local_members() {
         use crate::protos::de_mls::messages::v1::StewardElectionProposal;
         let conversation = make_conversation_working();
-        let epoch = conversation.mls().current_epoch().unwrap();
+        let epoch = conversation.mls().group().epoch().as_u64();
         let honest = StewardElectionProposal {
             proposed_stewards: vec![conversation.self_member_id.to_vec()],
             election_epoch: epoch,
@@ -1419,7 +1423,7 @@ mod tests {
             commit_message: vec![0x02; 32],
             steward_member_id: conversation.self_member_id.to_vec(),
         };
-        let epoch = conversation.mls().current_epoch().unwrap();
+        let epoch = conversation.mls().group().epoch().as_u64();
         conversation
             .queues
             .commit_round

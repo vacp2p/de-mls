@@ -94,7 +94,7 @@ where
     ) -> Result<StewardListReconcile, ConversationError> {
         let (current_epoch, members) = {
             let mls = self.mls();
-            (mls.current_epoch()?, mls.members()?)
+            (mls.group().epoch().as_u64(), mls.members()?)
         };
         if !self.services.steward_list.is_exhausted(current_epoch) {
             return Ok(StewardListReconcile::Settled);
@@ -137,7 +137,7 @@ where
         }
         let (members, current_epoch) = {
             let mls = self.mls();
-            (mls.members()?, mls.current_epoch()?)
+            (mls.members()?, mls.group().epoch().as_u64())
         };
 
         let inserted = self
@@ -395,7 +395,7 @@ where
     {
         let (proposed_stewards, election_epoch, retry_round, conversation_id) = {
             let mls = self.mls();
-            let epoch = mls.current_epoch()?;
+            let epoch = mls.group().epoch().as_u64();
             let mls_members = mls.members()?;
             let self_member_id: &[u8] = &self.self_member_id;
 
@@ -498,7 +498,10 @@ where
         }
         let (self_id, epoch) = {
             let mls = self.mls();
-            (Arc::clone(&self.self_member_id), mls.current_epoch()?)
+            (
+                Arc::clone(&self.self_member_id),
+                mls.group().epoch().as_u64(),
+            )
         };
         let request = ViolationEvidence::deadlock(epoch)
             .with_creator(self_id.to_vec())
@@ -538,7 +541,10 @@ where
         };
         let (self_id, epoch) = {
             let mls = self.mls();
-            (Arc::clone(&self.self_member_id), mls.current_epoch()?)
+            (
+                Arc::clone(&self.self_member_id),
+                mls.group().epoch().as_u64(),
+            )
         };
         let request = ViolationEvidence::score_below_threshold(target.to_vec(), epoch, score)
             .with_creator(self_id.to_vec())

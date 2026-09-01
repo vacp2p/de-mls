@@ -361,14 +361,14 @@ impl Member {
     pub fn epoch_authenticator(&self) -> Vec<u8> {
         self.convo
             .as_ref()
-            .map(|c| c.epoch_authenticator())
+            .map(|c| c.mls_group().epoch_authenticator().as_slice().to_vec())
             .unwrap_or_default()
     }
 
     pub fn member_count(&self) -> usize {
         self.convo
             .as_ref()
-            .map(|c| c.members_view().len())
+            .map(|c| c.mls_group().members().count())
             .unwrap_or(0)
     }
 
@@ -384,12 +384,7 @@ impl Member {
         let mut keys: Vec<Vec<u8>> = self
             .convo
             .as_ref()
-            .map(|c| {
-                c.members_view()
-                    .into_iter()
-                    .map(|m| m.signature_key)
-                    .collect()
-            })
+            .map(|c| c.mls_group().members().map(|m| m.signature_key).collect())
             .unwrap_or_default();
         keys.sort();
         keys

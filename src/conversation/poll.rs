@@ -287,7 +287,7 @@ where
                     // the same by every honest member.
                     let score_target = {
                         let mls = self.mls();
-                        let violation_epoch = mls.current_epoch()?;
+                        let violation_epoch = mls.group().epoch().as_u64();
                         let members = mls.members()?;
                         let self_member_id: &[u8] = &self.self_member_id;
                         let eligible = self.queues.steward_eligibility(&members);
@@ -530,7 +530,7 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let current_epoch = self.mls().current_epoch()?;
+        let current_epoch = self.mls().group().epoch().as_u64();
         let needs_sync = match self.services.steward_list.current_list() {
             None => true,
             Some(_) => self.services.steward_list.is_exhausted(current_epoch),

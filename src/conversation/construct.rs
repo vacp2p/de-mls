@@ -117,7 +117,7 @@ where
         }
         let (epoch, members) = {
             let mls = self.mls();
-            (mls.current_epoch()?, mls.members()?)
+            (mls.group().epoch().as_u64(), mls.members()?)
         };
         let settled = self.queues.settled_members(&members, epoch);
         let sn = self
@@ -216,7 +216,7 @@ where
 
         // Identity is the member's leaf index: the creator seeds at leaf 0, a
         // joiner takes the leaf the welcome placed it on.
-        let self_member_id_bytes = member_id_of(mls.own_index());
+        let self_member_id_bytes = member_id_of(mls.group().own_leaf_index());
         let queues = ConversationQueues::new(conversation_id, config.dedup_window);
 
         // The conversation id is the deterministic-sort salt every member must
