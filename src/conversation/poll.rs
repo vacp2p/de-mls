@@ -164,10 +164,7 @@ where
                 // failing to commit; the NoCandidate path below would wrongly
                 // penalize the steward and re-elect. Surface it and retry safely.
                 error!(conversation = %conversation_id, error = %e, "commit-round finalize failed");
-                self.emit_event(Info::Error {
-                    operation: "commit_round_finalize".to_owned(),
-                    message: e.to_string(),
-                });
+                self.report_failure("commit_round_finalize", &e);
                 self.recover_from_finalize_error();
                 return Ok(());
             }
@@ -180,10 +177,7 @@ where
             && let Err(e) = self.apply_score_ops(&finalize_result.score_ops)
         {
             error!(conversation = %conversation_id, error = %e, "applying commit-round score ops failed");
-            self.emit_event(Info::Error {
-                operation: "apply_commit_round_score_ops".to_owned(),
-                message: e.to_string(),
-            });
+            self.report_failure("apply_commit_round_score_ops", &e);
         }
 
         if !finalize_result.committed_batch.is_empty() {
@@ -208,6 +202,7 @@ where
                 // log rather than propagate so a merged commit can't wedge Selection.
                 if let Err(e) = self.dispatch_inbound_result(provider, result, signer) {
                     error!(conversation = %conversation_id, error = %e, "finalize result dispatch failed");
+                    self.report_failure("finalize_result_dispatch", &e);
                 }
                 Ok(())
             }
@@ -339,6 +334,7 @@ where
                 error = %e,
                 "recovery auto-commit failed"
             );
+            self.report_failure("recovery_auto_commit", &e);
         }
     }
 
@@ -365,10 +361,7 @@ where
             Ok(sync_bytes) => welcome.conversation_sync_bytes = sync_bytes.unwrap_or_default(),
             Err(e) => {
                 error!(conversation = %self.conversation_id, error = %e, "welcome ConversationSync build failed");
-                self.emit_event(Info::Error {
-                    operation: "welcome_conversation_sync".to_owned(),
-                    message: e.to_string(),
-                });
+                self.report_failure("welcome_conversation_sync", &e);
             }
         }
         let broadcast_payload = AppMessage::from(welcome.clone()).encode_to_vec();

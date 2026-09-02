@@ -477,11 +477,12 @@ where
             return;
         }
         if let Err(e) = self.initiate_steward_election(provider, true, signer) {
-            info!(
+            warn!(
                 conversation = %self.conversation_id,
                 error = %e,
-                "post-recovery election deferred"
+                "post-recovery election failed"
             );
+            self.report_failure("post_recovery_election", &e);
         }
     }
 
@@ -495,12 +496,12 @@ where
     {
         self.emit_event(Obligation::Left);
         self.cancel_all_auto_votes();
-        // The leave is already committed (`Left` emitted); a delete failure
-        // must log and continue, else the caller never reaches
-        // `LeaveRequested` and the entry leaks. The integrator tears the
-        // conversation down right after.
+        // The leave is already committed (`Left` emitted), so a delete failure
+        // logs and continues — returning here would strand the conversation in
+        // the integrator's registry. It does leave MLS state on disk, so say so.
         if let Err(e) = self.mls_mut().delete(provider) {
             error!(error = %e, "self-leave: MLS storage delete failed; leaving anyway");
+            self.report_failure("self_leave_mls_delete", &e.into());
         }
         Ok(())
     }

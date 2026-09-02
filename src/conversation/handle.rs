@@ -11,7 +11,7 @@ use std::{collections::HashMap, sync::Mutex, time::Duration};
 use openmls_traits::storage::StorageProvider;
 use openmls_traits::{OpenMlsProvider, signatures::Signer};
 use prost::Message;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     CommitRoundResult, ConsensusEngine, ConsensusPlugin, ConversationConfig, ConversationError,
@@ -423,10 +423,7 @@ where
             // A mint failure stalls this round and repeats on every retry, and
             // the phase change alone reads as a healthy freeze — so the
             // integrator has no other view of it.
-            self.emit_event(Info::Error {
-                operation: "commit_candidate_build".to_string(),
-                message: e.to_string(),
-            });
+            self.report_failure("commit_candidate_build", &e);
         }
         self.emit_event(Info::PhaseChange(event));
         Ok(())
@@ -559,6 +556,30 @@ where
             operation: operation.to_owned(),
             message: error.to_string(),
         });
+    }
+
+    /// A proposal the conversation raised for itself can be turned away while
+    /// the group is mid-rotation — the buffer keeps the entry and the next
+    /// rotation retries it. Anything else failed for real and nothing retries.
+    pub(crate) fn report_deferred_proposal(&self, operation: &str, error: ConversationError) {
+        if matches!(
+            error,
+            ConversationError::ConversationBlocked(_) | ConversationError::PartialFreeze
+        ) {
+            info!(
+                conversation = %self.conversation_id,
+                error = %error,
+                "proposal deferred; the buffer retries it next rotation"
+            );
+            return;
+        }
+        warn!(
+            conversation = %self.conversation_id,
+            operation,
+            error = %error,
+            "proposal failed"
+        );
+        self.report_failure(operation, &error);
     }
 
     /// Apply `ops` to the peer-score table, emitting [`crate::Info::MemberScoreChanged`]

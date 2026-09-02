@@ -7,7 +7,7 @@ use std::error::Error as StdError;
 use hashgraph_like_consensus::{storage::ConsensusStorage, types::ConsensusEvent};
 use openmls_traits::{OpenMlsProvider, signatures::Signer, storage::StorageProvider};
 use prost::Message;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     ConsensusApplyResult, ConsensusPlugin, Conversation, ConversationError, ConversationState,
@@ -171,11 +171,12 @@ where
             return Ok(());
         }
         if let Err(e) = self.initiate_steward_election(provider, true, signer) {
-            info!(
+            warn!(
                 conversation = %self.conversation_id,
                 error = %e,
-                "post-removal steward-list refresh deferred"
+                "post-removal steward-list refresh failed"
             );
+            self.report_failure("post_removal_election", &e);
         }
         Ok(())
     }
