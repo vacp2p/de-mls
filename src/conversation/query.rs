@@ -5,7 +5,7 @@ use prost::Message;
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, MemberId, MemberRole,
-    MlsGroup, PeerScoreStorage, WallClock, mls_crypto::member_id_of,
+    MlsGroup, PeerScoreStorage, StewardListSnapshot, WallClock, mls_crypto::member_id_of,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
@@ -92,6 +92,25 @@ where
             None => false,
             Some(_) => !self.services.steward_list.is_exhausted(epoch),
         })
+    }
+
+    /// Steward-list state a restart can't recompute. The list itself is
+    /// deterministic; the election retry counters are not — persist this with
+    /// whatever else you keep for the conversation. `Err` before a list is
+    /// installed.
+    pub fn steward_list_snapshot(&self) -> Result<StewardListSnapshot, ConversationError> {
+        self.services.steward_list.snapshot()
+    }
+
+    /// Put back a [`Self::steward_list_snapshot`] from this same conversation.
+    /// The sort salt is re-seeded from the live conversation, so a snapshot
+    /// taken elsewhere won't generate the same subset elections.
+    pub fn restore_steward_list(&mut self, snapshot: StewardListSnapshot) {
+        self.services.steward_list.restore(snapshot);
+        let conversation_id = self.conversation_id.clone();
+        self.services
+            .steward_list
+            .set_conversation_id(conversation_id.as_bytes());
     }
 
     pub fn is_steward(&self) -> bool {

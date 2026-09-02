@@ -3,7 +3,7 @@
 //! [`Conversation::poll`] drives all time-based conversation paths in one call:
 //! consensus-deadline ticks, freeze progression, and steward-inactivity freeze
 //! entry. The sub-steps are private to this module — the integrator calls
-//! `poll()` once per wakeup cycle and reacts to the returned [`PollOutcome`].
+//! `poll()` once per wakeup cycle, then drains events and outbound.
 
 use std::error::Error as StdError;
 use std::time::Duration;
@@ -14,23 +14,11 @@ use prost::Message;
 use tracing::{error, info, warn};
 
 use crate::{
-    CommitRoundOutcome, ConsensusPlugin, Conversation, ConversationError, ConversationState,
-    DispatchOutcome, Info, Obligation, PeerScoreStorage, Request, ScoreEvent, ScoreOp, WallClock,
+    CommitRoundOutcome, ConsensusPlugin, Conversation, ConversationError, ConversationState, Info,
+    Obligation, PeerScoreStorage, Request, ScoreEvent, ScoreOp, WallClock,
     protos::de_mls::messages::v1::{AppMessage, MemberWelcome},
     wall_clock::WallClockExt,
 };
-
-/// Summary returned by [`Conversation::poll`] after one polling pass.
-#[derive(Debug, Clone)]
-pub struct PollOutcome {
-    /// Earliest deadline still pending after this pass. Forward to an
-    /// external scheduler as the next wakeup hint.
-    pub next_wakeup_in: Option<Duration>,
-    /// `true` if this conversation should be torn down: a commit ejected the
-    /// local member. The integrator must remove the registry entry and clean
-    /// up the consensus scope before its next polling cycle.
-    pub leave_requested: bool,
-}
 
 impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
@@ -41,93 +29,65 @@ where
     /// Drive one polling cycle: tick consensus deadlines, advance freeze
     /// state, and check steward inactivity.
     ///
-    /// Best-effort: each step runs regardless of whether the previous one
-    /// failed; step errors are transient (a step that can't act this cycle
-    /// retries on the next) and are logged rather than surfaced.
+    /// Every step runs even if an earlier one failed, so there is no single
+    /// error to return. Each failure arrives as [`crate::Info::Error`] naming
+    /// its step.
     ///
-    /// Returns [`PollOutcome::leave_requested`] when the conversation is ready
-    /// to be torn down; the integrator finalizes the leave.
+    /// Drain what the cycle produced with [`Conversation::drain_events`] and
+    /// [`Conversation::drain_outbound`]. Read [`Conversation::next_wakeup_in`]
+    /// last — local actions arm deadlines too.
     ///
     /// `signer` is the local member's MLS signer, threaded into the
     /// steward commit-candidate build and any auto-vote casts that fire
     /// this cycle.
-    pub fn poll<Pr>(&mut self, provider: &Pr, signer: &impl Signer) -> PollOutcome
+    pub fn poll<Pr>(&mut self, provider: &Pr, signer: &impl Signer)
     where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let mut leave_requested = false;
-
         self.tick_deadlines(provider, signer);
 
-        match self.advance_freezing(provider, signer) {
-            Ok(DispatchOutcome::LeaveRequested) => leave_requested = true,
-            Ok(_) => {}
-            Err(e) => warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "advance_freezing error in poll"
-            ),
-        }
+        let result = self.advance_freezing(provider, signer);
+        self.report_step("advance_freezing", result);
 
-        if let Err(e) = self.drive_buffered_proposals(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "buffered-proposal drive error in poll"
-            );
-        }
+        let result = self.drive_buffered_proposals(provider, signer);
+        self.report_step("drive_buffered_proposals", result);
 
-        if let Err(e) = self.drive_sync_resend(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "sync-resend drive error in poll"
-            );
-        }
+        let result = self.drive_sync_resend(provider, signer);
+        self.report_step("drive_sync_resend", result);
 
-        if let Err(e) = self.drive_sync_request(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "sync-request drive error in poll"
-            );
-        }
+        let result = self.drive_sync_request(provider, signer);
+        self.report_step("drive_sync_request", result);
 
-        if let Err(e) = self.start_freeze_on_inactivity(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "inactivity-freeze error in poll"
-            );
-        }
+        let result = self.start_freeze_on_inactivity(provider, signer);
+        self.report_step("start_freeze_on_inactivity", result);
 
-        if let Err(e) = self.drive_reelection_retry(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "reelection-retry drive error in poll"
-            );
-        }
+        let result = self.drive_reelection_retry(provider, signer);
+        self.report_step("drive_reelection_retry", result);
+    }
 
-        PollOutcome {
-            next_wakeup_in: self.next_wakeup_in(),
-            leave_requested,
-        }
+    /// Log a failed polling step and report it to the integrator.
+    fn report_step(&self, operation: &str, result: Result<(), ConversationError>) {
+        let Err(e) = result else { return };
+        warn!(
+            conversation = %self.conversation_id,
+            operation,
+            error = %e,
+            "polling step failed"
+        );
+        self.report_failure(operation, &e);
     }
 
     /// Drive the freeze phase forward. While `Freezing`, emits
     /// [`crate::Info::CommitRoundProgress`] as candidates arrive; once all
     /// expected candidates are in or the freeze window elapses, transitions
-    /// to `Selection`, finalises the round, and dispatches the resulting
-    /// [`crate::ProcessResult`]. Returns
-    /// [`DispatchOutcome::LeaveRequested`] if the applied commit ejected the
-    /// local member — `poll()` surfaces that as `leave_requested`.
+    /// to `Selection`, finalises the round, and dispatches the result. A commit
+    /// that ejected the local member surfaces as [`crate::Obligation::Left`].
     fn advance_freezing<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
-    ) -> Result<DispatchOutcome, ConversationError>
+    ) -> Result<(), ConversationError>
     where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
@@ -135,7 +95,7 @@ where
         let state = self.current_state();
         if state != ConversationState::Freezing {
             self.timing.last_commit_round_progress = None;
-            return Ok(DispatchOutcome::Done);
+            return Ok(());
         }
 
         let in_recovery = self.is_in_recovery_mode();
@@ -179,7 +139,7 @@ where
                 self.timing.last_commit_round_progress = Some((received, expected));
                 self.emit_event(Info::CommitRoundProgress { received, expected });
             }
-            return Ok(DispatchOutcome::Done);
+            return Ok(());
         }
         self.timing.last_commit_round_progress = None;
 
@@ -204,11 +164,9 @@ where
                 // failing to commit; the NoCandidate path below would wrongly
                 // penalize the steward and re-elect. Surface it and retry safely.
                 error!(conversation = %conversation_id, error = %e, "commit-round finalize failed");
-                self.emit_event(Info::Error {
-                    operation: "commit_round_finalize".to_owned(),
-                    message: e.to_string(),
-                });
-                return Ok(self.recover_from_finalize_error());
+                self.report_failure("commit_round_finalize", &e);
+                self.recover_from_finalize_error();
+                return Ok(());
             }
         };
         // Penalties for misbehavior we saw ourselves, so no group vote.
@@ -219,10 +177,7 @@ where
             && let Err(e) = self.apply_score_ops(&finalize_result.score_ops)
         {
             error!(conversation = %conversation_id, error = %e, "applying commit-round score ops failed");
-            self.emit_event(Info::Error {
-                operation: "apply_commit_round_score_ops".to_owned(),
-                message: e.to_string(),
-            });
+            self.report_failure("apply_commit_round_score_ops", &e);
         }
 
         if !finalize_result.committed_batch.is_empty() {
@@ -245,14 +200,11 @@ where
                 // reach Working even if welcome/dispatch hit a snag.
                 // `dispatch_inbound_result` owns it (via `on_conversation_updated`);
                 // log rather than propagate so a merged commit can't wedge Selection.
-                let outcome = match self.dispatch_inbound_result(provider, result, signer) {
-                    Ok(o) => o,
-                    Err(e) => {
-                        error!(conversation = %conversation_id, error = %e, "finalize result dispatch failed");
-                        DispatchOutcome::Done
-                    }
-                };
-                Ok(outcome)
+                if let Err(e) = self.dispatch_inbound_result(provider, result, signer) {
+                    error!(conversation = %conversation_id, error = %e, "finalize result dispatch failed");
+                    self.report_failure("finalize_result_dispatch", &e);
+                }
+                Ok(())
             }
             CommitRoundOutcome::NoCandidate => {
                 // Recovery: no commit landed this round (manual-only with no
@@ -269,9 +221,10 @@ where
                         self.exit_recovery_mode();
                         let resumed = self.start_working();
                         self.emit_event(Info::PhaseChange(resumed));
-                        return Ok(DispatchOutcome::Done);
+                        return Ok(());
                     }
-                    return Ok(self.retry_or_exhaust_recovery());
+                    self.retry_or_exhaust_recovery();
+                    return Ok(());
                 }
                 // `score_target` is `Some` only when approved proposals went
                 // unanswered and the miss attributes to a live steward other
@@ -321,7 +274,7 @@ where
                     info!(conversation = %conversation_id, error = %e, "recovery election deferred");
                 }
 
-                Ok(DispatchOutcome::Done)
+                Ok(())
             }
         }
     }
@@ -329,20 +282,19 @@ where
     /// Leave the commit round safely after a finalize failure — no commit landed
     /// and no one is at fault. In recovery, count the round and retry-or-exhaust
     /// (same stop-line as a commit-less round); otherwise resume Working.
-    fn recover_from_finalize_error(&mut self) -> DispatchOutcome {
+    fn recover_from_finalize_error(&mut self) {
         if self.is_in_recovery_mode() {
             self.retry_or_exhaust_recovery()
         } else {
             let resumed = self.start_working();
             self.emit_event(Info::PhaseChange(resumed));
-            DispatchOutcome::Done
         }
     }
 
     /// Advance a commit-less recovery round: count it against the stop-line,
     /// exhausting to Working (with `RecoveryExhausted`) at `recovery_max_rounds`,
     /// otherwise re-opening the collection window (Selection → Freezing) to retry.
-    fn retry_or_exhaust_recovery(&mut self) -> DispatchOutcome {
+    fn retry_or_exhaust_recovery(&mut self) {
         self.recovery_rounds += 1;
         let max = self.config.recovery_max_rounds;
         if max != 0 && self.recovery_rounds >= max {
@@ -353,7 +305,6 @@ where
         } else if let Some(reopened) = self.reopen_recovery_window() {
             self.emit_event(Info::PhaseChange(reopened));
         }
-        DispatchOutcome::Done
     }
 
     /// Layer-3 auto-fallback: once `recovery_auto_commit_delay` has elapsed with
@@ -383,6 +334,7 @@ where
                 error = %e,
                 "recovery auto-commit failed"
             );
+            self.report_failure("recovery_auto_commit", &e);
         }
     }
 
@@ -409,10 +361,7 @@ where
             Ok(sync_bytes) => welcome.conversation_sync_bytes = sync_bytes.unwrap_or_default(),
             Err(e) => {
                 error!(conversation = %self.conversation_id, error = %e, "welcome ConversationSync build failed");
-                self.emit_event(Info::Error {
-                    operation: "welcome_conversation_sync".to_owned(),
-                    message: e.to_string(),
-                });
+                self.report_failure("welcome_conversation_sync", &e);
             }
         }
         let broadcast_payload = AppMessage::from(welcome.clone()).encode_to_vec();

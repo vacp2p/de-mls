@@ -297,11 +297,6 @@ impl ConversationQueues {
         self.approved_proposals.insert(proposal_id, proposal);
     }
 
-    /// Drop a single proposal from the approved queue without archiving.
-    pub fn remove_approved_proposal(&mut self, proposal_id: ProposalId) {
-        self.approved_proposals.shift_remove(&proposal_id);
-    }
-
     /// Clear the approved-proposal queue and return the cleared batch in
     /// FIFO insertion order so callers can archive it for UI / diagnostic
     /// history. Returns an empty `Vec` when the queue was already empty.
@@ -310,18 +305,6 @@ impl ConversationQueues {
             .drain(..)
             .map(|(_, req)| req)
             .collect()
-    }
-
-    /// Discard the approved queue on freeze failure. `RemoveMember`
-    /// proposals carry settled YES outcomes and survive so a recovered
-    /// steward can commit them; other approvals (Add) are dropped.
-    pub fn reject_all_approved_proposals(&mut self) {
-        self.approved_proposals.retain(|_pid, req| {
-            matches!(
-                req.payload.as_ref(),
-                Some(conversation_update_request::Payload::RemoveMember(_))
-            )
-        });
     }
 
     /// Drop every `RemoveMember(target)` entry; other approvals stay
@@ -350,6 +333,7 @@ impl ConversationQueues {
     }
 
     /// True while `proposal_id` is in flight (in the voting queue).
+    #[cfg(test)]
     pub fn is_voting(&self, proposal_id: ProposalId) -> bool {
         self.voting_proposals.contains_key(&proposal_id)
     }
@@ -474,6 +458,7 @@ impl ConversationQueues {
     }
 
     /// Check whether a pending update exists for the given member_id.
+    #[cfg(test)]
     pub fn has_pending_update(&self, member_id: &[u8]) -> bool {
         self.pending_updates.contains_key(member_id)
     }
@@ -559,7 +544,6 @@ const RESOLVED_PROPOSAL_CACHE_CAPACITY: usize = 256;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protos::de_mls::messages::v1::MemberInvite;
 
     fn member(id: u8) -> Vec<u8> {
         vec![id; 20]
@@ -629,31 +613,6 @@ mod tests {
         conversation.insert_approved_proposal(proposal_id, remove);
     }
 
-    /// `RemoveMember` proposals survive a freeze failure regardless of
-    /// source; Add proposals are dropped.
-    #[test]
-    fn test_reject_all_approved_preserves_all_remove_member() {
-        let mut conversation = ConversationQueues::new("test-conversation", 10);
-
-        let ban_id: ProposalId = 0x1111_2222;
-        let ecp_id: ProposalId = 0x3333_4444;
-        let add_id: ProposalId = 0x5555_6666;
-        insert_remove_member(&mut conversation, &member(2), ban_id);
-        insert_remove_member(&mut conversation, &member(3), ecp_id);
-        let add = ConversationUpdateRequest::member_invite(MemberInvite {
-            key_package_bytes: vec![0; 8],
-        });
-        conversation.insert_approved_proposal(add_id, add);
-        assert_eq!(conversation.approved_proposals_count(), 3);
-
-        conversation.reject_all_approved_proposals();
-
-        assert_eq!(conversation.approved_proposals_count(), 2);
-        assert!(conversation.approved_proposals().contains_key(&ban_id));
-        assert!(conversation.approved_proposals().contains_key(&ecp_id));
-        assert!(!conversation.approved_proposals().contains_key(&add_id));
-    }
-
     /// `approved_order` is FIFO regardless of proposal-id ordering.
     #[test]
     fn test_approved_proposals_preserve_fifo_across_mutations() {
@@ -665,14 +624,10 @@ mod tests {
         let order: Vec<ProposalId> = conversation.approved_proposals().keys().copied().collect();
         assert_eq!(order, vec![500, 100, 300]);
 
-        conversation.remove_approved_proposal(100);
-        let order: Vec<ProposalId> = conversation.approved_proposals().keys().copied().collect();
-        assert_eq!(order, vec![500, 300]);
-
         // Re-inserting an existing id does not duplicate or reorder.
         insert_remove_member(&mut conversation, &member(2), 500);
         let order: Vec<ProposalId> = conversation.approved_proposals().keys().copied().collect();
-        assert_eq!(order, vec![500, 300]);
+        assert_eq!(order, vec![500, 100, 300]);
 
         conversation.drain_approved_proposals();
         assert!(conversation.approved_proposals().is_empty());

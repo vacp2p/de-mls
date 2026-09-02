@@ -52,12 +52,12 @@ impl StewardListConfig {
     }
 
     /// List size to elect for `total_members` — the largest legal size.
-    pub fn compute_list_size(&self, total_members: usize) -> usize {
+    pub(crate) fn compute_list_size(&self, total_members: usize) -> usize {
         *self.size_bounds(total_members).end()
     }
 
     /// Whether `size` is a legal list size for a group of `total_members`.
-    pub fn is_valid_size(&self, size: usize, total_members: usize) -> bool {
+    pub(crate) fn is_valid_size(&self, size: usize, total_members: usize) -> bool {
         self.size_bounds(total_members).contains(&size)
     }
 
@@ -73,7 +73,7 @@ impl StewardListConfig {
 
     /// Reject inputs `generate`/`validate` can't honor: an empty member set, or an `sn`
     /// outside the config's valid range for this membership.
-    pub fn check_generation_inputs(
+    pub(crate) fn check_generation_inputs(
         &self,
         member_ids: &[Vec<u8>],
         sn: usize,
@@ -222,11 +222,6 @@ impl StewardList {
     /// Number of stewards on the list.
     pub fn len(&self) -> usize {
         self.members.len()
-    }
-
-    /// Whether the list has no stewards.
-    pub fn is_empty(&self) -> bool {
-        self.members.is_empty()
     }
 
     /// The size bounds this list was elected under.

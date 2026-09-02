@@ -13,8 +13,8 @@ mod context;
 mod round;
 mod validate;
 
-pub use buffer::{BufferedCommitCandidate, CommitBufferOutcome, CommitRoundBuffer};
-pub use round::{
+pub(crate) use buffer::{BufferedCommitCandidate, CommitRoundBuffer};
+pub(crate) use round::{
     CommitHash, CommitRoundOutcome, CommitRoundResult, compute_commit_hash, finalize_commit_round,
     receive_commit_candidate, replay_early_candidates,
 };

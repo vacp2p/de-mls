@@ -10,7 +10,7 @@ use tracing::{error, info};
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
-    ElectionDecision, ElectionSkip, Info, PeerScoreStorage, WallClock, member_set,
+    ElectionDecision, ElectionSkip, PeerScoreStorage, WallClock, member_set,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
         StewardElectionProposal, TimingConfig, ViolationEvidence, conversation_update_request,
@@ -173,7 +173,7 @@ where
             // etc.) — leave the entry in the buffer for next rotation.
             if let Err(e) = self.initiate_proposal(provider, request, CreatorVote::Deferred, signer)
             {
-                info!(conversation = %self.conversation_id, error = %e, "proposal deferred");
+                self.report_deferred_proposal("steward_auto_propose", e);
             }
         }
         Ok(())
@@ -251,11 +251,7 @@ where
         for request in to_propose {
             if let Err(e) = self.initiate_proposal(provider, request, CreatorVote::Deferred, signer)
             {
-                info!(
-                    conversation = %self.conversation_id,
-                    error = %e,
-                    "buffered proposal deferred"
-                );
+                self.report_deferred_proposal("drain_buffered_updates", e);
             }
         }
         Ok(())
@@ -600,10 +596,7 @@ where
                 && let Err(e) = self.request_recovery(provider, signer)
             {
                 error!(conversation = %self.conversation_id, error = %e, "Deadlock ECP filing failed");
-                self.emit_event(Info::Error {
-                    operation: "Reelection stuck".to_string(),
-                    message: e.to_string(),
-                });
+                self.report_failure("deadlock_ecp_filing", &e);
             }
             return Ok(());
         }
@@ -612,7 +605,8 @@ where
             round, max, "election round failed, retrying"
         );
         if let Err(e) = self.initiate_steward_election(provider, true, signer) {
-            info!(conversation = %self.conversation_id, error = %e, "election retry deferred");
+            error!(conversation = %self.conversation_id, error = %e, "election retry failed");
+            self.report_failure("election_retry", &e);
         }
         Ok(())
     }

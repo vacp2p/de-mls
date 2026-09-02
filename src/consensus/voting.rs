@@ -232,9 +232,13 @@ where
                             error = %e,
                             "auto-vote dropped: proposal expired before the vote fired; \
                              possible clock skew"
-                        )
+                        );
+                        self.report_failure("auto_vote", &e);
                     }
-                    _ => tracing::warn!(proposal_id, error = %e, "auto-vote failed"),
+                    _ => {
+                        tracing::warn!(proposal_id, error = %e, "auto-vote failed");
+                        self.report_failure("auto_vote", &e);
+                    }
                 }
             }
         }
@@ -249,6 +253,7 @@ where
                     error = %e,
                     "handle_consensus_outcome failed"
                 );
+                self.report_failure("handle_consensus_outcome", &e);
             }
         }
     }

@@ -11,7 +11,7 @@ use std::{collections::HashMap, sync::Mutex, time::Duration};
 use openmls_traits::storage::StorageProvider;
 use openmls_traits::{OpenMlsProvider, signatures::Signer};
 use prost::Message;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     CommitRoundResult, ConsensusEngine, ConsensusPlugin, ConversationConfig, ConversationError,
@@ -27,14 +27,6 @@ use crate::{
     replay_early_candidates,
     wall_clock::WallClockExt,
 };
-
-/// Outcome of [`Conversation::leave`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LeaveOutcome {
-    /// A self-leave consensus round has been opened. The conversation stays
-    /// active until the next steward commit merges the removal.
-    LeaveInitiated,
-}
 
 /// One pending auto-vote: cast `vote` for `proposal_id` once the wall-clock
 /// catches up to `fire_at`. Registered by `initiate_proposal` (Deferred
@@ -431,10 +423,7 @@ where
             // A mint failure stalls this round and repeats on every retry, and
             // the phase change alone reads as a healthy freeze — so the
             // integrator has no other view of it.
-            self.emit_event(Info::Error {
-                operation: "commit_candidate_build".to_string(),
-                message: e.to_string(),
-            });
+            self.report_failure("commit_candidate_build", &e);
         }
         self.emit_event(Info::PhaseChange(event));
         Ok(())
@@ -558,6 +547,39 @@ where
                 tracing::error!(?event, "event buffer mutex poisoned; event dropped")
             }
         }
+    }
+
+    /// Tell the integrator about a failure on a path it never called. There
+    /// is no `Result` to return here, so the event is the only way out.
+    pub(crate) fn report_failure(&self, operation: &str, error: &ConversationError) {
+        self.emit_event(Info::Error {
+            operation: operation.to_owned(),
+            message: error.to_string(),
+        });
+    }
+
+    /// A proposal the conversation raised for itself can be turned away while
+    /// the group is mid-rotation — the buffer keeps the entry and the next
+    /// rotation retries it. Anything else failed for real and nothing retries.
+    pub(crate) fn report_deferred_proposal(&self, operation: &str, error: ConversationError) {
+        if matches!(
+            error,
+            ConversationError::ConversationBlocked(_) | ConversationError::PartialFreeze
+        ) {
+            info!(
+                conversation = %self.conversation_id,
+                error = %error,
+                "proposal deferred; the buffer retries it next rotation"
+            );
+            return;
+        }
+        warn!(
+            conversation = %self.conversation_id,
+            operation,
+            error = %error,
+            "proposal failed"
+        );
+        self.report_failure(operation, &error);
     }
 
     /// Apply `ops` to the peer-score table, emitting [`crate::Info::MemberScoreChanged`]
@@ -736,21 +758,19 @@ where
         self.timing.pending_auto_votes.clear();
     }
 
-    /// Leave this conversation. Opens a self-leave consensus round and returns
-    /// [`LeaveOutcome::LeaveInitiated`]; the leave completes when the next
-    /// steward commit merges the removal. `signer` is the local member's MLS
-    /// signer, used to authenticate the self-leave proposal.
+    /// Open a self-leave consensus round. The conversation stays active until
+    /// a steward commit merges the removal and [`crate::Obligation::Left`]
+    /// arrives. `signer` authenticates the self-leave proposal.
     pub fn leave<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
-    ) -> Result<LeaveOutcome, ConversationError>
+    ) -> Result<(), ConversationError>
     where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        self.initiate_self_leave(provider, signer)?;
-        Ok(LeaveOutcome::LeaveInitiated)
+        self.initiate_self_leave(provider, signer)
     }
 
     /// Register a consensus-session timeout. Fires `delay` from now via
@@ -1192,6 +1212,32 @@ mod tests {
 
         // Second drain returns empty — buffer was cleared.
         assert!(conversation.drain_events().is_empty());
+    }
+
+    /// The snapshot round-trip carries the installed list and the retry
+    /// counter back onto a conversation that has neither.
+    #[test]
+    fn steward_list_snapshot_restores_list_and_retry_round() {
+        let (steward, _provider, _signer) = make_steward_conversation();
+        let snapshot = steward
+            .steward_list_snapshot()
+            .expect("a conversation with an installed list can snapshot");
+
+        let mut plain = make_conversation_working();
+        assert!(
+            plain.steward_list_snapshot().is_err(),
+            "no list installed yet"
+        );
+        assert!(!plain.is_steward(), "and no steward role");
+
+        plain.restore_steward_list(snapshot);
+
+        assert!(plain.is_steward(), "restored list reinstates the role");
+        assert_eq!(
+            plain.epoch_and_retry().unwrap(),
+            steward.epoch_and_retry().unwrap(),
+            "retry round travels with the list"
+        );
     }
 
     #[test]

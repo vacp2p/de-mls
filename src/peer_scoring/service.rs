@@ -48,13 +48,13 @@ impl<S: PeerScoreStorage> PeerScoringService<S> {
     }
 
     /// Start tracking a member at the configured default score.
-    pub fn add_member(&mut self, member_id: &[u8]) -> Result<(), ConversationError> {
+    pub(crate) fn add_member(&mut self, member_id: &[u8]) -> Result<(), ConversationError> {
         let default = self.config.default_score;
         self.storage.set(member_id, default).map_err(storage_err)
     }
 
     /// Stop tracking a member. Idempotent on an untracked member.
-    pub fn remove_member(&mut self, member_id: &[u8]) -> Result<(), ConversationError> {
+    pub(crate) fn remove_member(&mut self, member_id: &[u8]) -> Result<(), ConversationError> {
         self.storage.remove(member_id).map_err(storage_err)
     }
 
@@ -67,7 +67,10 @@ impl<S: PeerScoreStorage> PeerScoringService<S> {
     ///
     /// If saving to storage fails, the whole batch is dropped and no score changes are reported,
     /// but the score table itself remains correct.
-    pub fn apply_ops(&mut self, ops: &[ScoreOp]) -> Result<Vec<ScoreChange>, ConversationError> {
+    pub(crate) fn apply_ops(
+        &mut self,
+        ops: &[ScoreOp],
+    ) -> Result<Vec<ScoreChange>, ConversationError> {
         // (member, score before the batch, score so far), in first-touch order.
         let mut touched: Vec<(Vec<u8>, i64, i64)> = Vec::new();
 
@@ -113,7 +116,7 @@ impl<S: PeerScoreStorage> PeerScoringService<S> {
     ///
     /// Returns [`ScoreChange`]s, showing how each score changed
     /// (compared to `default_score` for new members).
-    pub fn apply_snapshot(
+    pub(crate) fn apply_snapshot(
         &mut self,
         snapshot: &ScoreSnapshot,
     ) -> Result<Vec<ScoreChange>, ConversationError> {
@@ -138,7 +141,7 @@ impl<S: PeerScoreStorage> PeerScoringService<S> {
     }
 
     /// Snapshot of scores that aren't set to the default, for ConversationSync.
-    pub fn snapshot(&self) -> Result<ScoreSnapshot, ConversationError> {
+    pub(crate) fn snapshot(&self) -> Result<ScoreSnapshot, ConversationError> {
         let default = self.config.default_score;
         let diverged = self
             .storage
@@ -151,33 +154,33 @@ impl<S: PeerScoreStorage> PeerScoringService<S> {
     }
 
     // Returns the score for a given member, or None if they're not tracked.
-    pub fn score_for(&self, member_id: &[u8]) -> Result<Option<i64>, ConversationError> {
+    pub(crate) fn score_for(&self, member_id: &[u8]) -> Result<Option<i64>, ConversationError> {
         self.storage.get(member_id).map_err(storage_err)
     }
 
     /// Returns all tracked members and their scores (even those with the default score)
-    pub fn all_members_with_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, ConversationError> {
+    pub(crate) fn all_members_with_scores(&self) -> Result<Vec<(Vec<u8>, i64)>, ConversationError> {
         self.storage.all_scores().map_err(storage_err)
     }
 
     /// The current score threshold for removing members. Used by the coordinator and shown to joiners.
-    pub fn threshold(&self) -> i64 {
+    pub(crate) fn threshold(&self) -> i64 {
         self.config.threshold
     }
 
     /// Sets a new score removal threshold (from ConversationSync).
-    pub fn set_threshold(&mut self, threshold: i64) {
+    pub(crate) fn set_threshold(&mut self, threshold: i64) {
         self.config.threshold = threshold;
     }
 
     /// Starting score for a newly tracked member.
-    pub fn default_score(&self) -> i64 {
+    pub(crate) fn default_score(&self) -> i64 {
         self.config.default_score
     }
 
     /// Run [`ScoringConfig::validate`] over the config this service was built
     /// with, so construction rejects what an incoming sync would also reject.
-    pub fn validate_config(&self) -> Result<(), ConversationError> {
+    pub(crate) fn validate_config(&self) -> Result<(), ConversationError> {
         self.config.validate()
     }
 
@@ -190,7 +193,10 @@ impl<S: PeerScoreStorage> PeerScoringService<S> {
     /// so this won't affect them.
     ///
     /// No [`ScoreChange`] is triggered here—no one's actual standing changed, just what "default" means.
-    pub fn set_default_score(&mut self, default_score: i64) -> Result<(), ConversationError> {
+    pub(crate) fn set_default_score(
+        &mut self,
+        default_score: i64,
+    ) -> Result<(), ConversationError> {
         let previous = self.config.default_score;
         self.config.default_score = default_score;
         if previous == default_score {

@@ -1,7 +1,7 @@
 //! Per-conversation state and the [`Conversation`] handle.
 //!
 //! The leaf modules hold the protocol-state pieces — `queues`
-//! ([`ConversationQueues`] + dedup caches), `state_machine` (state enum +
+//! (`ConversationQueues` + dedup caches), `state_machine` (state enum +
 //! transitions), `config` (durable timing/protocol config), and `util`
 //! (member-set helpers). `handle` defines the [`Conversation`] struct, and
 //! its sibling modules (`construct`, `poll`, `steward`, `messaging`, `query`,
@@ -30,11 +30,12 @@ pub use config::{
     DEFAULT_UNANSWERED_SYNC_ROUNDS, DEFAULT_VOTING_DELAY,
 };
 pub use display::{MemberRole, MessageType, message_types};
-pub(crate) use handle::ConversationServices;
-pub use handle::{Conversation, LeaveOutcome};
-pub use inbound::{DispatchOutcome, decode_inbound_payload};
+pub use handle::Conversation;
 pub use messaging::Outbound;
-pub use poll::PollOutcome;
-pub use queues::{ConversationQueues, ProposalId};
-pub use state_machine::{ConversationState, ConversationStateMachine, OperatingMode};
-pub use util::{in_flight_target, member_set, self_leave_proposal_id, target_member_id_of};
+pub use state_machine::ConversationState;
+
+pub(crate) use handle::ConversationServices;
+pub(crate) use inbound::decode_inbound_payload;
+pub(crate) use queues::ConversationQueues;
+pub(crate) use state_machine::{ConversationStateMachine, OperatingMode};
+pub(crate) use util::{in_flight_target, member_set, self_leave_proposal_id, target_member_id_of};

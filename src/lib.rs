@@ -9,7 +9,6 @@
 //!   per-conversation state, state machine, and inbound dispatch
 //! - **[`consensus`]** - Consensus plug-in contract, outcome application, and voting
 //! - **[`peer_scoring`]** / **[`steward_list`]** - Protocol plug-ins
-//! - **[`commit_round`]** - Commit-round candidate collection, selection, and apply
 //! - **[`mls_crypto`]** - MLS cryptographic operations (OpenMLS wrapper)
 //! - **[`protos`]** - Protobuf message definitions
 //!
@@ -25,9 +24,11 @@
 //! — the registry of many, transport, and identity — belongs to the
 //! application.
 //!
-//! Integrators drain [`ConversationEvent`] from each conversation (for
-//! transport and UI delivery), feed inbound packets to the conversation, and
-//! dispatch the returned outcomes.
+//! A conversation has three outputs. [`ConversationEvent`]s say what
+//! happened, [`Outbound`] is bytes to publish, and
+//! [`Conversation::next_wakeup_in`] is when to call back. Everything that
+//! drives it — inbound, poll, a local action — returns
+//! `Result<(), ConversationError>` and speaks through those.
 //!
 //! ## Quick Example
 //!
@@ -77,19 +78,20 @@ pub mod peer_scoring;
 pub mod steward_list;
 
 /// Commit round candidate processing, selection, and commit application.
-pub mod commit_round;
+pub(crate) mod commit_round;
 
 /// Conversation-event types produced for the integrator.
 pub mod events;
 
-/// [`ProcessResult`] returned by inbound processing.
+/// Inbound-dispatch vocabulary, plus the `ViolationEvidence` constructors for
+/// filing an emergency-criteria proposal.
 pub mod process_result;
 
 /// Proposal classification.
-pub mod proposal_kind;
+pub(crate) mod proposal_kind;
 
 /// Wall-clock anchor combined with the conversation state machine.
-pub mod phase_timer;
+pub(crate) mod phase_timer;
 
 /// Caller-supplied time source: [`WallClock`] trait, [`Timestamp`],
 /// and the test-oriented [`MockClock`].
@@ -100,17 +102,17 @@ pub mod error;
 
 // Crate-root re-exports so flat-name imports resolve without the owning
 // module path.
-pub use commit_round::*;
 pub use conversation::*;
 pub use error::*;
 pub use events::*;
 pub use peer_scoring::*;
-pub use process_result::*;
-pub use proposal_kind::*;
+pub(crate) use process_result::*;
+pub(crate) use proposal_kind::*;
 pub use steward_list::*;
 
 // `consensus` and `phase_timer` are re-exported explicitly below to avoid glob
 // collisions with the conversation glob.
+pub(crate) use commit_round::*;
 pub(crate) use consensus::{ConsensusApplyResult, ConsensusEngine, apply_consensus_result};
 pub use consensus::{ConsensusPlugin, CreatorVote};
 

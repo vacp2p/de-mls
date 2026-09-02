@@ -96,8 +96,8 @@ pub enum Request {
 /// A notice about state the integrator can query whenever it likes.
 #[derive(Debug, Clone)]
 pub enum Info {
-    /// A step the conversation was taking on its own didn't go through. It
-    /// stays usable; surface or log as suits the application.
+    /// A step the conversation ran on its own failed. `operation` says which.
+    /// The conversation carries on; log it or show it.
     Error { operation: String, message: String },
 
     /// A commit merged and the epoch advanced, carrying the proposals that
