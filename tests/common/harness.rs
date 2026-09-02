@@ -35,9 +35,7 @@ use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
     conversation_update_request,
 };
-use de_mls::{
-    Conversation, ConversationConfig, CreatorVote, MemberId, MemberRole, Outbound, PollOutcome,
-};
+use de_mls::{Conversation, ConversationConfig, CreatorVote, MemberId, MemberRole, Outbound};
 use de_mls::{ConversationError, ConversationEvent, ConversationState, MockClock, ScoringConfig};
 use hashgraph_like_consensus::error::ConsensusError;
 
@@ -650,15 +648,11 @@ impl Member {
         self.pending_config = config;
     }
 
-    /// Advance this member's timers/state machine one tick, returning the
-    /// poll outcome. No-op (empty outcome) when the member hasn't joined.
-    pub fn poll(&mut self) -> PollOutcome {
-        match self.convo.as_mut() {
-            Some(convo) => convo.poll(&self.integ.provider, &self.integ.signer),
-            None => PollOutcome {
-                next_wakeup_in: None,
-                leave_requested: false,
-            },
+    /// Advance this member's timers/state machine one tick. No-op when the
+    /// member hasn't joined.
+    pub fn poll(&mut self) {
+        if let Some(convo) = self.convo.as_mut() {
+            convo.poll(&self.integ.provider, &self.integ.signer);
         }
     }
 
@@ -940,7 +934,7 @@ impl<const N: usize> TestHarness<N> {
             member.integ.clock.advance(step);
         }
         for member in &mut self.members {
-            let _ = member.poll();
+            member.poll();
         }
         self.drain_and_route_welcomes();
         self.relay_outbound();

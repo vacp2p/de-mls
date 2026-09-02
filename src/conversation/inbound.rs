@@ -10,7 +10,7 @@
 //! - [`Conversation::process_inbound`] is the single entry point for all
 //!   conversation traffic. It owns echo-dedup and the internal
 //!   `dispatch_inbound_result` chain. `LeaveConversation` is terminal:
-//!   `prepare_self_leave` emits `Leaving`, cancels timers, and deletes local
+//!   `prepare_self_leave` emits `Left`, cancels timers, and deletes local
 //!   MLS state; the integrator then removes the registry entry and cleans up
 //!   the consensus scope.
 
@@ -164,43 +164,28 @@ where
     app_msg.try_into()
 }
 
-/// What [`Conversation::process_inbound`] hands back to the integrator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DispatchOutcome {
-    /// No further integrator action required.
-    Done,
-    /// Packet was self-echoed. No action.
-    Dropped,
-    /// The conversation has completed its protocol-side teardown (emitted
-    /// `Left`, deleted MLS state). The integrator must remove the
-    /// registry entry and clean up the consensus scope.
-    LeaveRequested,
-}
-
 impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
     Cp: ConsensusPlugin,
     Sc: PeerScoreStorage,
     Wc: WallClock,
 {
-    /// Decrypt and dispatch an inbound conversation payload. Drops self-echoes.
-    /// Runs the full dispatch chain internally. Returns
-    /// [`DispatchOutcome::LeaveRequested`] when the conversation has completed
-    /// its protocol-side teardown; the integrator must then remove the registry
-    /// entry and clean up the consensus scope.
+    /// Decrypt and dispatch an inbound payload, dropping self-echoes. What the
+    /// packet produced leaves through [`Conversation::drain_events`] and
+    /// [`Conversation::drain_outbound`].
     pub fn process_inbound<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
         sender: &[u8],
         payload: &[u8],
-    ) -> Result<DispatchOutcome, ConversationError>
+    ) -> Result<(), ConversationError>
     where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
         if sender == self.app_id.as_ref() {
-            return Ok(DispatchOutcome::Dropped);
+            return Ok(());
         }
         let result = self.decode_inbound(provider, payload)?;
         self.dispatch_inbound_result(provider, result, signer)
@@ -222,8 +207,7 @@ where
             return Ok(());
         }
         let result = self.decode_inbound(provider, sync_bytes)?;
-        self.dispatch_inbound_result(provider, result, signer)?;
-        Ok(())
+        self.dispatch_inbound_result(provider, result, signer)
     }
 
     pub(crate) fn dispatch_inbound_result<Pr>(
@@ -231,7 +215,7 @@ where
         provider: &Pr,
         result: ProcessResult,
         signer: &impl Signer,
-    ) -> Result<DispatchOutcome, ConversationError>
+    ) -> Result<(), ConversationError>
     where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
@@ -242,48 +226,45 @@ where
                     message: *msg,
                     sender,
                 });
-                Ok(DispatchOutcome::Done)
+                Ok(())
             }
             ProcessResult::Proposal(proposal) => {
                 self.on_incoming_proposal(*proposal)?;
-                Ok(DispatchOutcome::Done)
+                Ok(())
             }
             ProcessResult::Vote(vote) => {
                 self.forward_incoming_vote(*vote)?;
-                Ok(DispatchOutcome::Done)
+                Ok(())
             }
             ProcessResult::MembershipChangeReceived(request) => {
                 self.handle_incoming_update_request(provider, *request, signer)?;
-                Ok(DispatchOutcome::Done)
+                Ok(())
             }
             ProcessResult::ConversationUpdated => {
                 self.on_conversation_updated(provider, signer)?;
-                Ok(DispatchOutcome::Done)
+                Ok(())
             }
-            ProcessResult::LeaveConversation => {
-                self.prepare_self_leave(provider)?;
-                Ok(DispatchOutcome::LeaveRequested)
-            }
+            ProcessResult::LeaveConversation => self.prepare_self_leave(provider),
             ProcessResult::CommitCandidateReceived {
                 steward_id: steward,
             } => {
                 self.on_commit_candidate_received(provider, &steward, signer)?;
-                Ok(DispatchOutcome::Done)
+                Ok(())
             }
             ProcessResult::ConversationSyncReceived(sync) => {
                 self.on_conversation_sync(*sync)?;
-                Ok(DispatchOutcome::Done)
+                Ok(())
             }
             ProcessResult::ConversationSyncRequested { requester } => {
                 self.on_conversation_sync_request(provider, &requester, signer)?;
-                Ok(DispatchOutcome::Done)
+                Ok(())
             }
             ProcessResult::WelcomeBroadcastReceived(welcome) => {
                 self.emit_event(Obligation::WelcomeReady {
                     welcome: *welcome,
                     minted_locally: false,
                 });
-                Ok(DispatchOutcome::Done)
+                Ok(())
             }
             ProcessResult::Noop(reason) => {
                 tracing::debug!(
@@ -291,7 +272,7 @@ where
                     ?reason,
                     "inbound dispatched as noop"
                 );
-                Ok(DispatchOutcome::Done)
+                Ok(())
             }
         }
     }

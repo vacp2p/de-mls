@@ -25,9 +25,11 @@
 //! — the registry of many, transport, and identity — belongs to the
 //! application.
 //!
-//! Integrators drain [`ConversationEvent`] from each conversation (for
-//! transport and UI delivery), feed inbound packets to the conversation, and
-//! dispatch the returned outcomes.
+//! A conversation has three outputs. [`ConversationEvent`]s say what
+//! happened, [`Outbound`] is bytes to publish, and
+//! [`Conversation::next_wakeup_in`] is when to call back. Everything that
+//! drives it — inbound, poll, a local action — returns
+//! `Result<(), ConversationError>` and speaks through those.
 //!
 //! ## Quick Example
 //!

@@ -28,14 +28,6 @@ use crate::{
     wall_clock::WallClockExt,
 };
 
-/// Outcome of [`Conversation::leave`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LeaveOutcome {
-    /// A self-leave consensus round has been opened. The conversation stays
-    /// active until the next steward commit merges the removal.
-    LeaveInitiated,
-}
-
 /// One pending auto-vote: cast `vote` for `proposal_id` once the wall-clock
 /// catches up to `fire_at`. Registered by `initiate_proposal` (Deferred
 /// path) and `on_incoming_proposal`; cancelled on manual vote or consensus
@@ -736,21 +728,19 @@ where
         self.timing.pending_auto_votes.clear();
     }
 
-    /// Leave this conversation. Opens a self-leave consensus round and returns
-    /// [`LeaveOutcome::LeaveInitiated`]; the leave completes when the next
-    /// steward commit merges the removal. `signer` is the local member's MLS
-    /// signer, used to authenticate the self-leave proposal.
+    /// Open a self-leave consensus round. The conversation stays active until
+    /// a steward commit merges the removal and [`crate::Obligation::Left`]
+    /// arrives. `signer` authenticates the self-leave proposal.
     pub fn leave<Pr>(
         &mut self,
         provider: &Pr,
         signer: &impl Signer,
-    ) -> Result<LeaveOutcome, ConversationError>
+    ) -> Result<(), ConversationError>
     where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        self.initiate_self_leave(provider, signer)?;
-        Ok(LeaveOutcome::LeaveInitiated)
+        self.initiate_self_leave(provider, signer)
     }
 
     /// Register a consensus-session timeout. Fires `delay` from now via
