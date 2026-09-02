@@ -365,7 +365,7 @@ where
         }
 
         if let Some(req) = decoded.as_ref() {
-            let current_epoch = self.mls().current_epoch()?;
+            let current_epoch = self.mls().group().epoch().as_u64();
             // In flight the moment it arrives, so the steward's drain won't
             // re-propose it.
             self.queues.track_voting_proposal(proposal_id, req);
@@ -475,7 +475,7 @@ where
         for m in &delta.added {
             self.services.scoring.add_member(&member_id_of(m.index))?;
         }
-        let epoch = self.mls().current_epoch()?;
+        let epoch = self.mls().group().epoch().as_u64();
         let max_epochs = self.config.pending_update_max_epochs;
         let _ = self.queues.expire_pending_updates(epoch, max_epochs);
         if !delta.added.is_empty() || !delta.removed.is_empty() {
@@ -568,7 +568,7 @@ where
         let conversation_id = self.conversation_id.clone();
         let (members, current_epoch) = {
             let mls = self.mls();
-            (mls.members()?, mls.current_epoch()?)
+            (mls.members()?, mls.group().epoch().as_u64())
         };
         // Install a first list, or replace an exhausted one with a strictly
         // newer election (higher `election_epoch`).

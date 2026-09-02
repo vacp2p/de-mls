@@ -370,7 +370,7 @@ mod tests {
             joiner_identities: vec![],
         };
 
-        let epoch_before = mls.current_epoch().unwrap();
+        let epoch_before = mls.group().epoch().as_u64();
         let mut conversation = ConversationQueues::new("test-conversation", 10);
         let ctx = RoundContext {
             mls_count: 1,
@@ -396,10 +396,10 @@ mod tests {
             matches!(result.outcome, CommitRoundOutcome::Applied { .. }),
             "own local commit applied after the higher-priority remote failed"
         );
-        assert_eq!(mls.current_epoch().unwrap(), epoch_before + 1);
+        assert_eq!(mls.group().epoch().as_u64(), epoch_before + 1);
         assert!(
-            mls.members_view()
-                .iter()
+            mls.group()
+                .members()
                 .any(|m| m.credential.serialized_content() == b"bob"),
             "our own commit (add bob) was applied"
         );

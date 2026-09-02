@@ -6,7 +6,7 @@
 //! `poll()` once per wakeup cycle and reacts to the returned [`PollOutcome`].
 
 use std::error::Error as StdError;
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
@@ -192,7 +192,7 @@ where
         // subset of the approved set they hold, and selection picks the best.
         let allow_subset =
             in_recovery || self.services.steward_list.config().allow_subset_candidates;
-        let self_member_id = Arc::clone(&self.self_member_id);
+        let self_member_id = self.self_member_id;
         let mut finalize_result = match self.finalize_commit_round(
             provider,
             allow_subset,
@@ -287,7 +287,7 @@ where
                     // the same by every honest member.
                     let score_target = {
                         let mls = self.mls();
-                        let violation_epoch = mls.current_epoch()?;
+                        let violation_epoch = mls.group().epoch().as_u64();
                         let members = mls.members()?;
                         let self_member_id: &[u8] = &self.self_member_id;
                         let eligible = self.queues.steward_eligibility(&members);
@@ -530,7 +530,7 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let current_epoch = self.mls().current_epoch()?;
+        let current_epoch = self.mls().group().epoch().as_u64();
         let needs_sync = match self.services.steward_list.current_list() {
             None => true,
             Some(_) => self.services.steward_list.is_exhausted(current_epoch),

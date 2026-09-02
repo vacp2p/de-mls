@@ -7,12 +7,12 @@
 mod common;
 
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use openmls::credentials::CredentialWithKey;
+use openmls::prelude::OpenMlsProvider;
 use openmls_basic_credential::SignatureKeyPair;
 
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
@@ -80,8 +80,8 @@ impl Integrator {
 
     /// This integrator's `app_id` — the member id doubles as it so two
     /// integrators in one test don't echo-drop each other's packets.
-    fn app_id(&self) -> Arc<[u8]> {
-        Arc::from(self.wallet.address_bytes())
+    fn app_id(&self) -> &[u8] {
+        self.wallet.address_bytes()
     }
 }
 
@@ -120,6 +120,50 @@ fn create_builds_a_working_steward_session_without_user() {
         )),
         "create buffers an opening Working PhaseChange"
     );
+}
+
+/// Read access reaches OpenMLS's own API: values de-mls surfaces no accessor
+/// for, and a secret exporter that takes the provider the integrator already
+/// holds.
+#[test]
+fn mls_group_is_readable_through_openmls() {
+    let integrator = Integrator::new();
+    let conversation: TestConversation = Conversation::create(
+        "standalone-read",
+        &integrator.provider,
+        integrator.credential.clone(),
+        &test_mls_group_config(),
+        &integrator.signer,
+        &integrator.consensus,
+        integrator.scoring(),
+        integrator.clock.clone(),
+        integrator.app_id(),
+        de_mls::ConversationConfig::default(),
+        &[],
+    )
+    .expect("create");
+
+    let group = conversation.mls_group();
+
+    // Read straight through OpenMLS, with no de-mls accessor behind them.
+    assert_eq!(group.group_id().as_slice(), b"standalone-read");
+    assert_eq!(group.own_leaf_index().u32(), 0);
+    assert_eq!(group.members().count(), 1);
+
+    // The tree agrees with what de-mls reports.
+    let (epoch, _retry) = conversation.epoch_and_retry().expect("epoch");
+    assert_eq!(group.epoch().as_u64(), epoch);
+
+    // A secret exporter runs off the crypto provider the integrator already holds.
+    let exported = group
+        .export_secret(
+            integrator.provider.crypto(),
+            "de-mls-read-test",
+            b"context",
+            32,
+        )
+        .expect("export_secret");
+    assert_eq!(exported.len(), 32);
 }
 
 /// Sub-second timers so the solo creator's bundled-YES consensus and the
@@ -213,7 +257,7 @@ fn join_completes_in_one_call() {
     .expect("welcome addresses bob");
     assert_eq!(joined.id(), "standalone-welcome");
     assert_eq!(joined.state(), ConversationState::Working);
-    assert_eq!(joined.members_view().len(), 2);
+    assert_eq!(joined.mls_group().members().count(), 2);
     let (epoch, _) = joined.epoch_and_retry().expect("epoch");
     assert_eq!(epoch, 1, "joiner lands on the post-add epoch");
 }
@@ -252,7 +296,7 @@ fn create_with_members_seeds_initial_members_at_genesis() {
     // Genesis is immediate: at epoch 1 with all three members, no polling.
     let (epoch, _) = creator.epoch_and_retry().expect("epoch");
     assert_eq!(epoch, 1, "the genesis commit landed at creation");
-    assert_eq!(creator.members_view().len(), 3);
+    assert_eq!(creator.mls_group().members().count(), 3);
     assert_eq!(creator.state(), ConversationState::Working);
     assert!(
         creator.is_steward(),
@@ -295,7 +339,7 @@ fn create_with_members_seeds_initial_members_at_genesis() {
         .expect("welcome addresses the member");
         assert_eq!(joined.id(), "genesis");
         assert_eq!(joined.state(), ConversationState::Working);
-        assert_eq!(joined.members_view().len(), 3);
+        assert_eq!(joined.mls_group().members().count(), 3);
         let (e, _) = joined.epoch_and_retry().expect("epoch");
         assert_eq!(e, 1, "member lands on the genesis epoch");
         assert!(joined.is_steward(), "an initial member stewards genesis");
@@ -336,7 +380,7 @@ fn create_with_members_founds_a_subset_steward_group() {
 
     let (epoch, _) = creator.epoch_and_retry().expect("epoch");
     assert_eq!(epoch, 1);
-    assert_eq!(creator.members_view().len(), 4);
+    assert_eq!(creator.mls_group().members().count(), 4);
 
     let welcome = creator
         .drain_events()
@@ -366,7 +410,7 @@ fn create_with_members_founds_a_subset_steward_group() {
         )
         .expect("join")
         .expect("welcome addresses the member");
-        assert_eq!(joined.members_view().len(), 4);
+        assert_eq!(joined.mls_group().members().count(), 4);
         convos.push(joined);
     }
 

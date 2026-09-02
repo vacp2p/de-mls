@@ -3,7 +3,6 @@
 //! broadcast.
 
 use std::error::Error as StdError;
-use std::sync::Arc;
 
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
@@ -94,7 +93,7 @@ where
     ) -> Result<StewardListReconcile, ConversationError> {
         let (current_epoch, members) = {
             let mls = self.mls();
-            (mls.current_epoch()?, mls.members()?)
+            (mls.group().epoch().as_u64(), mls.members()?)
         };
         if !self.services.steward_list.is_exhausted(current_epoch) {
             return Ok(StewardListReconcile::Settled);
@@ -137,7 +136,7 @@ where
         }
         let (members, current_epoch) = {
             let mls = self.mls();
-            (mls.members()?, mls.current_epoch()?)
+            (mls.members()?, mls.group().epoch().as_u64())
         };
 
         let inserted = self
@@ -151,7 +150,7 @@ where
             self.services
                 .steward_list
                 .epoch_steward(current_epoch, &eligible)
-                .is_some_and(|es| es == &*self.self_member_id)
+                .is_some_and(|es| es == self.self_member_id.as_slice())
         };
         let should_propose = is_epoch_steward && state == ConversationState::Working;
 
@@ -395,7 +394,7 @@ where
     {
         let (proposed_stewards, election_epoch, retry_round, conversation_id) = {
             let mls = self.mls();
-            let epoch = mls.current_epoch()?;
+            let epoch = mls.group().epoch().as_u64();
             let mls_members = mls.members()?;
             let self_member_id: &[u8] = &self.self_member_id;
 
@@ -496,12 +495,10 @@ where
         if self.is_in_recovery_mode() {
             return Ok(());
         }
-        let (self_id, epoch) = {
-            let mls = self.mls();
-            (Arc::clone(&self.self_member_id), mls.current_epoch()?)
-        };
+        let epoch = self.mls().group().epoch().as_u64();
+        let self_id = self.self_member_id.to_vec();
         let request = ViolationEvidence::deadlock(epoch)
-            .with_creator(self_id.to_vec())
+            .with_creator(self_id)
             .into_update_request()?;
         info!(conversation = %self.conversation_id, epoch, "initiating Deadlock ECP");
         // Bundled YES: filing it is this member's own vote that the deadlock is real.
@@ -536,12 +533,10 @@ where
         let Some(score) = self.services.scoring.score_for(target)? else {
             return Err(ConversationError::InvalidConversationUpdateRequest);
         };
-        let (self_id, epoch) = {
-            let mls = self.mls();
-            (Arc::clone(&self.self_member_id), mls.current_epoch()?)
-        };
+        let epoch = self.mls().group().epoch().as_u64();
+        let self_id = self.self_member_id.to_vec();
         let request = ViolationEvidence::score_below_threshold(target.to_vec(), epoch, score)
-            .with_creator(self_id.to_vec())
+            .with_creator(self_id)
             .into_update_request()?;
         info!(
             conversation = %self.conversation_id,

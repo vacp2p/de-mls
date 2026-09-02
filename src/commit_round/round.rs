@@ -104,7 +104,7 @@ pub fn receive_commit_candidate(
         return Ok(ProcessResult::Noop(NoopReason::WireKindMismatch));
     }
 
-    let epoch = mls.current_epoch()?;
+    let epoch = mls.group().epoch().as_u64();
     let max_candidates = mls.members()?.len();
 
     // The proposal may not be locally approved yet — the consensus outcome can
@@ -138,7 +138,7 @@ pub fn replay_early_candidates(
     conversation: &mut ConversationQueues,
     mls: &MlsService,
 ) -> Result<(), ConversationError> {
-    let epoch = mls.current_epoch()?;
+    let epoch = mls.group().epoch().as_u64();
     for candidate in conversation.take_early_candidates(epoch) {
         receive_commit_candidate(conversation, mls, candidate)?;
     }
@@ -160,7 +160,7 @@ where
     Pr: OpenMlsProvider,
     <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
 {
-    let current_epoch = mls.current_epoch()?;
+    let current_epoch = mls.group().epoch().as_u64();
     let candidates = conversation.commit_round.take(current_epoch);
     // No candidates buffered for this epoch (or the round is stale) — nothing to
     // rank or apply.

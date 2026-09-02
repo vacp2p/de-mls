@@ -79,11 +79,11 @@ fn received_chat_sender_signature_key_resolves_to_the_signer() {
     }
 }
 
-/// Every member sees every member's signing key identically through
-/// `members_view()`, so each resolves the same handle; a key belonging to no
-/// current member resolves to no handle.
+/// Every member sees every member's signing key identically in the tree, so
+/// each resolves the same handle; a key belonging to no current member
+/// resolves to no handle.
 #[test]
-fn members_view_signing_keys_agree_across_the_group() {
+fn signing_keys_agree_across_the_group() {
     let h = TestHarness::<3>::bootstrap(
         [ALICE, BOB, CHARLIE],
         "sig-key-all",

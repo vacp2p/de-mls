@@ -1,10 +1,8 @@
 //! Read-only queries over a conversation's state.
 
-use openmls::group::Member;
-
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationState, Extensions, GroupContext,
-    MemberId, MemberRole, PeerScoreStorage, WallClock, mls_crypto::member_id_of,
+    ConsensusPlugin, Conversation, ConversationError, ConversationState, MemberId, MemberRole,
+    MlsGroup, PeerScoreStorage, WallClock, mls_crypto::member_id_of,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
@@ -14,6 +12,12 @@ where
     Sc: PeerScoreStorage,
     Wc: WallClock,
 {
+    /// Returns a reference to the underlying MLS group for this conversation,
+    /// allowing read-only access to the group's state via the OpenMLS API.
+    pub fn mls_group(&self) -> &MlsGroup {
+        self.mls().group()
+    }
+
     /// Current state of the conversation's state machine.
     pub fn state(&self) -> ConversationState {
         self.current_state()
@@ -46,15 +50,8 @@ where
     /// Current MLS epoch + reelection retry round. Intended for UI status
     /// display.
     pub fn epoch_and_retry(&self) -> Result<(u64, u32), ConversationError> {
-        let epoch = self.mls().current_epoch()?;
+        let epoch = self.mls().group().epoch().as_u64();
         Ok((epoch, self.services.steward_list.next_election_round()))
-    }
-
-    /// This member's epoch authenticator for the current epoch. Compared at the
-    /// same epoch number, a mismatch across members is a fork; a match is real
-    /// convergence. Pair with [`Self::epoch_and_retry`] to compare like epochs.
-    pub fn epoch_authenticator(&self) -> Vec<u8> {
-        self.mls().epoch_authenticator().to_vec()
     }
 
     /// Count of buffered pending membership updates. Used by tests and the UI
@@ -88,7 +85,7 @@ where
     /// Use [`Self::is_steward`] if you want to know if you are any steward (primary or backup).
     pub fn is_epoch_steward(&self) -> Result<bool, ConversationError> {
         let mls = self.mls();
-        let epoch = mls.current_epoch()?;
+        let epoch = mls.group().epoch().as_u64();
         let members = mls.members()?;
         let eligible = self.queues.steward_eligibility(&members);
         let (epoch_steward, _backup) = self
@@ -96,11 +93,6 @@ where
             .steward_list
             .epoch_and_backup(epoch, &eligible);
         Ok(epoch_steward == Some(self.self_member_id.as_ref()))
-    }
-
-    /// Every current member as an OpenMLS [`Member`], in leaf order.
-    pub fn members_view(&self) -> Vec<Member> {
-        self.mls().members_view()
     }
 
     /// Score at or below which a member is eligible for removal
@@ -156,7 +148,7 @@ where
     /// rotation so removed or pending-leave stewards are skipped in role display.
     pub fn member_roles(&self) -> Result<Vec<(MemberId, MemberRole)>, ConversationError> {
         let mls = self.mls();
-        let epoch = mls.current_epoch()?;
+        let epoch = mls.group().epoch().as_u64();
         let members = mls.members()?;
 
         let eligible = self.queues.steward_eligibility(&members);
@@ -195,9 +187,5 @@ where
 
     pub fn approved_proposals_for_current_epoch(&self) -> Vec<ConversationUpdateRequest> {
         self.queues.approved_proposals().values().cloned().collect()
-    }
-
-    pub fn extensions(&self) -> &Extensions<GroupContext> {
-        self.mls().extensions()
     }
 }

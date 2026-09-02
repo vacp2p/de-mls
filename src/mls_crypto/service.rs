@@ -20,7 +20,7 @@ use openmls::group::{
 };
 use openmls::key_packages::{KeyPackage, KeyPackageIn};
 use openmls::prelude::{
-    ContentType, DeserializeBytes, LeafNodeIndex, Member, MlsMessageBodyIn, MlsMessageIn,
+    ContentType, DeserializeBytes, LeafNodeIndex, MlsMessageBodyIn, MlsMessageIn,
     ProcessedMessageContent, ProtocolMessage, ProtocolVersion, Sender,
 };
 use openmls_traits::storage::StorageProvider;
@@ -30,7 +30,6 @@ use tracing::warn;
 
 use crate::mls_crypto::member_id::{MemberId, leaf_index_of, member_id_of};
 use crate::{
-    Extensions, GroupContext,
     mls_crypto::{
         CommitArtifacts, DecryptedMessage, MembershipDelta, MlsCommitInput, MlsError,
         MlsMessageKind, MlsProposalOutput, StagedCandidateResult,
@@ -179,6 +178,11 @@ impl MlsService {
         &self.conversation_id
     }
 
+    /// Provides read-only access to the underlying MLS group using the OpenMLS API.
+    pub fn group(&self) -> &MlsGroup {
+        &self.group
+    }
+
     /// Returns the `member_id` of all current members.
     pub fn members(&self) -> Result<Vec<Vec<u8>>, MlsError> {
         Ok(self
@@ -190,51 +194,10 @@ impl MlsService {
 
     /// Whether `member_id` a current member in the MLS.
     pub fn is_member(&self, member_id: &[u8]) -> bool {
-        self.resolve_member_id(member_id).is_some()
-    }
-
-    /// Whether some current member already holds `signature_key`. The one
-    /// identity check available for a joiner that has no leaf yet: MLS rejects
-    /// a commit adding a signature key the group already carries, so a caller
-    /// asking for one can be turned away before the proposal reaches consensus.
-    pub fn has_signature_key(&self, signature_key: &[u8]) -> bool {
-        self.group
-            .members()
-            .any(|m| m.signature_key.as_slice() == signature_key)
-    }
-
-    /// Current MLS epoch — the single source of truth; keep no parallel counter.
-    pub fn current_epoch(&self) -> Result<u64, MlsError> {
-        Ok(self.group.epoch().as_u64())
-    }
-
-    /// MLS epoch authenticator — a secret-derived tag identifying this group's
-    /// exact state at the current epoch. Two members at the same epoch number
-    /// with different authenticators have diverged (forked); identical
-    /// authenticators confirm the same state. The one value that tells a real
-    /// convergence apart from two branches that merely share an epoch count.
-    pub fn epoch_authenticator(&self) -> &[u8] {
-        self.group.epoch_authenticator().as_slice()
-    }
-
-    // Extensions configured for the MlsGroup
-    pub fn extensions(&self) -> &Extensions<GroupContext> {
-        self.group.extensions()
+        leaf_index_of(member_id).is_some_and(|index| self.group.member_at(index).is_some())
     }
 
     // ── Leaf-index identity ───────────────────────────────────────
-
-    /// This member's own leaf index.
-    pub fn own_index(&self) -> LeafNodeIndex {
-        self.group.own_leaf_index()
-    }
-
-    /// The leaf index `member_id` decodes to, or `None` if it isn't a current
-    /// member.
-    pub fn resolve_member_id(&self, member_id: &[u8]) -> Option<LeafNodeIndex> {
-        let index = leaf_index_of(member_id)?;
-        self.group.member_at(index).map(|_| index)
-    }
 
     /// The leaf a [`MemberId`] currently resolves to, or `None` if the handle is
     /// stale — its member left, or the leaf was reused (signature-key mismatch).
@@ -248,11 +211,6 @@ impl MlsService {
     pub fn member_id_at(&self, member_id: &[u8]) -> Option<MemberId> {
         let index = leaf_index_of(member_id)?;
         self.group.member_at(index).map(|m| MemberId::from(&m))
-    }
-
-    /// Current members as OpenMLS [`Member`]s, in leaf order.
-    pub fn members_view(&self) -> Vec<Member> {
-        self.group.members().collect()
     }
 
     // ══════════════════════════════════════════════════════════
@@ -686,7 +644,7 @@ mod service_tests {
         let bob_kp = fresh_key_package(&provider, b"bob");
         mls.create_commit_candidate(&provider, &signer, &[MlsCommitInput::Add(bob_kp)])
             .expect("own commit candidate");
-        let epoch_before = mls.current_epoch().unwrap();
+        let epoch_before = mls.group().epoch().as_u64();
 
         // Stage an invalid remote commit (garbage). It must not apply, and must
         // not disturb our own pending commit.
@@ -700,7 +658,7 @@ mod service_tests {
         mls.merge_own_commit(&provider)
             .expect("own pending commit survived a failed remote stage");
         assert_eq!(
-            mls.current_epoch().unwrap(),
+            mls.group().epoch().as_u64(),
             epoch_before + 1,
             "own commit applied after the failed remote, epoch advanced"
         );
@@ -729,8 +687,8 @@ mod service_tests {
         let mut bob = MlsService::new_from_welcome(&provider_b, &welcome)
             .expect("open welcome")
             .expect("welcome addressed to bob");
-        let synced_epoch = alice.current_epoch().unwrap();
-        assert_eq!(synced_epoch, bob.current_epoch().unwrap());
+        let synced_epoch = alice.group().epoch().as_u64();
+        assert_eq!(synced_epoch, bob.group().epoch().as_u64());
 
         // Bob builds a valid commit (add carol) — a genuine remote candidate.
         let carol_kp = fresh_key_package(&provider_b, b"carol");
@@ -761,7 +719,7 @@ mod service_tests {
         alice
             .merge_own_commit(&provider_a)
             .expect("own pending commit survived staging + rejecting a valid remote");
-        assert_eq!(alice.current_epoch().unwrap(), synced_epoch + 1);
+        assert_eq!(alice.group().epoch().as_u64(), synced_epoch + 1);
     }
 
     /// The surgical fix shape: in de-mls's split staging flow, merging a remote
@@ -784,7 +742,7 @@ mod service_tests {
         let mut bob = MlsService::new_from_welcome(&provider_b, &welcome)
             .expect("open welcome")
             .expect("welcome addressed to bob");
-        let synced_epoch = alice.current_epoch().unwrap();
+        let synced_epoch = alice.group().epoch().as_u64();
 
         // Bob builds a valid commit; alice builds her own → alice has a pending commit.
         let carol_kp = fresh_key_package(&provider_b, b"carol");
@@ -807,11 +765,11 @@ mod service_tests {
         alice
             .merge_staged_commit(&provider_a)
             .expect("merge the remote after discarding own");
-        assert_eq!(alice.current_epoch().unwrap(), synced_epoch + 1);
+        assert_eq!(alice.group().epoch().as_u64(), synced_epoch + 1);
 
         // The remote applied (carol added) and our own was discarded, not
         // applied (dave absent).
-        let members = alice.members_view();
+        let members: Vec<_> = alice.group().members().collect();
         let has = |name: &[u8]| {
             members
                 .iter()
@@ -845,8 +803,8 @@ mod service_tests {
         let bob_leaf = LeafNodeIndex::new(1);
         assert!(
             alice
-                .members_view()
-                .iter()
+                .group()
+                .members()
                 .any(|m| m.index == bob_leaf && m.credential.serialized_content() == b"bob"),
             "bob is seated at leaf 1"
         );
@@ -870,15 +828,15 @@ mod service_tests {
         // Dave now holds bob's old leaf; bob is gone.
         assert!(
             alice
-                .members_view()
-                .iter()
+                .group()
+                .members()
                 .any(|m| m.index == bob_leaf && m.credential.serialized_content() == b"dave"),
             "dave refilled leaf 1"
         );
         assert!(
             !alice
-                .members_view()
-                .iter()
+                .group()
+                .members()
                 .any(|m| m.credential.serialized_content() == b"bob"),
             "bob is no longer a member"
         );

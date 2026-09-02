@@ -110,7 +110,7 @@ pub use wall_clock::{MockClock, Timestamp, WallClock};
 pub mod mls_crypto;
 
 pub use mls_crypto::MemberId;
-pub use openmls::prelude::{Extensions, GroupContext, LeafNodeIndex, Member};
+pub use openmls::prelude::{Extensions, GroupContext, LeafNodeIndex, Member, MlsGroup};
 
 /// Reference implementations of the library's plug-in traits — in-memory
 /// MLS / peer-score storage, default consensus + per-conversation
