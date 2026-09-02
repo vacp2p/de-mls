@@ -1,5 +1,8 @@
 //! Read-only queries over a conversation's state.
 
+use hashgraph_like_consensus::storage::ConsensusStorage;
+use prost::Message;
+
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, MemberId, MemberRole,
     MlsGroup, PeerScoreStorage, WallClock, mls_crypto::member_id_of,
@@ -72,6 +75,23 @@ where
             .map(|l| l.len())
             .unwrap_or(0);
         (received, expected)
+    }
+
+    /// Whether this member holds a steward list it can use at the current
+    /// epoch.
+    ///
+    /// False right after a welcome that carried no `ConversationSync`, and
+    /// again once a list ages out before a newer election reaches this node.
+    /// `poll` requests a fresh sync on its own in both cases, so this is a
+    /// status to surface, not a condition to act on. Until it turns true this
+    /// member has no steward list, no peer scores, and no protocol config of
+    /// its own.
+    pub fn is_synced(&self) -> Result<bool, ConversationError> {
+        let epoch = self.mls().group().epoch().as_u64();
+        Ok(match self.services.steward_list.current_list() {
+            None => false,
+            Some(_) => !self.services.steward_list.is_exhausted(epoch),
+        })
     }
 
     pub fn is_steward(&self) -> bool {
@@ -185,7 +205,36 @@ where
         Ok(roles)
     }
 
-    pub fn approved_proposals_for_current_epoch(&self) -> Vec<ConversationUpdateRequest> {
-        self.queues.approved_proposals().values().cloned().collect()
+    /// Proposals approved for the current epoch, each with the `proposal_id`
+    /// that identified it in consensus.
+    pub fn approved_proposals_for_current_epoch(&self) -> Vec<(u32, ConversationUpdateRequest)> {
+        self.queues
+            .approved_proposals()
+            .iter()
+            .map(|(id, req)| (*id, req.clone()))
+            .collect()
+    }
+
+    /// What `proposal_id` asked for, as carried in the consensus session.
+    ///
+    /// Resolves the id an [`crate::Info::ConsensusReached`] carries.
+    /// `None` once the session has been freed — sessions are
+    /// retained up to `max_consensus_sessions`, so old ids age out.
+    pub fn proposal(
+        &self,
+        proposal_id: u32,
+    ) -> Result<Option<ConversationUpdateRequest>, ConversationError> {
+        let scope = self.conversation_id.clone();
+        let Some(session) = self
+            .services
+            .consensus
+            .storage()
+            .get_session(&scope, proposal_id)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(ConversationUpdateRequest::decode(
+            session.proposal.payload.as_slice(),
+        )?))
     }
 }

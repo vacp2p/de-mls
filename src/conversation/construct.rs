@@ -17,9 +17,9 @@ use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 use hashgraph_like_consensus::{events::ConsensusEventBus, service::ConsensusService};
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationConfig, ConversationError, ConversationEvent,
-    ConversationQueues, ConversationServices, ConversationStateMachine, PeerScoreStorage,
-    PeerScoringService, StewardListService, WallClock,
+    ConsensusPlugin, Conversation, ConversationConfig, ConversationError, ConversationQueues,
+    ConversationServices, ConversationStateMachine, Info, PeerScoreStorage, PeerScoringService,
+    StewardListService, WallClock,
     consensus::outcome_bus::OutcomeBus,
     mls_crypto::{MlsCommitInput, MlsService, member_id_of, signature_key_of_key_package},
     protos::de_mls::messages::v1::MemberWelcome,
@@ -265,7 +265,7 @@ where
         );
         // Surface the opening phase so a caller draining conversation events sees
         // the conversation's starting state without a separate query.
-        conversation.emit_event(ConversationEvent::PhaseChange(initial_state));
+        conversation.emit_event(Info::PhaseChange(initial_state));
         Ok(conversation)
     }
 }

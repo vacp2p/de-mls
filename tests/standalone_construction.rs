@@ -26,6 +26,7 @@ use common::{
 
 use crate::common::harness::fast_config;
 use crate::common::test_mls_group_config;
+use de_mls::{Info, Obligation};
 
 /// Per-conversation stack the standalone tests build, on virtual time.
 type TestConversation = Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, MockClock>;
@@ -116,7 +117,7 @@ fn create_builds_a_working_steward_session_without_user() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            ConversationEvent::PhaseChange(ConversationState::Working)
+            ConversationEvent::Info(Info::PhaseChange(ConversationState::Working))
         )),
         "create buffers an opening Working PhaseChange"
     );
@@ -205,10 +206,10 @@ fn join_completes_in_one_call() {
         bob.clock.advance(Duration::from_millis(30));
         creator.poll(&alice.provider, &alice.signer);
         for event in creator.drain_events() {
-            if let ConversationEvent::WelcomeReady {
+            if let ConversationEvent::Obligation(Obligation::WelcomeReady {
                 welcome: w,
                 minted_locally: true,
-            } = event
+            }) = event
             {
                 welcome = Some(w);
             }
@@ -308,10 +309,10 @@ fn create_with_members_seeds_initial_members_at_genesis() {
         .drain_events()
         .into_iter()
         .find_map(|e| match e {
-            ConversationEvent::WelcomeReady {
+            ConversationEvent::Obligation(Obligation::WelcomeReady {
                 welcome,
                 minted_locally: true,
-            } => Some(welcome),
+            }) => Some(welcome),
             _ => None,
         })
         .expect("genesis mints one welcome");
@@ -386,10 +387,10 @@ fn create_with_members_founds_a_subset_steward_group() {
         .drain_events()
         .into_iter()
         .find_map(|e| match e {
-            ConversationEvent::WelcomeReady {
+            ConversationEvent::Obligation(Obligation::WelcomeReady {
                 welcome,
                 minted_locally: true,
-            } => Some(welcome),
+            }) => Some(welcome),
             _ => None,
         })
         .expect("genesis mints one welcome");

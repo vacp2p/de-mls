@@ -45,6 +45,7 @@ use crate::common::test_mls_group_config;
 use crate::common::{
     MintedKeyPackage, make_scoring, mint_key_package, test_credential, wallet::WalletIdentity,
 };
+use de_mls::{Info, Obligation, Request};
 
 /// Per-conversation MLS service stack the harness runs, on virtual time.
 pub type TestConversation =
@@ -297,7 +298,9 @@ impl Member {
     /// any — the id to pass to [`Self::vote`].
     pub fn pending_vote_request(&self) -> Option<u32> {
         self.events.iter().rev().find_map(|e| match e {
-            ConversationEvent::VoteRequested { proposal_id, .. } => Some(*proposal_id),
+            ConversationEvent::Request(Request::VoteRequested { proposal_id, .. }) => {
+                Some(*proposal_id)
+            }
             _ => None,
         })
     }
@@ -306,11 +309,11 @@ impl Member {
     /// consensus session has resolved.
     pub fn consensus_outcome(&self, proposal_id: u32) -> Option<bool> {
         self.events.iter().rev().find_map(|e| match e {
-            ConversationEvent::ConsensusReached {
+            ConversationEvent::Info(Info::ConsensusReached {
                 proposal_id: id,
                 approved,
                 ..
-            } if *id == proposal_id => Some(*approved),
+            }) if *id == proposal_id => Some(*approved),
             _ => None,
         })
     }
@@ -410,13 +413,13 @@ impl Member {
         self.events
             .iter()
             .filter_map(|e| match e {
-                ConversationEvent::ConversationMessage {
+                ConversationEvent::Obligation(Obligation::ConversationMessage {
                     message:
                         AppMessage {
                             payload: Some(app_message::Payload::ConversationMessage(cm)),
                         },
                     sender,
-                } => Some(ReceivedChat {
+                }) => Some(ReceivedChat {
                     body: cm.message.clone(),
                     sender: sender.clone(),
                 }),
@@ -435,7 +438,7 @@ impl Member {
         self.events
             .iter()
             .filter_map(|e| match e {
-                ConversationEvent::PhaseChange(s) => Some(*s),
+                ConversationEvent::Info(Info::PhaseChange(s)) => Some(*s),
                 _ => None,
             })
             .collect()
@@ -443,16 +446,19 @@ impl Member {
 
     /// Whether this member ever transitioned into `state`.
     pub fn saw_phase(&self, state: ConversationState) -> bool {
-        self.events
-            .iter()
-            .any(|e| matches!(e, ConversationEvent::PhaseChange(s) if *s == state))
+        self.events.iter().any(|e| {
+            matches!(
+                e,
+                ConversationEvent::Info(Info::PhaseChange(s)) if *s == state
+            )
+        })
     }
 
-    /// Whether this member emitted a `Leaving` event (self-left or evicted).
-    pub fn saw_leaving(&self) -> bool {
+    /// Whether this member emitted a `Left` event (self-left or evicted).
+    pub fn saw_left(&self) -> bool {
         self.events
             .iter()
-            .any(|e| matches!(e, ConversationEvent::Leaving))
+            .any(|e| matches!(e, ConversationEvent::Obligation(Obligation::Left)))
     }
 
     /// Every `WelcomeReady` this member emitted, with its `minted_locally` flag
@@ -461,45 +467,13 @@ impl Member {
         self.events
             .iter()
             .filter_map(|e| match e {
-                ConversationEvent::WelcomeReady {
+                ConversationEvent::Obligation(Obligation::WelcomeReady {
                     welcome,
                     minted_locally,
-                } => Some((welcome.clone(), *minted_locally)),
+                }) => Some((welcome.clone(), *minted_locally)),
                 _ => None,
             })
             .collect()
-    }
-
-    /// Distinct proposals this member has seen that admit `member_id` — its own
-    /// submissions plus peers' surfaced for a vote. Counts `MemberInvite` only:
-    /// a group that outgrows `sn_max` also votes on a steward election, and that
-    /// is not a duplicate invitation.
-    pub fn observed_invite_proposals(&self, joiner_key: &[u8]) -> Vec<u32> {
-        let invites_target = |req: &ConversationUpdateRequest| {
-            matches!(
-                req.payload.as_ref(),
-                Some(conversation_update_request::Payload::MemberInvite(im))
-                    if signature_key_of_key_package(&im.key_package_bytes).is_ok_and(|k| k == joiner_key)
-            )
-        };
-        let mut ids: Vec<u32> = self
-            .events
-            .iter()
-            .filter_map(|e| match e {
-                ConversationEvent::VoteRequested {
-                    proposal_id,
-                    request,
-                }
-                | ConversationEvent::OwnProposalSubmitted {
-                    proposal_id,
-                    request,
-                } if invites_target(request) => Some(*proposal_id),
-                _ => None,
-            })
-            .collect();
-        ids.sort_unstable();
-        ids.dedup();
-        ids
     }
 
     /// Member ids added by every commit this member applied, in commit order.
@@ -509,7 +483,7 @@ impl Member {
         self.events
             .iter()
             .filter_map(|e| match e {
-                ConversationEvent::CommitApplied(reqs) => Some(reqs),
+                ConversationEvent::Info(Info::CommitApplied(reqs)) => Some(reqs),
                 _ => None,
             })
             .flatten()
@@ -526,7 +500,7 @@ impl Member {
     pub fn commits_applied(&self) -> usize {
         self.events
             .iter()
-            .filter(|e| matches!(e, ConversationEvent::CommitApplied(_)))
+            .filter(|e| matches!(e, ConversationEvent::Info(Info::CommitApplied(_))))
             .count()
     }
 
@@ -780,10 +754,10 @@ impl Member {
             return welcomes;
         };
         for event in convo.drain_events() {
-            if let ConversationEvent::WelcomeReady {
+            if let ConversationEvent::Obligation(Obligation::WelcomeReady {
                 welcome,
                 minted_locally: true,
-            } = &event
+            }) = &event
             {
                 welcomes.push(welcome.clone());
             }

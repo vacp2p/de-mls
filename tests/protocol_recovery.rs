@@ -7,6 +7,7 @@ mod common;
 use std::time::Duration;
 
 use common::harness::{TestHarness, fast_config};
+use de_mls::Request;
 use de_mls::{ConversationConfig, ConversationEvent, ConversationState, StewardListConfig};
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -76,7 +77,7 @@ fn recovery_auto_mint_converges_on_one_commit() {
             h.member(m)
                 .events()
                 .iter()
-                .any(|e| matches!(e, ConversationEvent::RecoveryModeOpened)),
+                .any(|e| matches!(e, ConversationEvent::Request(Request::RecoveryModeOpened))),
             "member {m} observed recovery opening"
         );
         assert!(

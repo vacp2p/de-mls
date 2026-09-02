@@ -104,5 +104,5 @@ fn proposal_arriving_past_expiration_is_dropped_by_skewed_peer() {
     );
     assert!(h.epochs_agree(), "both members stay on the same epoch");
     assert_eq!(h.member(0).member_count(), 2, "bob is not removed");
-    assert!(!h.member(1).saw_leaving(), "bob does not leave");
+    assert!(!h.member(1).saw_left(), "bob does not leave");
 }

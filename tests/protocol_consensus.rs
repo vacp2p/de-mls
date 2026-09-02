@@ -69,5 +69,5 @@ fn peer_vote_no_blocks_the_commit() {
     );
     assert!(h.epochs_agree(), "both members stay on the same epoch");
     assert_eq!(h.member(0).member_count(), 2, "bob is not removed");
-    assert!(!h.member(1).saw_leaving(), "bob does not leave");
+    assert!(!h.member(1).saw_left(), "bob does not leave");
 }

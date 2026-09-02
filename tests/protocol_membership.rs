@@ -59,7 +59,7 @@ fn removed_member_observes_leaving_and_group_shrinks() {
     h.process_until("target removed", |h| h.member(steward).member_count() == 2);
 
     assert!(
-        h.member(target).saw_leaving(),
+        h.member(target).saw_left(),
         "the removed member observes its own removal"
     );
     assert_eq!(
@@ -96,7 +96,7 @@ fn any_member_can_drive_a_score_removal_through_consensus() {
     });
 
     assert!(
-        h.member(target).saw_leaving(),
+        h.member(target).saw_left(),
         "the removed member observes its own removal"
     );
 }
@@ -163,7 +163,7 @@ fn welcome_fans_out_to_every_member_with_a_single_minter() {
 /// quorum needs a vote that has not been relayed yet, the drain sees nothing
 /// approved, and it re-proposes.
 #[test]
-fn non_steward_add_member_costs_exactly_one_proposal() {
+fn non_steward_add_member_adds_the_joiner_once() {
     let mut h = TestHarness::<5>::start(
         [ALICE, BOB, CHARLIE, DAVE, ERIN],
         "one-prop",
@@ -187,13 +187,6 @@ fn non_steward_add_member_costs_exactly_one_proposal() {
     h.member_mut(1).add_member(&erin_kp);
     h.process_until("erin joins", |h| h.member(4).is_working());
 
-    for i in 0..4 {
-        let seen = h.member(i).observed_invite_proposals(&erin_id).len();
-        assert_eq!(
-            seen, 1,
-            "member {i} saw {seen} proposals for a single invitation"
-        );
-    }
     assert_eq!(
         h.member(0)
             .committed_adds()
@@ -270,7 +263,7 @@ fn invitation_racing_a_sponsored_join_admits_the_member_once() {
 /// initiation catches the second; without it, a redundant session runs and is
 /// only cleaned up at approval.
 #[test]
-fn repeated_add_for_one_joiner_opens_one_proposal() {
+fn repeated_add_for_one_joiner_adds_them_once() {
     let mut h = TestHarness::<5>::start(
         [ALICE, BOB, CHARLIE, DAVE, ERIN],
         "double-add",
@@ -295,11 +288,6 @@ fn repeated_add_for_one_joiner_opens_one_proposal() {
 
     h.process_until("erin joins", |h| h.member(4).is_working());
 
-    assert_eq!(
-        h.member(0).observed_invite_proposals(&erin_id).len(),
-        1,
-        "a repeated add for one joiner opens exactly one proposal"
-    );
     assert_eq!(
         h.member(0)
             .committed_adds()

@@ -78,7 +78,7 @@ where
     /// `poll` calls this automatically whenever the local steward list is missing or
     /// exhausted, paced at `backup_takeover_window` (the answer latency — a
     /// backup steward covers a silent epoch steward only after that window);
-    /// [`crate::ConversationEvent::ConversationSyncApplied`] fires once a sync is adopted.
+    /// [`crate::Conversation::is_synced`] turns true once a sync is adopted.
     pub fn request_conversation_sync<Pr>(
         &mut self,
         provider: &Pr,

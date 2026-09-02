@@ -36,7 +36,7 @@ pub enum CommitRoundOutcome {
         result: ProcessResult,
         /// Welcome artifact when our own commit added members.
         /// Surfaced to integrators via
-        /// [`crate::ConversationEvent::WelcomeReady`].
+        /// [`crate::Obligation::WelcomeReady`].
         welcome: Option<MemberWelcome>,
     },
     #[default]

@@ -7,6 +7,7 @@ mod common;
 use common::harness::{TestHarness, fast_config};
 use de_mls::CreatorVote;
 use de_mls::protos::de_mls::messages::v1::ViolationEvidence;
+use de_mls::{ConversationEvent, Info};
 use de_mls::{ConversationState, StewardListConfig};
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -34,7 +35,7 @@ fn freeze_cycle_emits_phases_in_order() {
     let phases: Vec<ConversationState> = h.member(0).events()[baseline..]
         .iter()
         .filter_map(|e| match e {
-            de_mls::ConversationEvent::PhaseChange(s) => Some(*s),
+            ConversationEvent::Info(Info::PhaseChange(s)) => Some(*s),
             _ => None,
         })
         .collect();

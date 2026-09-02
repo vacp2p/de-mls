@@ -9,8 +9,8 @@ use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 use tracing::{error, info};
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
-    CreatorVote, ElectionDecision, ElectionSkip, PeerScoreStorage, WallClock, member_set,
+    ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
+    ElectionDecision, ElectionSkip, Info, PeerScoreStorage, WallClock, member_set,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
         StewardElectionProposal, TimingConfig, ViolationEvidence, conversation_update_request,
@@ -481,7 +481,7 @@ where
     /// Raise the Layer-3 deadlock signal: file a `Deadlock` ECP to open recovery
     /// when the group is stuck with no steward committing. It only *proposes* —
     /// the ECP needs ⌈2n/3⌉ consensus, so one member can't force it. On YES the
-    /// group enters recovery ([`crate::ConversationEvent::RecoveryModeOpened`]),
+    /// group enters recovery ([`crate::Request::RecoveryModeOpened`]),
     /// relaxing the steward gate. No-op while already in recovery.
     pub fn request_recovery<Pr>(
         &mut self,
@@ -514,7 +514,7 @@ where
     /// inactivity timer.
     ///
     /// de-mls never calls this itself. It only reports score changes through
-    /// [`ConversationEvent::MemberScoreChanged`]; deciding a score is too low
+    /// [`crate::Info::MemberScoreChanged`]; deciding a score is too low
     /// is your call. Any member can propose, and it still needs ⌈2n/3⌉
     /// consensus, so nobody removes anyone on their own. The proposal carries
     /// this node's score for `target`, which peers weigh against their own.
@@ -600,7 +600,7 @@ where
                 && let Err(e) = self.request_recovery(provider, signer)
             {
                 error!(conversation = %self.conversation_id, error = %e, "Deadlock ECP filing failed");
-                self.emit_event(ConversationEvent::Error {
+                self.emit_event(Info::Error {
                     operation: "Reelection stuck".to_string(),
                     message: e.to_string(),
                 });
