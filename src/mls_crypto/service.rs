@@ -601,29 +601,7 @@ impl MlsService {
 #[cfg(test)]
 mod service_tests {
     use super::*;
-    use crate::test_fixtures::{TEST_SUITE, TestProvider, make_creator_mls};
-    use openmls::credentials::{BasicCredential, CredentialWithKey};
-    use openmls::key_packages::KeyPackage;
-    use openmls::prelude::tls_codec::Serialize as _;
-    use openmls_basic_credential::SignatureKeyPair;
-
-    fn member_key_package(
-        provider: &TestProvider,
-        member_id: &[u8],
-    ) -> (Vec<u8>, SignatureKeyPair) {
-        let signer = SignatureKeyPair::new(TEST_SUITE.signature_algorithm()).unwrap();
-        let credential = CredentialWithKey {
-            credential: BasicCredential::new(member_id.to_vec()).into(),
-            signature_key: signer.to_public_vec().into(),
-        };
-        let kp = KeyPackage::builder()
-            .build(TEST_SUITE, provider, &signer, credential)
-            .unwrap()
-            .key_package()
-            .tls_serialize_detached()
-            .unwrap();
-        (kp, signer)
-    }
+    use crate::test_fixtures::{TestProvider, make_creator_mls, member_key_package};
 
     fn fresh_key_package(provider: &TestProvider, member_id: &[u8]) -> Vec<u8> {
         member_key_package(provider, member_id).0
