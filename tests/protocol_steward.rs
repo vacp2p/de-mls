@@ -35,7 +35,7 @@ fn steward_auto_commits_approved_work_on_inactivity() {
     });
 
     assert_eq!(h.member(0).epoch(), 2, "the removal commit advanced 1 -> 2");
-    assert!(h.member(1).saw_leaving(), "bob observes its own removal");
+    assert!(h.member(1).saw_left(), "bob observes its own removal");
 }
 
 #[test]

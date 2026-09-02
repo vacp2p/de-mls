@@ -756,6 +756,47 @@ mod tests {
         assert!(!conversation.has_pending_update(&prior));
     }
 
+    /// One invitation covers its joiner for as long as the proposal is alive:
+    /// while it is voting, and after it resolves into the approved queue. Both
+    /// guards that stop a second proposal for the same joiner — the submit path
+    /// and the steward's buffered-update relay — read `active_proposal_targets`,
+    /// so this is where "one add, one proposal" is decided. The joiner has no
+    /// leaf yet, so its target is the signature key read out of the key package.
+    #[test]
+    fn invite_target_stays_covered_through_its_lifecycle() {
+        use crate::apply_consensus_result;
+        use crate::protos::de_mls::messages::v1::{
+            MemberInvite, conversation_update_request::Payload,
+        };
+        use crate::test_fixtures::member_key_package;
+
+        let provider = openmls_rust_crypto::OpenMlsRustCrypto::default();
+        let (key_package_bytes, signer) = member_key_package(&provider, b"erin");
+        let joiner = signer.to_public_vec();
+
+        let mut conversation = ConversationQueues::new("invite-no-duplicate", 10);
+        let request = ConversationUpdateRequest {
+            payload: Some(Payload::MemberInvite(MemberInvite { key_package_bytes })),
+        };
+        let proposal_id = 400;
+
+        conversation.track_voting_proposal(proposal_id, &request);
+        assert!(
+            conversation
+                .active_proposal_targets()
+                .contains(joiner.as_slice()),
+            "a voting invite already covers its joiner, so no second proposal opens"
+        );
+
+        apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
+        assert!(
+            conversation
+                .active_proposal_targets()
+                .contains(joiner.as_slice()),
+            "the approved invite still covers the joiner, with no gap on handoff"
+        );
+    }
+
     /// A score-below-threshold removal is a live change for its target across
     /// its whole lifecycle: while the ECP is still voting (via the in-flight
     /// index) and after it resolves into a queued `RemoveMember` (via the

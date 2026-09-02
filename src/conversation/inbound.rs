@@ -26,8 +26,9 @@ use prost::Message;
 use tracing::{error, info, warn};
 
 use crate::{
-    ConsensusPlugin, ConversationEvent, DEFAULT_PEER_SCORE, PeerScoreStorage, ProcessResult,
-    ProposalKind, ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig, WallClock,
+    ConsensusPlugin, Conversation, ConversationError, ConversationState, DEFAULT_PEER_SCORE, Info,
+    Obligation, PeerScoreStorage, ProcessResult, ProposalKind, Request, ScoreSnapshot,
+    ScoringConfig, StewardList, StewardListConfig, WallClock,
     commit_round::{compute_commit_hash, receive_commit_candidate},
     conversation::{ConversationQueues, member_set},
     mls_crypto::{DecryptedMessage, MlsService, member_id_of},
@@ -38,8 +39,6 @@ use crate::{
     },
     wall_clock::WallClockExt,
 };
-
-use crate::{Conversation, ConversationError, ConversationState};
 
 /// Fast-path proposals (`expected_voters_count == 1`) bypass peer voting, so
 /// we restrict them to self-removal. Enforcing that the MLS-authenticated
@@ -173,7 +172,7 @@ pub enum DispatchOutcome {
     /// Packet was self-echoed. No action.
     Dropped,
     /// The conversation has completed its protocol-side teardown (emitted
-    /// `Leaving`, deleted MLS state). The integrator must remove the
+    /// `Left`, deleted MLS state). The integrator must remove the
     /// registry entry and clean up the consensus scope.
     LeaveRequested,
 }
@@ -220,7 +219,6 @@ where
         if sync_bytes.is_empty() {
             // Joined without a bootstrap: no steward list, scores, or config.
             // Surface the degraded state so the integrator re-requests a sync.
-            self.emit_event(ConversationEvent::ConversationSyncMissing);
             return Ok(());
         }
         let result = self.decode_inbound(provider, sync_bytes)?;
@@ -240,7 +238,7 @@ where
     {
         match result {
             ProcessResult::AppMessage(msg, sender) => {
-                self.emit_event(ConversationEvent::ConversationMessage {
+                self.emit_event(Obligation::ConversationMessage {
                     message: *msg,
                     sender,
                 });
@@ -281,7 +279,7 @@ where
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::WelcomeBroadcastReceived(welcome) => {
-                self.emit_event(ConversationEvent::WelcomeReady {
+                self.emit_event(Obligation::WelcomeReady {
                     welcome: *welcome,
                     minted_locally: false,
                 });
@@ -352,7 +350,7 @@ where
             .process_incoming_proposal(&scope, proposal, local_now)
         {
             if matches!(e, ConsensusError::ProposalExpired) {
-                self.emit_event(ConversationEvent::Error {
+                self.emit_event(Info::Error {
                     operation: "incoming_proposal".to_string(),
                     message: format!(
                         "proposal {proposal_id} expired on arrival \
@@ -393,7 +391,7 @@ where
                 self.register_auto_vote(proposal_id, Duration::ZERO, verdict);
             } else {
                 if let Some(request) = decoded {
-                    self.emit_event(ConversationEvent::VoteRequested {
+                    self.emit_event(Request::VoteRequested {
                         proposal_id,
                         request,
                     });
@@ -453,7 +451,7 @@ where
         self.services.steward_list.reset_retry();
         self.timing.reelection_recovered = false;
         let event = self.start_working();
-        self.emit_event(ConversationEvent::PhaseChange(event));
+        self.emit_event(Info::PhaseChange(event));
 
         self.reconcile_membership_after_commit()?;
         self.steward_list_housekeeping(provider, signer)?;
@@ -479,7 +477,7 @@ where
         let max_epochs = self.config.pending_update_max_epochs;
         let _ = self.queues.expire_pending_updates(epoch, max_epochs);
         if !delta.added.is_empty() || !delta.removed.is_empty() {
-            self.emit_event(ConversationEvent::MembersChanged {
+            self.emit_event(Info::MembersChanged {
                 added: delta.added,
                 removed: delta.removed,
             });
@@ -514,9 +512,9 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        self.emit_event(ConversationEvent::Leaving);
+        self.emit_event(Obligation::Left);
         self.cancel_all_auto_votes();
-        // The leave is already committed (`Leaving` emitted); a delete failure
+        // The leave is already committed (`Left` emitted); a delete failure
         // must log and continue, else the caller never reaches
         // `LeaveRequested` and the entry leaks. The integrator tears the
         // conversation down right after.
@@ -584,7 +582,8 @@ where
 
         let sn = sync.steward_members.len();
         self.apply_conversation_sync_to_entry(&sync)?;
-        self.emit_event(ConversationEvent::ConversationSyncApplied);
+        self.timing.unanswered_sync_rounds = 0;
+        self.emit_event(Info::ConversationSyncApplied);
 
         info!(
             conversation = %conversation_id,

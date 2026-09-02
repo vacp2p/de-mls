@@ -23,8 +23,8 @@ use prost::Message;
 use tracing::info;
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
-    PeerScoreStorage, ProposalKind, WallClock,
+    ConsensusPlugin, Conversation, ConversationError, ConversationState, PeerScoreStorage,
+    ProposalKind, Request, WallClock,
     conversation::in_flight_target,
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
     self_leave_proposal_id,
@@ -34,8 +34,8 @@ use crate::{
 /// The creator's intent at proposal submit time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreatorVote {
-    /// Bundle a YES vote with the proposal in one atomic wire message; the
-    /// integrator gets `OwnProposalSubmitted`, no vote request. For actions
+    /// Bundle a YES vote with the proposal in one atomic wire message; no vote
+    /// request reaches the integrator, since the vote is already cast. For actions
     /// where submitting already expresses the vote (member add, ban,
     /// self-executing protocol moves).
     Yes,
@@ -144,15 +144,11 @@ where
                     .mls_mut()
                     .build_message(provider, signer, &proposal.into())?;
                 self.broadcast(payload);
-                self.emit_event(ConversationEvent::OwnProposalSubmitted {
-                    proposal_id,
-                    request,
-                });
             }
             CreatorVote::Deferred => {
                 let payload = self.mls_mut().build_message(provider, signer, &unbundled)?;
                 self.broadcast(payload);
-                self.emit_event(ConversationEvent::VoteRequested {
+                self.emit_event(Request::VoteRequested {
                     proposal_id,
                     request,
                 });

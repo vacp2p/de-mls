@@ -14,8 +14,8 @@ use prost::Message;
 use tracing::{error, info, warn};
 
 use crate::{
-    CommitRoundOutcome, ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
-    ConversationState, DispatchOutcome, PeerScoreStorage, ScoreEvent, ScoreOp, WallClock,
+    CommitRoundOutcome, ConsensusPlugin, Conversation, ConversationError, ConversationState,
+    DispatchOutcome, Info, Obligation, PeerScoreStorage, Request, ScoreEvent, ScoreOp, WallClock,
     protos::de_mls::messages::v1::{AppMessage, MemberWelcome},
     wall_clock::WallClockExt,
 };
@@ -117,7 +117,7 @@ where
     }
 
     /// Drive the freeze phase forward. While `Freezing`, emits
-    /// [`ConversationEvent::CommitRoundProgress`] as candidates arrive; once all
+    /// [`crate::Info::CommitRoundProgress`] as candidates arrive; once all
     /// expected candidates are in or the freeze window elapses, transitions
     /// to `Selection`, finalises the round, and dispatches the resulting
     /// [`crate::ProcessResult`]. Returns
@@ -177,7 +177,7 @@ where
             // Still freezing — surface candidate progress when it changes.
             if self.timing.last_commit_round_progress != Some((received, expected)) {
                 self.timing.last_commit_round_progress = Some((received, expected));
-                self.emit_event(ConversationEvent::CommitRoundProgress { received, expected });
+                self.emit_event(Info::CommitRoundProgress { received, expected });
             }
             return Ok(DispatchOutcome::Done);
         }
@@ -185,7 +185,7 @@ where
 
         let selection_event = self.start_selection();
         let has_proposals = self.queues.approved_proposals_count() > 0;
-        self.emit_event(ConversationEvent::PhaseChange(selection_event));
+        self.emit_event(Info::PhaseChange(selection_event));
 
         let conversation_id = self.conversation_id.clone();
         // Recovery accepts subset candidates: any member may commit whatever
@@ -204,7 +204,7 @@ where
                 // failing to commit; the NoCandidate path below would wrongly
                 // penalize the steward and re-elect. Surface it and retry safely.
                 error!(conversation = %conversation_id, error = %e, "commit-round finalize failed");
-                self.emit_event(ConversationEvent::Error {
+                self.emit_event(Info::Error {
                     operation: "commit_round_finalize".to_owned(),
                     message: e.to_string(),
                 });
@@ -219,14 +219,14 @@ where
             && let Err(e) = self.apply_score_ops(&finalize_result.score_ops)
         {
             error!(conversation = %conversation_id, error = %e, "applying commit-round score ops failed");
-            self.emit_event(ConversationEvent::Error {
+            self.emit_event(Info::Error {
                 operation: "apply_commit_round_score_ops".to_owned(),
                 message: e.to_string(),
             });
         }
 
         if !finalize_result.committed_batch.is_empty() {
-            self.emit_event(ConversationEvent::CommitApplied(std::mem::take(
+            self.emit_event(Info::CommitApplied(std::mem::take(
                 &mut finalize_result.committed_batch,
             )));
         }
@@ -268,7 +268,7 @@ where
                         self.queues.commit_round.clear();
                         self.exit_recovery_mode();
                         let resumed = self.start_working();
-                        self.emit_event(ConversationEvent::PhaseChange(resumed));
+                        self.emit_event(Info::PhaseChange(resumed));
                         return Ok(DispatchOutcome::Done);
                     }
                     return Ok(self.retry_or_exhaust_recovery());
@@ -311,7 +311,7 @@ where
                 };
 
                 let entered_reelection = transition_event == ConversationState::Reelection;
-                self.emit_event(ConversationEvent::PhaseChange(transition_event));
+                self.emit_event(Info::PhaseChange(transition_event));
 
                 // Layer 2 recovery: regenerate the steward list. Only the
                 // responsible proposer's call actually submits.
@@ -334,7 +334,7 @@ where
             self.retry_or_exhaust_recovery()
         } else {
             let resumed = self.start_working();
-            self.emit_event(ConversationEvent::PhaseChange(resumed));
+            self.emit_event(Info::PhaseChange(resumed));
             DispatchOutcome::Done
         }
     }
@@ -348,10 +348,10 @@ where
         if max != 0 && self.recovery_rounds >= max {
             self.exit_recovery_mode();
             let resumed = self.start_working();
-            self.emit_event(ConversationEvent::RecoveryExhausted);
-            self.emit_event(ConversationEvent::PhaseChange(resumed));
+            self.emit_event(Request::RecoveryExhausted);
+            self.emit_event(Info::PhaseChange(resumed));
         } else if let Some(reopened) = self.reopen_recovery_window() {
-            self.emit_event(ConversationEvent::PhaseChange(reopened));
+            self.emit_event(Info::PhaseChange(reopened));
         }
         DispatchOutcome::Done
     }
@@ -389,7 +389,7 @@ where
     /// Hand off the joiner welcome after a commit merged: attach the
     /// `ConversationSync`, broadcast for relay, and surface it locally. Never
     /// propagates — the commit merged, so a sync-build failure surfaces a
-    /// [`ConversationEvent::Error`] and ships `welcome_bytes` with empty sync
+    /// [`crate::Info::Error`] and ships `welcome_bytes` with empty sync
     /// (the joiner attaches to MLS without it).
     pub(crate) fn deliver_welcome<Pr>(
         &mut self,
@@ -409,14 +409,14 @@ where
             Ok(sync_bytes) => welcome.conversation_sync_bytes = sync_bytes.unwrap_or_default(),
             Err(e) => {
                 error!(conversation = %self.conversation_id, error = %e, "welcome ConversationSync build failed");
-                self.emit_event(ConversationEvent::Error {
+                self.emit_event(Info::Error {
                     operation: "welcome_conversation_sync".to_owned(),
                     message: e.to_string(),
                 });
             }
         }
         let broadcast_payload = AppMessage::from(welcome.clone()).encode_to_vec();
-        self.emit_event(ConversationEvent::WelcomeReady {
+        self.emit_event(Obligation::WelcomeReady {
             welcome,
             minted_locally: true,
         });
@@ -537,6 +537,7 @@ where
         };
         if !needs_sync || self.queues.has_election_in_flight() {
             self.timing.sync_request_anchor = None;
+            self.timing.unanswered_sync_rounds = 0;
             return Ok(());
         }
         let now = self.clock.timestamp();
@@ -546,8 +547,14 @@ where
             return Ok(());
         }
         self.timing.sync_request_anchor = Some(now);
+        self.timing.unanswered_sync_rounds += 1;
+        let alert_at = self.config.unanswered_sync_rounds;
+        if alert_at != 0 && self.timing.unanswered_sync_rounds == alert_at {
+            self.emit_event(Request::ConversationSyncUnanswered);
+        }
         info!(
             conversation = %self.conversation_id,
+            rounds = self.timing.unanswered_sync_rounds,
             "requesting conversation sync: local steward list missing or exhausted"
         );
         self.request_conversation_sync(provider, signer)

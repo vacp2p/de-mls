@@ -59,6 +59,11 @@ pub const DEFAULT_RECOVERY_AUTO_COMMIT_DELAY: Duration = Duration::from_secs(5);
 /// commits). See [`ConversationConfig::recovery_max_rounds`].
 pub const DEFAULT_RECOVERY_MAX_ROUNDS: u32 = 0;
 
+/// Default unanswered sync-request rounds before the conversation reports it:
+/// three tries across the answer latency. `0` never reports. See
+/// [`ConversationConfig::unanswered_sync_rounds`].
+pub const DEFAULT_UNANSWERED_SYNC_ROUNDS: u32 = 3;
+
 /// Per-conversation timing and policy config, fixed at conversation creation.
 /// Peer scoring keeps its own config on the [`PeerScoringService`](crate::PeerScoringService)
 /// the integrator builds; the steward-list bounds live here (the list is
@@ -114,8 +119,13 @@ pub struct ConversationConfig {
     /// `Some(ZERO)` = immediate; `Some(d)` = grace then auto. See
     /// [`DEFAULT_RECOVERY_AUTO_COMMIT_DELAY`].
     pub recovery_auto_commit_delay: Option<Duration>,
+    /// How many sync requests may go unanswered before the conversation emits
+    /// [`crate::Request::ConversationSyncUnanswered`]. Rounds are one
+    /// `backup_takeover_window` apart. `0` never emits it; requesting continues
+    /// either way. See [`DEFAULT_UNANSWERED_SYNC_ROUNDS`].
+    pub unanswered_sync_rounds: u32,
     /// Layer-3 recovery stop-line: how many manual+auto rounds to attempt before
-    /// giving up and emitting [`crate::ConversationEvent::RecoveryExhausted`].
+    /// giving up and emitting [`crate::Request::RecoveryExhausted`].
     /// `0` retries forever. See [`DEFAULT_RECOVERY_MAX_ROUNDS`].
     pub recovery_max_rounds: u32,
     /// Steward-list size bounds (`sn_min` / `sn_max`). The list itself is
@@ -141,6 +151,7 @@ impl Default for ConversationConfig {
             dedup_window: DEFAULT_DEDUP_WINDOW,
             recovery_auto_commit_delay: Some(DEFAULT_RECOVERY_AUTO_COMMIT_DELAY),
             recovery_max_rounds: DEFAULT_RECOVERY_MAX_ROUNDS,
+            unanswered_sync_rounds: DEFAULT_UNANSWERED_SYNC_ROUNDS,
             steward_list: StewardListConfig::default(),
         }
     }

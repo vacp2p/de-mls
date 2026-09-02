@@ -1,161 +1,178 @@
-//! Events a [`crate::Conversation`] reports to its integrator.
+//! Facts a [`crate::Conversation`] reports to its integrator.
 //!
-//! A conversation performs no I/O of its own. As it is driven — handling
-//! inbound traffic, polling, or a local action — it records what happened as
-//! [`ConversationEvent`]s in an internal buffer. The integrator drains that
-//! buffer with [`crate::Conversation::drain_events`] and acts on each event:
-//! delivering a message, updating its view, routing to transport, and so on.
-//! Events are fire-and-forget — recording one never blocks on the integrator.
+//! A conversation does no I/O. As it is driven it records what happened in an
+//! internal buffer, which the integrator drains with
+//! [`crate::Conversation::drain_events`] once per cycle. One buffer in the
+//! order things happened, so a decision and the effects it sets in motion stay
+//! together.
+//!
+//! The category says what is lost by dropping one:
+//!
+//! - [`Obligation`] — the integrator must act; nothing else will.
+//! - [`Request`] — a decision; each variant names its fallback, if it has one.
+//! - [`Info`] — restates state that can be queried again.
 
 use crate::{
     ConversationState, Member, MemberId,
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest, MemberWelcome},
 };
 
-/// Something the conversation observed or did, handed to the integrator to act
-/// on. Drained via [`crate::Conversation::drain_events`].
+/// Something the conversation observed or did. Drained via
+/// [`crate::Conversation::drain_events`].
 #[derive(Debug, Clone)]
 pub enum ConversationEvent {
-    /// A decrypted group chat message with the MLS-authenticated [`Member`] who signed it.
-    /// Sender info comes from MLS, Payload is either a chat (`ConversationMessage`)
-    /// or a membership event (`EventMembershipChange`).
+    Obligation(Obligation),
+    Request(Request),
+    Info(Info),
+}
+
+/// Work only the integrator can do. Each is handed over once and kept
+/// nowhere — no query brings one back, and no fallback covers it.
+#[derive(Debug, Clone)]
+pub enum Obligation {
+    /// A decrypted group message and the MLS-authenticated member who signed
+    /// it. The payload is a chat or a membership event.
+    /// The integrator MUST deliver it.
     ConversationMessage { message: AppMessage, sender: Member },
 
-    /// The local member has left the group — its own removal just committed,
-    /// whether a self-leave it asked for or a removal the group decided.
-    /// Nothing more will come from this handle; it can be dropped.
-    Leaving,
-
-    /// A protocol step the conversation was carrying out on its own — say,
-    /// submitting a vote — didn't go through. It stays usable otherwise;
-    /// surface or log the failure as suits the application.
-    Error { operation: String, message: String },
-
-    /// The local member just raised `request` as a proposal, with its own
-    /// creator vote already bundled in. This is simply notice that a proposal
-    /// the member started is now in flight — the peer-raised proposals that
-    /// still need a vote arrive through [`Self::VoteRequested`].
-    OwnProposalSubmitted {
-        proposal_id: u32,
-        request: ConversationUpdateRequest,
-    },
-
-    /// A peer raised a proposal and the local member's vote is now due. Present
-    /// the choice and cast one; left alone, the conversation votes
-    /// automatically once the configured delay passes. The peer-side
-    /// counterpart of [`Self::OwnProposalSubmitted`].
-    VoteRequested {
-        proposal_id: u32,
-        request: ConversationUpdateRequest,
-    },
-
-    /// A commit merged and the conversation advanced to a new MLS epoch.
-    /// `batch` holds the proposals that landed, in the order they applied — the
-    /// membership now reflects them.
-    CommitApplied(Vec<ConversationUpdateRequest>),
-
-    /// The conversation moved into a new lifecycle phase, such as a commit
-    /// round or steward selection — a window into where it sits in its
-    /// commit-and-recovery cycle.
-    PhaseChange(ConversationState),
-
-    /// A merged commit let new members in. This carries the MLS welcome they
-    /// need, with the encrypted `ConversationSync` bundled alongside so the two
-    /// travel together. Every existing member sees it: the steward that
-    /// committed mints it (`minted_locally == true`) and broadcasts it, so the
-    /// rest surface the same welcome (`minted_locally == false`). Carrying it
-    /// to the joiners is the integrator's call — it owns who delivers it and
-    /// how.
+    /// The welcome new members need, with their `ConversationSync` bundled in.
+    /// Every member sees it: the committing steward mints and broadcasts it
+    /// (`minted_locally == true`), the rest surface the copy that arrives.
+    /// The integrator MUST deliver it to the new joiners.
     WelcomeReady {
         welcome: MemberWelcome,
         minted_locally: bool,
     },
 
-    /// A consensus session resolved, `approved` carrying the verdict. It comes
-    /// ahead of the effects it sets in motion — a commit candidate, a freeze, a
-    /// score update — so the decision and the state changes it drives are seen
-    /// together. `timestamp` is the consensus layer's own stamp on the
-    /// resolution.
+    /// The local member has left the group — either it asked to, or the group
+    /// removed it — and the commit has landed. Until that happens, a requested
+    /// leave only shows up in [`crate::Conversation::pending_leave`].
+    /// The integrator MUST drop this handle
+    Left,
+}
+
+/// A decision the conversation would like from the integrator.
+#[derive(Debug, Clone)]
+pub enum Request {
+    /// A peer's proposal needs this member's vote. Silence votes automatically
+    /// once `voting_delay` passes.
+    VoteRequested {
+        proposal_id: u32,
+        request: ConversationUpdateRequest,
+    },
+
+    /// The steward list deadlocked and any member may now commit. Call
+    /// [`crate::Conversation::commit_in_recovery`], or leave it to the
+    /// auto-commit after `recovery_auto_commit_delay`.
+    /// Repeated requests for a `ConversationSync` have gone unanswered, so this
+    /// member is still running without a steward list, peer scores, or protocol
+    /// config of its own. No steward is answering — the epoch steward and every
+    /// backup are silent or unreachable.
+    RecoveryModeOpened,
+
+    /// Recovery ran `recovery_max_rounds` rounds without producing a commit, so
+    /// the conversation stops retrying: the relaxed steward gate closes again
+    /// and the state goes back to `Working`. Nothing was fixed — the deadlock is
+    /// most likely still there, and from here the conversation looks like any
+    /// healthy one, so this event is the only notice of it.
+    ///
+    /// What happens next is the integrator's: call
+    /// [`crate::Conversation::request_recovery`] to open a fresh recovery, or
+    /// stop and tell its user. Never emitted at the default
+    /// `recovery_max_rounds` of `0`, which retries forever.
+    RecoveryExhausted,
+
+    /// Sync requests have gone unanswered `unanswered_sync_rounds` times in a
+    /// row, each a `backup_takeover_window` apart — sustained silence.
+    /// One unanswered request is ordinary and passes without an event.
+    ///
+    /// `poll` keeps asking either way — the count decides when to say so, never
+    /// whether to keep trying. Wait it out, reach the group over transport, or
+    /// tear the conversation down. [`crate::Conversation::is_synced`] reports
+    /// the state at any time.
+    ConversationSyncUnanswered,
+}
+
+/// A notice about state the integrator can query whenever it likes.
+#[derive(Debug, Clone)]
+pub enum Info {
+    /// A step the conversation was taking on its own didn't go through. It
+    /// stays usable; surface or log as suits the application.
+    Error { operation: String, message: String },
+
+    /// A commit merged and the epoch advanced, carrying the proposals that
+    /// landed in the order they applied.
+    CommitApplied(Vec<ConversationUpdateRequest>),
+
+    /// The conversation moved to a new lifecycle phase, such as a commit round
+    /// or steward selection.
+    PhaseChange(ConversationState),
+
+    /// A consensus session has finished, and here's what was decided.
+    /// The `timestamp` is straight from the consensus layer.
+    /// To find out what this was about, use [`crate::Conversation::proposal`] with the `proposal_id`
     ConsensusReached {
         proposal_id: u32,
         approved: bool,
         timestamp: u64,
     },
 
-    /// Progress of a commit round: `received` of `expected` steward commit
-    /// candidates have arrived. Re-emitted whenever the count changes, so it
-    /// can back a progress indicator.
+    /// `received` of the `expected` stewards have broadcast their commit
+    /// candidate for this round — `expected` being the size of the current
+    /// steward list. Emitted only when the count changes; the round closes and
+    /// selection begins once every candidate is in or the freeze window
+    /// elapses.
+    /// [`crate::Conversation::commit_candidate_count`] returns the same pair at any time.
     CommitRoundProgress { received: usize, expected: usize },
 
-    /// Layer-3 recovery opened: the steward list is deadlocked and the steward
-    /// gate is relaxed so any member MAY commit. The integrator decides the
-    /// policy — call [`crate::Conversation::commit_in_recovery`] to mint now,
-    /// or leave it to the auto-fallback that mints on every online node after
-    /// `recovery_auto_commit_delay`.
-    RecoveryModeOpened,
-
-    /// Layer-3 recovery gave up after `recovery_max_rounds` manual+auto rounds
-    /// produced no commit. The conversation leaves recovery for `Working`; the
-    /// integrator decides what an unrecoverable group does (alert, tear down).
-    /// Never emitted when `recovery_max_rounds` is `0` (retry forever).
-    RecoveryExhausted,
-
-    /// The local member joined but its welcome carried no `ConversationSync`, so
-    /// it has no steward list, scores, or protocol config — a degraded join.
-    /// `poll` auto-requests a sync (see
-    /// [`crate::Conversation::request_conversation_sync`]) until a steward
-    /// re-sends it; this event is informational — the integrator can surface it
-    /// but need not drive the request.
-    ConversationSyncMissing,
-
-    /// A `ConversationSync` was adopted and the local member is now bootstrapped.
-    /// Ends the degraded state a [`Self::ConversationSyncMissing`] opened, and
-    /// the poll-driven sync requests stop.
+    /// A `ConversationSync` was adopted and its steward list installed. Either
+    /// the first one, bootstrapping a member whose welcome carried none, or a
+    /// newer election replacing a list that had aged out.
     ConversationSyncApplied,
 
-    /// `member_id`'s peer score moved (RFC §Peer Scoring), from `previous` to
-    /// `score`. Reported net of whatever caused it, so `score` is what
-    /// [`crate::Conversation::member_score`] returns right now, and a member
-    /// whose gains and penalties cancel out is not reported at all.
+    /// A peer's score changed — `score` is the new value,  and `previous` was the old one.
+    /// Not shown if gains and losses cancel out.
     ///
-    /// Two inputs produce one, and they are different kinds of statement:
+    /// A fact, not a verdict: the member keeps every right it had.
     ///
-    /// - **Observed events** — a violation or a successful commit this node saw
-    ///   for itself. "This score moved, `previous` → `score`": a delta.
-    /// - **Synchronization** — a `ConversationSync` carrying what the group
-    ///   already holds. "This score *is* `score`": current state, not
-    ///   movement. `previous` is then what this node had assumed (the default
-    ///   it seeded on join), so a joiner learns where everyone stands rather
-    ///   than watching them get there.
+    /// Acting is the integrator's policy — you can compare
+    /// against [`crate::Conversation::score_threshold`], then call
+    /// [`crate::Conversation::remove_member`] or emergency
+    /// [`crate::Conversation::propose_score_removal`].
     ///
-    /// A fact, not a judgment. The library reads nothing into the movement:
-    /// the member keeps every protocol right it had, and no removal is
-    /// proposed on its own. Interpreting it is the integrator's policy —
-    /// compare either end against [`crate::Conversation::score_threshold`] to
-    /// catch a removal-threshold crossing in either direction, band the range
-    /// however suits the application, or watch the trend. Acting on it means
-    /// calling [`crate::Conversation::remove_member`], or
-    /// [`crate::Conversation::propose_score_removal`] to raise the emergency
-    /// removal the group then votes on.
-    ///
-    /// Peer-score tables are local — they travel only in the joiner bootstrap
-    /// of `ConversationSync`, and each member scores what it observes — so two
-    /// members hold different scores for the same peer and reach any given
-    /// line at different moments, or never. Treat it as this node's reading,
-    /// not a group verdict, and don't let it drive protocol decisions that
-    /// members have to agree on.
+    /// Peer scores are based on each node's own view, so different members might
+    /// see different scores for the same peer at a given moment, but they can resync
+    /// to agree on state when needed. Never use a peer score alone to make decisions
+    /// that require agreement from the group.
     MemberScoreChanged {
         member_id: Vec<u8>,
         previous: i64,
         score: i64,
     },
 
-    /// A merged commit changed the member set: `added` carries each new member as
-    /// an OpenMLS [`Member`] (leaf index + credential + keys), `removed` the
-    /// departed members as [`MemberId`] handles (tagged before the commit, so a
-    /// reused leaf yields distinct handles in `added` and `removed`).
+    /// A commit changed the member set. `removed` handles were tagged before
+    /// the commit, so a reused leaf yields distinct handles on each side.
+    /// The set stays readable through [`crate::Conversation::mls_group`].
     MembersChanged {
         added: Vec<Member>,
         removed: Vec<MemberId>,
     },
+}
+
+impl From<Obligation> for ConversationEvent {
+    fn from(o: Obligation) -> Self {
+        Self::Obligation(o)
+    }
+}
+
+impl From<Request> for ConversationEvent {
+    fn from(r: Request) -> Self {
+        Self::Request(r)
+    }
+}
+
+impl From<Info> for ConversationEvent {
+    fn from(i: Info) -> Self {
+        Self::Info(i)
+    }
 }

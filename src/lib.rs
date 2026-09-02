@@ -21,9 +21,9 @@
 //!
 //! The library exposes the per-conversation [`Conversation`]
 //! handle. It carries no transport: it buffers outbound and consumes inbound
-//! payloads, and the integrator owns routing. A ready-to-use reference
-//! integrator (the multi-conversation `User` with registry + routing +
-//! lifecycle over a transport) lives in the `de-mls-gateway` crate.
+//! payloads, and the integrator owns routing. Everything above one conversation
+//! — the registry of many, transport, and identity — belongs to the
+//! application.
 //!
 //! Integrators drain [`ConversationEvent`] from each conversation (for
 //! transport and UI delivery), feed inbound packets to the conversation, and
@@ -34,21 +34,33 @@
 //! ```ignore
 //! use de_mls::Conversation;
 //!
-//! // Build a conversation from direct arguments: the OpenMLS provider,
-//! // credential + ciphersuite, the plug-in instances, a consensus service,
-//! // and the time source (`clock` is your `WallClock` impl — wrap
-//! // `SystemTime` in production, use `MockClock` in tests).
+//! // Everything the conversation needs is passed in: the OpenMLS provider and
+//! // signer are borrowed per call and stored nowhere, the plug-ins are moved
+//! // in, and `clock` is your `WallClock` (wrap `SystemTime` in production,
+//! // `MockClock` in tests). Pass no `initial_members` for a plain create.
 //! let mut conversation = Conversation::create(
-//!     "de-mls-test", member_id, provider, credential, ciphersuite, &signer,
-//!     consensus, scoring, clock, app_id, config,
+//!     "de-mls-test",
+//!     &provider,
+//!     credential,
+//!     &group_config,
+//!     &signer,
+//!     &consensus,
+//!     scoring,
+//!     clock,
+//!     app_id,
+//!     config,
+//!     &[],
 //! )?;
 //!
 //! // Send a chat message — buffered, never auto-sent.
-//! conversation.send_message(provider, &signer, b"Hello, world!".to_vec())?;
+//! conversation.send_message(&provider, &signer, b"Hello, world!".to_vec())?;
 //!
 //! // Drain outbound and publish it on your own transport.
 //! for out in conversation.drain_outbound() { /* publish */ }
 //! ```
+//!
+//! `tests/standalone_construction.rs` builds this end to end and is compiled on
+//! every run, so it stays honest where this sketch cannot.
 
 /// The [`Conversation`](conversation) handle, per-conversation
 /// state, state machine, and inbound dispatch.

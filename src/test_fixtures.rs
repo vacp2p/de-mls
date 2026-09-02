@@ -14,7 +14,9 @@ use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use openmls::credentials::{BasicCredential, CredentialWithKey};
 use openmls::group::MlsGroupCreateConfig;
+use openmls::key_packages::KeyPackage;
 use openmls::prelude::Ciphersuite;
+use openmls::prelude::tls_codec::Serialize as _;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 
@@ -58,6 +60,26 @@ pub(crate) type TestMls = MlsService;
 /// signer that seeded it (both needed for any signing path the test
 /// exercises). The guard tests this serves early-return before MLS advances,
 /// but the service must still be a real, queryable group.
+/// A key package for a member that has no leaf yet, with the signer that
+/// minted it — the joiner side of an add.
+pub(crate) fn member_key_package(
+    provider: &OpenMlsRustCrypto,
+    member_id: &[u8],
+) -> (Vec<u8>, SignatureKeyPair) {
+    let signer = SignatureKeyPair::new(TEST_SUITE.signature_algorithm()).expect("signer");
+    let credential = CredentialWithKey {
+        credential: BasicCredential::new(member_id.to_vec()).into(),
+        signature_key: signer.to_public_vec().into(),
+    };
+    let kp = KeyPackage::builder()
+        .build(TEST_SUITE, provider, &signer, credential)
+        .expect("key package")
+        .key_package()
+        .tls_serialize_detached()
+        .expect("serialize key package");
+    (kp, signer)
+}
+
 pub(crate) fn make_creator_mls(member_id: &[u8]) -> (TestMls, TestProvider, SignatureKeyPair) {
     let signer = SignatureKeyPair::new(TEST_SUITE.signature_algorithm()).expect("signer");
     let credential = CredentialWithKey {

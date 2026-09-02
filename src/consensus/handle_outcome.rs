@@ -10,8 +10,8 @@ use prost::Message;
 use tracing::info;
 
 use crate::{
-    ConsensusApplyResult, ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
-    ConversationState, PeerScoreStorage, ScoreOp, WallClock, apply_consensus_result,
+    ConsensusApplyResult, ConsensusPlugin, Conversation, ConversationError, ConversationState,
+    Info, PeerScoreStorage, Request, ScoreOp, WallClock, apply_consensus_result,
     emergency_score_ops,
     protos::de_mls::messages::v1::{ConversationUpdateRequest, StewardElectionProposal},
 };
@@ -62,7 +62,7 @@ where
 
         // Emitted before any effects, so the integrator sees the decision
         // in the same polling cycle as the state changes it triggers.
-        self.emit_event(ConversationEvent::ConsensusReached {
+        self.emit_event(Info::ConsensusReached {
             proposal_id,
             approved,
             timestamp,
@@ -106,7 +106,7 @@ where
                 // in `advance_freezing`). No internal mint here.
                 self.enter_recovery_mode();
                 self.start_freezing_and_emit();
-                self.emit_event(ConversationEvent::RecoveryModeOpened);
+                self.emit_event(Request::RecoveryModeOpened);
             }
             ConsensusApplyResult::UrgentRemoval { target } => {
                 // A steward-gated removal: enter freezing and mint it now.
@@ -140,10 +140,10 @@ where
         Ok(())
     }
 
-    /// Emit a [`ConversationEvent::PhaseChange`] if a transition occurred.
+    /// Emit a [`crate::Info::PhaseChange`] if a transition occurred.
     fn emit_phase_change(&self, transition: Option<ConversationState>) {
         if let Some(state) = transition {
-            self.emit_event(ConversationEvent::PhaseChange(state));
+            self.emit_event(Info::PhaseChange(state));
         }
     }
 

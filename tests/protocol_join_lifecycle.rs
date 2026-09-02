@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use common::harness::{TestHarness, fast_config};
 use de_mls::{ConversationConfig, ConversationEvent, StewardListConfig};
+use de_mls::{Info, Request};
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -56,10 +57,11 @@ fn evicted_member_rejoins_at_a_later_epoch() {
     );
 }
 
-/// A joiner adopts the steward list from its welcome sync and reports the
-/// healthy bootstrap — never the degraded `ConversationSyncMissing`.
+/// A joiner adopts the steward list carried in its welcome sync, so it is
+/// bootstrapped the moment it is live — never left in the degraded state a
+/// welcome without a sync would open.
 #[test]
-fn bootstrap_joiner_reports_sync_applied() {
+fn bootstrap_joiner_adopts_the_welcome_sync() {
     let h = TestHarness::<2>::bootstrap(
         [ALICE, BOB],
         "sync-applied",
@@ -69,20 +71,23 @@ fn bootstrap_joiner_reports_sync_applied() {
 
     // Index 0 creates the group and builds the list itself; index 1 joins and
     // adopts the list from the welcome sync.
-    let joiner = h.member(1);
     assert!(
-        joiner
-            .events()
-            .iter()
-            .any(|e| matches!(e, ConversationEvent::ConversationSyncApplied)),
-        "joiner reports the sync it adopted from the welcome"
+        h.member(1).convo().is_synced().expect("sync status"),
+        "the joiner holds the steward list its welcome carried"
     );
     assert!(
-        !joiner
+        h.member(1)
             .events()
             .iter()
-            .any(|e| matches!(e, ConversationEvent::ConversationSyncMissing)),
-        "a healthy join is not degraded"
+            .any(|e| matches!(e, ConversationEvent::Info(Info::ConversationSyncApplied))),
+        "adopting the welcome sync is reported"
+    );
+    assert!(
+        !h.member(1).events().iter().any(|e| matches!(
+            e,
+            ConversationEvent::Request(Request::ConversationSyncUnanswered)
+        )),
+        "a healthy join never escalates to unanswered"
     );
 }
 

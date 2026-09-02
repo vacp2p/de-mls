@@ -15,7 +15,7 @@ use tracing::info;
 
 use crate::{
     CommitRoundResult, ConsensusEngine, ConsensusPlugin, ConversationConfig, ConversationError,
-    ConversationEvent, ConversationQueues, ConversationState, ConversationStateMachine,
+    ConversationEvent, ConversationQueues, ConversationState, ConversationStateMachine, Info,
     OperatingMode, Outbound, PeerScoreStorage, PeerScoringService, PhaseTimer, ProcessResult,
     ProposalKind, ScoreChange, ScoreOp, ScoreSnapshot, StewardListService, Timestamp, WallClock,
     consensus::outcome_bus::OutcomeReceiver,
@@ -84,7 +84,7 @@ pub(crate) struct Timing {
     /// `tick_deadlines` which calls `consensus.handle_consensus_timeout`.
     /// Removed when the consensus session resolves naturally via `handle_consensus_outcome`.
     pub(crate) pending_consensus_timeouts: HashMap<u32, Timestamp>,
-    /// Last commit-round progress snapshot emitted as `ConversationEvent::CommitRoundProgress`.
+    /// Last commit-round progress snapshot emitted as `Info::CommitRoundProgress`.
     /// `poll()` compares the current `(received, expected)` against this and
     /// emits a new event only when the count changes, avoiding repeated events
     /// on consecutive polling ticks that observe the same progress. Reset to
@@ -109,6 +109,10 @@ pub(crate) struct Timing {
     /// Rate-limited to one request per `backup_takeover_window` (the answer
     /// latency); cleared once a usable list is installed.
     pub(crate) sync_request_anchor: Option<Timestamp>,
+    /// Consecutive sync requests this member has sent without an answer.
+    /// Reset when a sync is applied or the list becomes usable again; at
+    /// `config.unanswered_sync_rounds` it surfaces `ConversationSyncUnanswered` once.
+    pub(crate) unanswered_sync_rounds: u32,
     /// Anchor for the reelection-silence watchdog: set when a poll tick finds
     /// the conversation parked in `Reelection` with no election in flight. A
     /// full silent window past it counts as a rejected election round (see
@@ -131,6 +135,7 @@ impl Timing {
             pending_auto_votes: HashMap::new(),
             pending_consensus_timeouts: HashMap::new(),
             last_commit_round_progress: None,
+            unanswered_sync_rounds: 0,
             buffered_propose_anchor: None,
             sync_resend_anchor: None,
             sync_request_anchor: None,
@@ -426,12 +431,12 @@ where
             // A mint failure stalls this round and repeats on every retry, and
             // the phase change alone reads as a healthy freeze — so the
             // integrator has no other view of it.
-            self.emit_event(ConversationEvent::Error {
+            self.emit_event(Info::Error {
                 operation: "commit_candidate_build".to_string(),
                 message: e.to_string(),
             });
         }
-        self.emit_event(ConversationEvent::PhaseChange(event));
+        self.emit_event(Info::PhaseChange(event));
         Ok(())
     }
 
@@ -545,7 +550,8 @@ where
     /// methods that emit during a brief read guard don't need to escalate
     /// to a write guard. Fire-and-forget (no `Result`), but a poisoned
     /// buffer is logged rather than silently dropped.
-    pub(crate) fn emit_event(&self, event: ConversationEvent) {
+    pub(crate) fn emit_event(&self, event: impl Into<ConversationEvent>) {
+        let event = event.into();
         match self.pending_events.lock() {
             Ok(mut buf) => buf.push(event),
             Err(_) => {
@@ -554,7 +560,7 @@ where
         }
     }
 
-    /// Apply `ops` to the peer-score table, emitting [`ConversationEvent::MemberScoreChanged`]
+    /// Apply `ops` to the peer-score table, emitting [`crate::Info::MemberScoreChanged`]
     /// for each member whose score moved.
     ///
     /// This is the only way the library notifies the integrator about a member's score change.
@@ -567,7 +573,7 @@ where
     }
 
     /// Adopt a bootstrap score snapshot, emitting
-    /// [`ConversationEvent::MemberScoreChanged`] for each member it moved.
+    /// [`crate::Info::MemberScoreChanged`] for each member it moved.
     ///
     /// The snapshot counterpart of [`Self::apply_score_ops`]: every score
     /// mutation on a `Conversation` goes through one of the two, so reporting
@@ -581,7 +587,7 @@ where
         Ok(())
     }
 
-    /// Emit one [`ConversationEvent::MemberScoreChanged`] per moved score.
+    /// Emit one [`crate::Info::MemberScoreChanged`] per moved score.
     fn emit_score_changes(&self, changes: Vec<ScoreChange>) {
         for change in changes {
             info!(
@@ -591,7 +597,7 @@ where
                 score = change.score,
                 "peer score changed"
             );
-            self.emit_event(ConversationEvent::MemberScoreChanged {
+            self.emit_event(Info::MemberScoreChanged {
                 member_id: change.member_id,
                 previous: change.previous,
                 score: change.score,
@@ -725,8 +731,7 @@ where
     }
 
     /// Drop every pending auto-vote on this conversation. Called on every path that
-    /// emits `Leaving` so no stale entries fire against a conversation we've
-    /// left.
+    /// emits `Left` so no stale entries fire against a conversation we've left.
     pub(crate) fn cancel_all_auto_votes(&mut self) {
         self.timing.pending_auto_votes.clear();
     }
@@ -876,6 +881,7 @@ mod tests {
         FailingPeerScoreStorage, TestMls, TestProvider, make_creator_mls,
         make_test_consensus_service, steward_service_member, steward_service_steward,
     };
+    use crate::{Obligation, Request};
     use crate::{PeerScoringService, ScoringConfig, StewardListService};
     use std::collections::HashMap;
 
@@ -1007,11 +1013,11 @@ mod tests {
             .drain_events()
             .into_iter()
             .filter_map(|e| match e {
-                ConversationEvent::MemberScoreChanged {
+                ConversationEvent::Info(Info::MemberScoreChanged {
                     member_id,
                     previous,
                     score,
-                } => Some((member_id, previous, score)),
+                }) => Some((member_id, previous, score)),
                 _ => None,
             })
             .collect();
@@ -1047,9 +1053,9 @@ mod tests {
         convo.apply_score_ops(&[penalty]).expect("score op applies");
 
         let fell_below = convo.drain_events().into_iter().any(|e| match e {
-            ConversationEvent::MemberScoreChanged {
+            ConversationEvent::Info(Info::MemberScoreChanged {
                 previous, score, ..
-            } => previous > threshold && score <= threshold,
+            }) => previous > threshold && score <= threshold,
             _ => false,
         });
         assert!(fell_below, "the crossing is visible in the event pair");
@@ -1085,7 +1091,7 @@ mod tests {
             !convo
                 .drain_events()
                 .iter()
-                .any(|e| matches!(e, ConversationEvent::MemberScoreChanged { .. })),
+                .any(|e| matches!(e, ConversationEvent::Info(Info::MemberScoreChanged { .. }))),
             "nothing landed, so nothing is reported"
         );
     }
@@ -1109,7 +1115,7 @@ mod tests {
         let errors: Vec<_> = convo
             .drain_events()
             .into_iter()
-            .filter(|e| matches!(e, ConversationEvent::Error { .. }))
+            .filter(|e| matches!(e, ConversationEvent::Info(Info::Error { .. })))
             .collect();
         assert!(
             !errors.is_empty(),
@@ -1170,16 +1176,19 @@ mod tests {
     #[test]
     fn emit_event_then_drain_returns_insertion_order_and_clears_buffer() {
         let conversation = make_conversation_working();
-        conversation.emit_event(ConversationEvent::PhaseChange(ConversationState::Working));
-        conversation.emit_event(ConversationEvent::Leaving);
+        conversation.emit_event(Info::PhaseChange(ConversationState::Working));
+        conversation.emit_event(Obligation::Left);
 
         let drained = conversation.drain_events();
         assert_eq!(drained.len(), 2);
         assert!(matches!(
             drained[0],
-            ConversationEvent::PhaseChange(ConversationState::Working)
+            ConversationEvent::Info(Info::PhaseChange(ConversationState::Working))
         ));
-        assert!(matches!(drained[1], ConversationEvent::Leaving));
+        assert!(matches!(
+            drained[1],
+            ConversationEvent::Obligation(Obligation::Left)
+        ));
 
         // Second drain returns empty — buffer was cleared.
         assert!(conversation.drain_events().is_empty());
@@ -1535,7 +1544,7 @@ mod tests {
             !conversation
                 .drain_events()
                 .iter()
-                .any(|e| matches!(e, ConversationEvent::RecoveryExhausted)),
+                .any(|e| matches!(e, ConversationEvent::Request(Request::RecoveryExhausted))),
             "an empty-queue exit is not an exhaustion"
         );
     }
@@ -1582,7 +1591,7 @@ mod tests {
             conversation
                 .drain_events()
                 .iter()
-                .any(|e| matches!(e, ConversationEvent::RecoveryExhausted)),
+                .any(|e| matches!(e, ConversationEvent::Request(Request::RecoveryExhausted))),
             "RecoveryExhausted must fire at the stop line"
         );
     }
@@ -1615,7 +1624,7 @@ mod tests {
                 !conversation
                     .drain_events()
                     .iter()
-                    .any(|e| matches!(e, ConversationEvent::RecoveryExhausted)),
+                    .any(|e| matches!(e, ConversationEvent::Request(Request::RecoveryExhausted))),
                 "round {round}: RecoveryExhausted must never fire when max_rounds is 0"
             );
         }
@@ -1647,7 +1656,7 @@ mod tests {
             conversation
                 .drain_events()
                 .iter()
-                .any(|e| matches!(e, ConversationEvent::RecoveryExhausted)),
+                .any(|e| matches!(e, ConversationEvent::Request(Request::RecoveryExhausted))),
             "RecoveryExhausted must be emitted"
         );
     }
