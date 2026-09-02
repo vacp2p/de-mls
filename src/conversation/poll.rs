@@ -29,9 +29,9 @@ where
     /// Drive one polling cycle: tick consensus deadlines, advance freeze
     /// state, and check steward inactivity.
     ///
-    /// Best-effort: each step runs regardless of whether the previous one
-    /// failed; step errors are transient (a step that can't act this cycle
-    /// retries on the next) and are logged rather than surfaced.
+    /// Every step runs even if an earlier one failed, so there is no single
+    /// error to return. Each failure arrives as [`crate::Info::Error`] naming
+    /// its step.
     ///
     /// Drain what the cycle produced with [`Conversation::drain_events`] and
     /// [`Conversation::drain_outbound`]. Read [`Conversation::next_wakeup_in`]
@@ -47,53 +47,35 @@ where
     {
         self.tick_deadlines(provider, signer);
 
-        if let Err(e) = self.advance_freezing(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "advance_freezing error in poll"
-            );
-        }
+        let result = self.advance_freezing(provider, signer);
+        self.report_step("advance_freezing", result);
 
-        if let Err(e) = self.drive_buffered_proposals(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "buffered-proposal drive error in poll"
-            );
-        }
+        let result = self.drive_buffered_proposals(provider, signer);
+        self.report_step("drive_buffered_proposals", result);
 
-        if let Err(e) = self.drive_sync_resend(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "sync-resend drive error in poll"
-            );
-        }
+        let result = self.drive_sync_resend(provider, signer);
+        self.report_step("drive_sync_resend", result);
 
-        if let Err(e) = self.drive_sync_request(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "sync-request drive error in poll"
-            );
-        }
+        let result = self.drive_sync_request(provider, signer);
+        self.report_step("drive_sync_request", result);
 
-        if let Err(e) = self.start_freeze_on_inactivity(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "inactivity-freeze error in poll"
-            );
-        }
+        let result = self.start_freeze_on_inactivity(provider, signer);
+        self.report_step("start_freeze_on_inactivity", result);
 
-        if let Err(e) = self.drive_reelection_retry(provider, signer) {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "reelection-retry drive error in poll"
-            );
-        }
+        let result = self.drive_reelection_retry(provider, signer);
+        self.report_step("drive_reelection_retry", result);
+    }
+
+    /// Log a failed polling step and report it to the integrator.
+    fn report_step(&self, operation: &str, result: Result<(), ConversationError>) {
+        let Err(e) = result else { return };
+        warn!(
+            conversation = %self.conversation_id,
+            operation,
+            error = %e,
+            "polling step failed"
+        );
+        self.report_failure(operation, &e);
     }
 
     /// Drive the freeze phase forward. While `Freezing`, emits

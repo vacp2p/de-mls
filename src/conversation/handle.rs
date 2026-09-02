@@ -552,6 +552,15 @@ where
         }
     }
 
+    /// Tell the integrator about a failure on a path it never called. There
+    /// is no `Result` to return here, so the event is the only way out.
+    pub(crate) fn report_failure(&self, operation: &str, error: &ConversationError) {
+        self.emit_event(Info::Error {
+            operation: operation.to_owned(),
+            message: error.to_string(),
+        });
+    }
+
     /// Apply `ops` to the peer-score table, emitting [`crate::Info::MemberScoreChanged`]
     /// for each member whose score moved.
     ///
