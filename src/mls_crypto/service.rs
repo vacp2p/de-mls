@@ -178,11 +178,7 @@ impl MlsService {
         &self.conversation_id
     }
 
-    /// The MLS group, for reading.
-    ///
-    /// Every OpenMLS read takes `&self`, so a shared borrow reaches the whole
-    /// read API. Operations that change the tree are this service's own, and
-    /// keep de-mls's view in step with the epoch they advance.
+    /// Provides read-only access to the underlying MLS group using the OpenMLS API.
     pub fn group(&self) -> &MlsGroup {
         &self.group
     }
