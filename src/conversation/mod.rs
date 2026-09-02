@@ -1,7 +1,7 @@
 //! Per-conversation state and the [`Conversation`] handle.
 //!
 //! The leaf modules hold the protocol-state pieces — `queues`
-//! ([`ConversationQueues`] + dedup caches), `state_machine` (state enum +
+//! (`ConversationQueues` + dedup caches), `state_machine` (state enum +
 //! transitions), `config` (durable timing/protocol config), and `util`
 //! (member-set helpers). `handle` defines the [`Conversation`] struct, and
 //! its sibling modules (`construct`, `poll`, `steward`, `messaging`, `query`,
@@ -35,7 +35,7 @@ pub use messaging::Outbound;
 pub use state_machine::ConversationState;
 
 pub(crate) use handle::ConversationServices;
-pub use inbound::decode_inbound_payload;
-pub use queues::{ConversationQueues, ProposalId};
+pub(crate) use inbound::decode_inbound_payload;
+pub(crate) use queues::ConversationQueues;
 pub(crate) use state_machine::{ConversationStateMachine, OperatingMode};
 pub(crate) use util::{in_flight_target, member_set, self_leave_proposal_id, target_member_id_of};

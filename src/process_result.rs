@@ -13,10 +13,11 @@ use crate::{
     },
 };
 
-/// Outcome of processing one inbound packet. The application layer should matches this
-/// directly and dispatches the side effects.
+/// What decoding one inbound packet found — the vocabulary between
+/// `decode_inbound` and `dispatch_inbound_result`. Internal: the integrator
+/// sees events and outbound, never this.
 #[derive(Debug, Clone)]
-pub enum ProcessResult {
+pub(crate) enum ProcessResult {
     /// Decrypted application message, paired with its MLS-authenticated sender
     /// as an OpenMLS [`Member`] (credential + signing key + leaf), ready to
     /// deliver to the UI.
@@ -59,7 +60,7 @@ pub enum ProcessResult {
 /// Why a [`ProcessResult::Noop`] was returned. One variant per producer
 /// site so the dispatch layer can match on the specific case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoopReason {
+pub(crate) enum NoopReason {
     /// Decrypted application message had no recognized payload variant.
     UnknownAppMessage,
     /// Fast-path proposal rejected: MLS sender doesn't match the
@@ -69,8 +70,6 @@ pub enum NoopReason {
     BanTargetNotMember,
     /// Decrypt returned `Ignored` (wrong epoch or wrong conversation).
     DecryptIgnored,
-    /// No approved proposals to commit.
-    NoApprovedProposals,
     /// Commit hash matches a recent committed batch — duplicate broadcast.
     AlreadyCommitted,
     /// Candidate carried an empty proposals or commit payload.
@@ -182,7 +181,7 @@ impl ViolationEvidence {
     /// for violation types that have no target-side score (`ScoreBelowThreshold`
     /// drives a removal, not a penalty; `Deadlock` has no target;
     /// `Unspecified` and unknown wire values are malformed).
-    pub fn target_score_event(&self) -> Option<ScoreEvent> {
+    pub(crate) fn target_score_event(&self) -> Option<ScoreEvent> {
         match ViolationType::try_from(self.violation_type) {
             Ok(ViolationType::BrokenCommit) => Some(ScoreEvent::BrokenCommit),
             Ok(ViolationType::BrokenMlsProposal) => Some(ScoreEvent::BrokenMlsProposal),
@@ -197,7 +196,7 @@ impl ViolationEvidence {
 
     /// `ScoreOp` applying [`Self::target_score_event`] to [`Self::target_member_id`].
     /// `None` when the violation type carries no target-side score.
-    pub fn target_score_op(&self) -> Option<ScoreOp> {
+    pub(crate) fn target_score_op(&self) -> Option<ScoreOp> {
         Some(ScoreOp {
             member_id: self.target_member_id.clone(),
             event: self.target_score_event()?,

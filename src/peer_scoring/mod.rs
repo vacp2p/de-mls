@@ -14,10 +14,11 @@ mod service;
 mod storage;
 mod types;
 
-pub use helpers::{emergency_score_ops, scoring_member_diff};
+pub(crate) use helpers::{emergency_score_ops, scoring_member_diff};
 pub use service::PeerScoringService;
 pub use storage::PeerScoreStorage;
 pub use types::{
-    DEFAULT_PEER_SCORE, DEFAULT_THRESHOLD_PEER_SCORE, ScoreChange, ScoreEvent, ScoreOp,
-    ScoreSnapshot, ScoringConfig, ScoringMemberDiff, default_score_deltas,
+    DEFAULT_PEER_SCORE, DEFAULT_THRESHOLD_PEER_SCORE, ScoreEvent, ScoringConfig,
+    default_score_deltas,
 };
+pub(crate) use types::{ScoreChange, ScoreOp, ScoreSnapshot, ScoringMemberDiff};

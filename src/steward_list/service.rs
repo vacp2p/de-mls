@@ -49,10 +49,10 @@ impl Display for ElectionSkip {
     }
 }
 
-/// Restorable state of a [`StewardListService`]: the installed list and the
-/// retry counters. The conversation-id salt isn't stored — the library re-seeds
-/// it at restore. Pulled by-request for the integrator to fold into
-/// a conversation snapshot.
+/// The installed list plus the election retry counters. The sort salt isn't
+/// stored — it's re-seeded at restore. Taken with
+/// [`crate::Conversation::steward_list_snapshot`], put back with
+/// [`crate::Conversation::restore_steward_list`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StewardListSnapshot {
     list: StewardList,
@@ -179,34 +179,11 @@ impl StewardListService {
         }
     }
 
-    /// Eligible stewards on the active list (for `ConversationSync.steward_members`).
-    pub fn steward_members<F: Fn(&[u8]) -> bool>(&self, eligible: F) -> Vec<Vec<u8>> {
-        self.list
-            .as_ref()
-            .map(|l| {
-                l.members()
-                    .iter()
-                    .filter(|m| eligible(m))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// The member responsible for proposing an election: the first eligible
-    /// steward at the list's election-epoch slot. `None` with no list. Used to
-    /// authorize a single proposer and recorded in `ConversationSync`.
-    pub fn election_proposer<F: Fn(&[u8]) -> bool>(&self, eligible: F) -> Option<&[u8]> {
-        self.list
-            .as_ref()
-            .and_then(|l| l.epoch_steward(l.election_epoch(), eligible))
-    }
-
     /// The member authorized to act for election retry round `round`: entry
     /// `round % len` of the authority sequence — the installed list's eligible
     /// members in rotation order, followed by the remaining eligible
-    /// candidates in ascending id order. Round 0 is the classic
-    /// [`Self::election_proposer`]; every failed round (rejected by vote or
+    /// candidates in ascending id order. Round 0 is the eligible steward at the
+    /// list's election-epoch slot; every failed round (rejected by vote or
     /// silent past the reelection window) hands authority to the next entry,
     /// so an unresponsive proposer can't strand the election or the
     /// `Deadlock` escalation. `None` when nobody is eligible.
@@ -469,17 +446,6 @@ mod tests {
     }
 
     #[test]
-    fn steward_members_returns_filtered_list() {
-        let mut p = StewardListService::empty(config());
-        let mems = members(&[1, 2, 3]);
-        p.install_list(0, &mems, 3, 0).unwrap();
-        let dropped = mems[0].clone();
-        let filtered = p.steward_members(|c: &[u8]| c != dropped.as_slice());
-        assert_eq!(filtered.len(), 2);
-        assert!(filtered.iter().all(|m| m != &dropped));
-    }
-
-    #[test]
     fn set_max_retries_updates_threshold() {
         let mut p = StewardListService::empty(config());
         p.set_max_retries(3);
@@ -496,28 +462,18 @@ mod tests {
         );
     }
 
+    /// Round 0 hands authority to the eligible steward at the list's
+    /// election-epoch slot; later rounds walk on from there.
     #[test]
-    fn election_proposer_walks_eligibility() {
+    fn responsible_proposer_round_zero_is_the_election_epoch_steward() {
         let mut p = StewardListService::empty(StewardListConfig::new(3, 3).unwrap());
         let mems = members(&[1, 2, 3]);
         p.install_list(0, &mems, 3, 0).unwrap();
 
-        let proposer = p.election_proposer(|_: &[u8]| true).unwrap().to_vec();
-        let next = p
-            .election_proposer(|c: &[u8]| c != proposer.as_slice())
-            .unwrap();
-        assert_ne!(next, proposer.as_slice());
-    }
-
-    #[test]
-    fn responsible_proposer_round_zero_matches_election_proposer() {
-        let mut p = StewardListService::empty(StewardListConfig::new(3, 3).unwrap());
-        let mems = members(&[1, 2, 3]);
-        p.install_list(0, &mems, 3, 0).unwrap();
-
+        let list = p.current_list().unwrap();
         assert_eq!(
             p.responsible_proposer(0, &mems, |_: &[u8]| true),
-            p.election_proposer(|_: &[u8]| true),
+            list.epoch_steward(list.election_epoch(), |_: &[u8]| true),
         );
     }
 

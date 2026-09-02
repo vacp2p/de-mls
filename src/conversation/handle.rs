@@ -1184,6 +1184,32 @@ mod tests {
         assert!(conversation.drain_events().is_empty());
     }
 
+    /// The snapshot round-trip carries the installed list and the retry
+    /// counter back onto a conversation that has neither.
+    #[test]
+    fn steward_list_snapshot_restores_list_and_retry_round() {
+        let (steward, _provider, _signer) = make_steward_conversation();
+        let snapshot = steward
+            .steward_list_snapshot()
+            .expect("a conversation with an installed list can snapshot");
+
+        let mut plain = make_conversation_working();
+        assert!(
+            plain.steward_list_snapshot().is_err(),
+            "no list installed yet"
+        );
+        assert!(!plain.is_steward(), "and no steward role");
+
+        plain.restore_steward_list(snapshot);
+
+        assert!(plain.is_steward(), "restored list reinstates the role");
+        assert_eq!(
+            plain.epoch_and_retry().unwrap(),
+            steward.epoch_and_retry().unwrap(),
+            "retry round travels with the list"
+        );
+    }
+
     #[test]
     fn validate_election_list_recomputes_from_local_members() {
         use crate::protos::de_mls::messages::v1::StewardElectionProposal;
