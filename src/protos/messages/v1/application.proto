@@ -12,14 +12,11 @@ message AppMessage {
     BanRequest ban_request = 2;
     consensus.v1.Proposal proposal = 3;
     consensus.v1.Vote vote = 4;
-    VotePayload vote_payload = 5;
-    UserVote user_vote = 6;
-    ProposalAdded proposal_added = 7;
-    CommitCandidate commit_candidate = 8;
-    ConversationSync conversation_sync = 9;
-    MemberWelcome member_welcome = 10;
-    EventMembershipChange membership_change = 11;
-    ConversationSyncRequest conversation_sync_request = 12;
+    CommitCandidate commit_candidate = 5;
+    ConversationSync conversation_sync = 6;
+    MemberWelcome member_welcome = 7;
+    EventMembershipChange membership_change = 8;
+    ConversationSyncRequest conversation_sync_request = 9;
   }
 }
 
@@ -45,24 +42,11 @@ enum TypeMembershipChange{
 
 message CommitCandidate {
   bytes conversation_id = 1;
-  bytes commit_message = 3;
-  bytes steward_member_id = 4;
+  bytes commit_message = 2;
+  bytes steward_member_id = 3;
   // Proposals the commit carries inline: a pre-stage ranking input, verified
   // against the staged commit during validation.
-  uint32 proposal_count = 5;
-}
-
-// Yes/No vote for a given proposal. Based on the result, the `Vote` will be created.
-message UserVote {
-  uint32 proposal_id = 1;
-  bool vote = 2;
-  string conversation_id = 3;
-}
-
-// Proposal added message is sent to the UI when a new proposal is added to the conversation.
-message ProposalAdded {
-  string conversation_id = 1;
-  ConversationUpdateRequest request = 2;
+  uint32 proposal_count = 4;
 }
 
 message ConversationUpdateRequest {
@@ -170,17 +154,4 @@ message TimingConfig {
   uint64 consensus_timeout_ms = 4;
   uint64 retry_window_ms = 5; // RFC §Inactivity Timer #2
   uint64 backup_takeover_window_ms = 6;   // RFC §Inactivity Timer #3 (backup covers a silent steward)
-}
-
-enum Outcome {
-  OUTCOME_UNSPECIFIED = 0;
-  OUTCOME_ACCEPTED = 1;
-  OUTCOME_REJECTED = 2;
-}
-
-message VotePayload {
-  string conversation_id = 41;
-  uint32 proposal_id = 42;
-  bytes payload = 43;
-  uint64 timestamp = 44;
 }
