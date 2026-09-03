@@ -359,16 +359,16 @@ where
         }
 
         let CommitArtifacts {
-            proposals: mls_proposals,
             commit,
+            proposal_count,
             welcome,
         } = mls.create_commit_candidate(provider, signer, &updates)?;
 
         let candidate = CommitCandidate {
             conversation_id: self.queues.name_bytes().to_vec(),
-            mls_proposals,
             commit_message: commit,
             steward_member_id: self_member_id.to_vec(),
+            proposal_count: proposal_count as u32,
         };
 
         // Welcome bytes are buffered here but deferred until our merge, so
@@ -1478,7 +1478,7 @@ mod tests {
         // Seed our own candidate into the round, as building one would.
         let candidate = CommitCandidate {
             conversation_id: b"g".to_vec(),
-            mls_proposals: vec![vec![0x01; 8]],
+            proposal_count: 1,
             commit_message: vec![0x02; 32],
             steward_member_id: conversation.self_member_id.to_vec(),
         };

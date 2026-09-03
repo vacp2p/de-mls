@@ -45,9 +45,11 @@ enum TypeMembershipChange{
 
 message CommitCandidate {
   bytes conversation_id = 1;
-  repeated bytes mls_proposals = 2;
   bytes commit_message = 3;
   bytes steward_member_id = 4;
+  // Proposals the commit carries inline: a pre-stage ranking input, verified
+  // against the staged commit during validation.
+  uint32 proposal_count = 5;
 }
 
 // Yes/No vote for a given proposal. Based on the result, the `Vote` will be created.

@@ -20,20 +20,22 @@ use crate::{
     },
 };
 
+#[derive(Debug)]
 pub enum StagingOutcome {
-    /// Staged cleanly; senders are internally consistent.
+    /// Staged cleanly; the wire claims match the staged commit.
     Staged {
         commit_sender: Vec<u8>,
         self_removed: bool,
         commit_actions: Vec<MlsProposalOutput>,
     },
-    /// MLS rejected a piece (bad wire, protocol error).
+    /// MLS rejected the commit (bad wire, protocol error).
     Abort,
-    /// Staged, but a sender-consistency invariant failed.
+    /// Staged, but a wire claim (`steward_member_id`, `proposal_count`)
+    /// contradicts the staged commit.
     Violation(ViolationEvidence),
 }
 
-/// Stage proposals and commit, cross-checking sender consistency along the way.
+/// Stage the commit and cross-check the candidate's wire claims against it.
 ///
 /// Leaves MLS in the staged state on `Staged`; the caller must clean up
 /// via `discard_staged_commit` for `Abort` / `Violation`.
@@ -49,28 +51,18 @@ where
     <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
 {
     let staged_result = mls
-        .stage_remote_commit(provider, &candidate.mls_proposals, &candidate.commit_message)
+        .stage_remote_commit(provider, &candidate.commit_message)
         .inspect_err(|e| {
             tracing::debug!(conversation = conversation_id, error = %e, "candidate failed to stage");
         });
 
-    let (commit_sender, self_removed, commit_actions) = match staged_result {
+    let (commit_sender, self_removed, commit_actions, staged_count) = match staged_result {
         Ok(StagedCandidateResult::Staged {
             commit_sender,
             self_removed,
             actions,
-        }) => (commit_sender, self_removed, actions),
-        Ok(StagedCandidateResult::BundleSenderMismatch { commit_sender }) => {
-            tracing::warn!(
-                conversation = conversation_id,
-                "violation: bundled proposals don't match the commit sender"
-            );
-            return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
-                commit_sender,
-                ctx.current_epoch,
-                "commit bundles proposals not signed by the committer",
-            )));
-        }
+            proposal_count,
+        }) => (commit_sender, self_removed, actions, proposal_count),
         Ok(StagedCandidateResult::Aborted) | Err(_) => return Ok(StagingOutcome::Abort),
     };
 
@@ -86,6 +78,22 @@ where
             commit_sender,
             ctx.current_epoch,
             "commit candidate's steward_member_id doesn't match MLS commit sender",
+        )));
+    }
+
+    // The wire-claimed count fed the pre-stage ranking; a mismatch with the
+    // staged commit gamed the selection order. Attributed to the MLS signer.
+    if staged_count != candidate.proposal_count as usize {
+        tracing::warn!(
+            conversation = conversation_id,
+            claimed = candidate.proposal_count,
+            staged = staged_count,
+            "violation: claimed proposal count doesn't match the staged commit"
+        );
+        return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
+            commit_sender,
+            ctx.current_epoch,
+            "commit candidate's claimed proposal count doesn't match its actions",
         )));
     }
 
@@ -222,7 +230,7 @@ pub fn rank_applicable_candidates(
     let mut sorted: Vec<_> = candidates
         .into_iter()
         .filter(|c| {
-            let n = c.candidate_msg.mls_proposals.len();
+            let n = c.candidate_msg.proposal_count as usize;
             if allow_subset {
                 n <= ctx.mls_count
             } else {
@@ -255,9 +263,8 @@ fn compare_candidate_priority(
     // In priority order: largest proposal count (`b` before `a` for descending),
     // then epoch steward, then smallest `steward_member_id`, then lowest hash.
     b.candidate_msg
-        .mls_proposals
-        .len()
-        .cmp(&a.candidate_msg.mls_proposals.len())
+        .proposal_count
+        .cmp(&a.candidate_msg.proposal_count)
         .then_with(|| tier(a).cmp(&tier(b)))
         .then_with(|| {
             a.candidate_msg
@@ -345,9 +352,9 @@ mod tests {
         BufferedCommitCandidate {
             candidate_msg: CommitCandidate {
                 conversation_id: b"test-conversation".to_vec(),
-                mls_proposals: vec![vec![0xFF; 10]; actions_count],
+                proposal_count: actions_count as u32,
                 // commit_message is irrelevant to priority ordering (which
-                // keys off mls_proposals/steward_member_id/commit_hash).
+                // keys off proposal_count/steward_member_id/commit_hash).
                 commit_message: vec![0u8; 32],
                 steward_member_id,
             },
@@ -372,7 +379,7 @@ mod tests {
         sort_by_priority(&mut candidates, Some(&epoch_id));
 
         assert_eq!(candidates[0].candidate_msg.steward_member_id, other_id);
-        assert_eq!(candidates[0].candidate_msg.mls_proposals.len(), 5);
+        assert_eq!(candidates[0].candidate_msg.proposal_count as usize, 5);
     }
 
     /// Second criterion: equal action count → epoch steward wins on tier.
@@ -464,5 +471,65 @@ mod tests {
         assert_eq!(candidates[0].candidate_msg.steward_member_id, other_b);
         assert_eq!(candidates[1].candidate_msg.steward_member_id, epoch_id);
         assert_eq!(candidates[2].candidate_msg.steward_member_id, other_a);
+    }
+
+    /// A claimed count that mismatches the staged commit is a violation
+    /// pinned on the MLS-verified signer; an honest claim stages cleanly.
+    #[test]
+    fn a_lying_proposal_count_is_a_violation_and_an_honest_one_stages() {
+        use crate::mls_crypto::{MlsCommitInput, member_id_of};
+        use crate::protos::de_mls::messages::v1::CommitCandidate;
+        use crate::test_fixtures::{TestProvider, make_creator_mls, member_key_package};
+
+        let (mut alice, provider_a, signer_a) = make_creator_mls(b"alice");
+        let provider_b = TestProvider::default();
+        let (bob_kp, bob_signer) = member_key_package(&provider_b, b"bob");
+        let artifacts = alice
+            .create_commit_candidate(&provider_a, &signer_a, &[MlsCommitInput::Add(bob_kp)])
+            .expect("add bob");
+        alice.merge_own_commit(&provider_a).unwrap();
+        let mut bob = crate::mls_crypto::MlsService::new_from_welcome(
+            &provider_b,
+            &artifacts.welcome.unwrap(),
+            openmls::group::MlsGroupJoinConfig::builder(),
+        )
+        .unwrap()
+        .unwrap();
+        let bob_id = member_id_of(bob.group().own_leaf_index());
+
+        let candidate_from_bob = |mls: &mut crate::mls_crypto::MlsService, claim: u32| {
+            let carol_kp = member_key_package(&provider_b, b"carol").0;
+            let built = mls
+                .create_commit_candidate(&provider_b, &bob_signer, &[MlsCommitInput::Add(carol_kp)])
+                .expect("bob's candidate");
+            CommitCandidate {
+                conversation_id: b"test-conversation".to_vec(),
+                commit_message: built.commit,
+                steward_member_id: bob_id.clone(),
+                proposal_count: claim,
+            }
+        };
+        let ctx = ctx_at(alice.group().epoch().as_u64(), false);
+
+        // Claim 2, carry 1 → violation attributed to bob.
+        let lying = candidate_from_bob(&mut bob, 2);
+        let outcome = stage_candidate(&provider_a, &mut alice, "test-conversation", &lying, &ctx)
+            .expect("staging itself succeeds");
+        match outcome {
+            StagingOutcome::Violation(evidence) => assert_eq!(evidence.target_member_id, bob_id),
+            other => panic!("expected a violation, got {other:?}"),
+        }
+        alice.discard_staged_commit();
+        bob.discard_own_commit(&provider_b).unwrap();
+
+        // Honest claim on a fresh candidate → staged.
+        let honest = candidate_from_bob(&mut bob, 1);
+        let outcome = stage_candidate(&provider_a, &mut alice, "test-conversation", &honest, &ctx)
+            .expect("staging succeeds");
+        assert!(
+            matches!(outcome, StagingOutcome::Staged { .. }),
+            "an honest count stages cleanly, got {outcome:?}"
+        );
+        alice.discard_staged_commit();
     }
 }

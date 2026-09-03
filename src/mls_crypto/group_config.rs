@@ -1,16 +1,10 @@
-//! The MLS group settings de-mls pins, and the builder integrators seed from.
+//! The MLS group settings de-mls pins on both construction paths.
 //!
-//! OpenMLS keeps these in `MlsGroupJoinConfig`: they are local, never
-//! negotiated, and absent from group state, so every node chooses its own.
-//! de-mls pins them instead of leaving them to the integrator, because a node
-//! that drops a message its peers processed reaches a different consensus
-//! outcome — a badly-set window forks that node out of the group rather than
-//! merely degrading it.
-//!
-//! The values apply on both construction paths so every member runs the same
-//! ones. Each path takes the integrator's config builder and stamps the pinned
-//! fields on last — [`pin`] on create, [`pin_join`] on the welcome path — so
-//! whatever the integrator sets, these values are the ones a group runs.
+//! These are local OpenMLS settings (never negotiated), but a node that drops
+//! a message its peers processed can diverge on consensus — so de-mls pins
+//! them rather than leaving them per-integrator. [`pin`] (create) and
+//! [`pin_join`] (welcome) stamp them onto the integrator's builder last, so
+//! they always win.
 
 use openmls::group::{
     MlsGroupCreateConfig, MlsGroupCreateConfigBuilder, MlsGroupJoinConfig,
@@ -20,45 +14,30 @@ use openmls::prelude::{
     PURE_CIPHERTEXT_WIRE_FORMAT_POLICY, SenderRatchetConfiguration, WireFormatPolicy,
 };
 
-/// Past epochs whose application-message keys are retained, so a message still
-/// in flight when a commit lands stays readable afterwards.
-///
-/// At `0` — OpenMLS's default — every message sent before a commit and
-/// delivered after it is lost, which is most of what makes one missed commit
-/// unrecoverable. The cost is forward secrecy: a device compromise exposes
-/// application messages from this many past epochs instead of only the current
-/// one. Commits are unaffected; the window covers application messages only.
+/// Past epochs whose application-message keys are retained, so a message in
+/// flight when a commit lands stays readable (OpenMLS default: 0 — lost).
+/// Cost: a device compromise exposes this many past epochs of app messages.
 pub const PAST_EPOCH_WINDOW: usize = 3;
 
-/// Generations of out-of-order delivery tolerated per sender within an epoch.
-///
-/// OpenMLS defaults to `5`, which a reordering transport exceeds routinely:
-/// twelve messages delivered newest-first decrypt five of twelve at the
-/// default. Same forward-secrecy trade as [`PAST_EPOCH_WINDOW`], scoped inside
-/// one epoch.
+/// Generations of out-of-order delivery tolerated per sender within an epoch
+/// (OpenMLS default: 5 — too small for a reordering transport). Same
+/// forward-secrecy trade as [`PAST_EPOCH_WINDOW`], scoped inside one epoch.
 pub const OUT_OF_ORDER_TOLERANCE: u32 = 64;
 
-/// Generations that may be skipped ahead from one sender before a message is
-/// refused. OpenMLS's default, restated so the pin is explicit rather than
-/// inherited.
+/// Generations that may be skipped ahead from one sender (OpenMLS's default,
+/// pinned explicitly).
 pub const MAX_FORWARD_DISTANCE: u32 = 1000;
 
-/// Bytes each outgoing message is padded out to a multiple of.
-///
-/// At `0` a message's length reveals its class — a commit carrying a welcome is
-/// unmistakable beside a chat line on a public topic. Raising it coarsens that
-/// channel at the cost of wire size, so it is a privacy decision to make
-/// deliberately rather than a reliability one; it is pinned here so the choice
-/// applies to every member rather than only the group's creator.
+/// Bytes each outgoing message is padded to a multiple of. At 0 length leaks
+/// the message class; raising it is a privacy/size trade, pinned here so the
+/// choice is group-wide.
 pub const PADDING_SIZE: usize = 0;
 
-/// Resumption PSKs retained. de-mls opens no resumption sessions, so it keeps
-/// OpenMLS's default; pinned so both construction paths agree.
+/// Resumption PSKs retained — unused by de-mls; pinned so both paths agree.
 pub const RESUMPTION_PSKS: usize = 0;
 
-/// Handshake messages stay encrypted. de-mls reads a message's routing fields
-/// from the `PrivateMessage` framing, which a `PublicMessage` does not carry in
-/// the same shape.
+/// Handshake messages stay encrypted; de-mls reads routing fields from the
+/// `PrivateMessage` framing.
 const WIRE_FORMAT_POLICY: WireFormatPolicy = PURE_CIPHERTEXT_WIRE_FORMAT_POLICY;
 
 /// The pinned ratchet windows.
@@ -66,10 +45,8 @@ fn sender_ratchet_configuration() -> SenderRatchetConfiguration {
     SenderRatchetConfiguration::new(OUT_OF_ORDER_TOLERANCE, MAX_FORWARD_DISTANCE)
 }
 
-/// Apply the pinned settings to an integrator's join-config builder and build
-/// it — [`pin`]'s mirror on the welcome path. Stamping happens last, so
-/// whatever the builder carries, the pinned fields are de-mls's.
-/// `join_and_create_paths_agree` holds the two paths equal.
+/// [`pin`]'s mirror on the welcome path: stamp the pinned settings onto the
+/// integrator's join-config builder, last-write-wins.
 pub(crate) fn pin_join(builder: MlsGroupJoinConfigBuilder) -> MlsGroupJoinConfig {
     builder
         .wire_format_policy(WIRE_FORMAT_POLICY)
@@ -81,15 +58,10 @@ pub(crate) fn pin_join(builder: MlsGroupJoinConfigBuilder) -> MlsGroupJoinConfig
         .build()
 }
 
-/// Apply the pinned settings to an integrator's create-config builder and
-/// build it.
-///
-/// The integrator sets ciphersuite, capabilities, and extensions; de-mls
-/// applies its own fields afterwards, so a group is never created with
-/// settings that would strand its creator. Taking the builder rather than a
-/// finished config is what makes that possible: `MlsGroupCreateConfig` exposes
-/// no getter for capabilities or leaf-node extensions, so a supplied config
-/// could not be rebuilt without silently dropping them.
+/// Stamp the pinned settings onto the integrator's create-config builder
+/// (ciphersuite, capabilities, extensions stay theirs) and build. Takes the
+/// builder because a finished `MlsGroupCreateConfig` has no getters for
+/// capabilities or leaf-node extensions and could not be rebuilt losslessly.
 pub(crate) fn pin(builder: MlsGroupCreateConfigBuilder) -> MlsGroupCreateConfig {
     builder
         .wire_format_policy(WIRE_FORMAT_POLICY)
@@ -132,9 +104,8 @@ mod tests {
         assert!(config.use_ratchet_tree_extension());
     }
 
-    /// A group's creator and its joiners must run identical local settings, so
-    /// the two paths are compared whole rather than field by field — a field
-    /// added to `MlsGroupJoinConfig` and pinned on only one path fails here.
+    /// The two paths compared whole: a field pinned on only one of them
+    /// fails here.
     #[test]
     fn join_and_create_paths_agree() {
         assert_eq!(
@@ -143,8 +114,7 @@ mod tests {
         );
     }
 
-    /// The create path takes the integrator's builder, so every pinned field
-    /// has to survive an integrator that sets it. Compared whole, as above.
+    /// Every pinned field survives an integrator that sets it.
     #[test]
     fn the_pins_survive_an_integrator_setting_every_one_of_them() {
         let meddled = MlsGroupCreateConfig::builder()
@@ -160,8 +130,7 @@ mod tests {
         );
     }
 
-    /// The join path mirrors the create path: the pinned fields survive an
-    /// integrator that sets every one of them on the join builder too.
+    /// Same on the join builder.
     #[test]
     fn the_join_pins_survive_an_integrator_setting_every_one_of_them() {
         let meddled = MlsGroupJoinConfig::builder()
