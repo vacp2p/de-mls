@@ -10,7 +10,7 @@
 use std::error::Error as StdError;
 
 use openmls::credentials::CredentialWithKey;
-use openmls::group::MlsGroupCreateConfig;
+use openmls::group::{MlsGroupCreateConfigBuilder, MlsGroupJoinConfigBuilder};
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 
@@ -42,7 +42,7 @@ where
         conversation_id: &str,
         provider: &Pr,
         credential: CredentialWithKey,
-        group_config: &MlsGroupCreateConfig,
+        group_config: MlsGroupCreateConfigBuilder,
         signer: &impl Signer,
         consensus: &Cp,
         scoring: PeerScoringService<Sc>,
@@ -163,6 +163,7 @@ where
         provider: &Pr,
         signer: &impl Signer,
         welcome_bytes: &[u8],
+        join_config: MlsGroupJoinConfigBuilder,
         conversation_sync_bytes: &[u8],
         consensus: &Cp,
         scoring: PeerScoringService<Sc>,
@@ -174,7 +175,7 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let Some(mls) = MlsService::new_from_welcome(provider, welcome_bytes)? else {
+        let Some(mls) = MlsService::new_from_welcome(provider, welcome_bytes, join_config)? else {
             return Ok(None);
         };
         let conversation_id = mls.conversation_id().to_string();

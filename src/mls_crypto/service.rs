@@ -15,8 +15,8 @@ use std::error::Error as StdError;
 
 use openmls::credentials::CredentialWithKey;
 use openmls::group::{
-    GroupId, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, StagedCommit, StagedWelcome,
-    WelcomeError,
+    GroupId, MlsGroup, MlsGroupCreateConfigBuilder, MlsGroupJoinConfigBuilder, StagedCommit,
+    StagedWelcome, WelcomeError,
 };
 use openmls::key_packages::{KeyPackage, KeyPackageIn};
 use openmls::prelude::{
@@ -26,13 +26,12 @@ use openmls::prelude::{
 use openmls_traits::storage::StorageProvider;
 use openmls_traits::{OpenMlsProvider, signatures::Signer};
 use prost::Message;
-use tracing::warn;
 
 use crate::mls_crypto::member_id::{MemberId, leaf_index_of, member_id_of};
 use crate::{
     mls_crypto::{
         CommitArtifacts, DecryptedMessage, MembershipDelta, MlsCommitInput, MlsError,
-        MlsMessageKind, MlsProposalOutput, StagedCandidateResult,
+        MlsMessageKind, MlsProposalOutput, PAST_EPOCH_WINDOW, StagedCandidateResult, pin, pin_join,
     },
     protos::de_mls::messages::v1::AppMessage,
 };
@@ -88,26 +87,25 @@ impl MlsService {
     /// seeded straight from `credential` and `ciphersuite` — no key package,
     /// since key packages are how *joiners* are added. `provider` is written
     /// into but not retained.
+    ///
+    /// `group_config` carries the integrator's ciphersuite, capabilities, and
+    /// extensions. de-mls stamps its own reliability settings on top before
+    /// building, so every group runs the same ones.
     pub fn new_as_creator<Pr>(
         conversation_id: String,
         provider: &Pr,
         credential: CredentialWithKey,
-        group_create_config: &MlsGroupCreateConfig,
+        group_config: MlsGroupCreateConfigBuilder,
         signer: &impl Signer,
     ) -> Result<Self, MlsError>
     where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        if !group_create_config.use_ratchet_tree_extension() {
-            // DeMLS assumes the ratchet tree extension is being used.
-            // Specifically the MlsGroupJoinConfig requires this extension
-            warn!("Supplied mls config does not use ratchet tree extension");
-        }
         let group = MlsGroup::new_with_group_id(
             provider,
             signer,
-            group_create_config,
+            &pin(group_config),
             GroupId::from_slice(conversation_id.as_bytes()),
             credential,
         )?;
@@ -123,9 +121,14 @@ impl MlsService {
     /// key-package private keys from the earlier key-package build, and is read
     /// from but not retained. Returns `Ok(None)` when the welcome doesn't
     /// address one of our key packages — the "not for us" branch, not an error.
+    ///
+    /// `join_config` mirrors the create path's builder: de-mls stamps its own
+    /// reliability settings on top before building, so a joiner runs the same
+    /// ones as the creator.
     pub fn new_from_welcome<Pr>(
         provider: &Pr,
         welcome_bytes: &[u8],
+        join_config: MlsGroupJoinConfigBuilder,
     ) -> Result<Option<Self>, MlsError>
     where
         Pr: OpenMlsProvider,
@@ -137,9 +140,7 @@ impl MlsService {
             _ => return Ok(None),
         };
 
-        let config = MlsGroupJoinConfig::builder()
-            .use_ratchet_tree_extension(true)
-            .build();
+        let config = pin_join(join_config);
         let staged = match StagedWelcome::new_from_welcome(provider, &config, welcome, None) {
             Ok(staged) => staged,
             Err(WelcomeError::NoMatchingKeyPackage | WelcomeError::JoinerSecretNotFound) => {
@@ -525,9 +526,12 @@ impl MlsService {
     /// else (proposals and commits included). Guards the application subtopic
     /// against MLS-state pollution from peers that misroute control messages.
     ///
-    /// Returns the [`DecryptedMessage`] for a current-epoch application message,
-    /// or `None` when the message can't be taken as one (a proposal, commit, or
-    /// wrong group/epoch is dropped, not an error).
+    /// Accepts the current epoch and the [`PAST_EPOCH_WINDOW`] epochs behind
+    /// it, so a message in flight when a commit landed still reads.
+    ///
+    /// Returns the [`DecryptedMessage`], or `None` when the message can't be
+    /// taken as one (a proposal, commit, wrong group, or an epoch outside the
+    /// readable window is dropped, not an error).
     pub fn decrypt_application_only<Pr>(
         &mut self,
         provider: &Pr,
@@ -546,9 +550,15 @@ impl MlsService {
             return Ok(None);
         }
 
-        // OpenMLS rejects both old and future epochs; ignore both to avoid
-        // hard errors (a joiner sends at epoch N+1 before we've merged).
-        if protocol_message.epoch() != group.epoch() {
+        // Bound the epoch before handing the message to OpenMLS, which raises a
+        // hard error for anything it holds no key for. Neither direction is the
+        // sender's fault: a future epoch means a joiner sent at N+1 before we
+        // merged, and an epoch older than PAST_EPOCH_WINDOW is simply beyond
+        // what we retain. Both are drops. The bound matches the window OpenMLS
+        // is configured with, so nothing that would error reaches it.
+        let group_epoch = group.epoch().as_u64();
+        let message_epoch = protocol_message.epoch().as_u64();
+        if message_epoch > group_epoch || group_epoch - message_epoch > PAST_EPOCH_WINDOW as u64 {
             return Ok(None);
         }
 
@@ -600,6 +610,8 @@ impl MlsService {
 
 #[cfg(test)]
 mod service_tests {
+    use openmls::group::MlsGroupJoinConfig;
+
     use super::*;
     use crate::test_fixtures::{TestProvider, make_creator_mls, member_key_package};
 
@@ -662,9 +674,10 @@ mod service_tests {
             .expect("add bob");
         alice.merge_own_commit(&provider_a).unwrap();
         let welcome = artifacts.welcome.expect("welcome for bob");
-        let mut bob = MlsService::new_from_welcome(&provider_b, &welcome)
-            .expect("open welcome")
-            .expect("welcome addressed to bob");
+        let mut bob =
+            MlsService::new_from_welcome(&provider_b, &welcome, MlsGroupJoinConfig::builder())
+                .expect("open welcome")
+                .expect("welcome addressed to bob");
         let synced_epoch = alice.group().epoch().as_u64();
         assert_eq!(synced_epoch, bob.group().epoch().as_u64());
 
@@ -717,9 +730,10 @@ mod service_tests {
             .expect("add bob");
         alice.merge_own_commit(&provider_a).unwrap();
         let welcome = artifacts.welcome.expect("welcome for bob");
-        let mut bob = MlsService::new_from_welcome(&provider_b, &welcome)
-            .expect("open welcome")
-            .expect("welcome addressed to bob");
+        let mut bob =
+            MlsService::new_from_welcome(&provider_b, &welcome, MlsGroupJoinConfig::builder())
+                .expect("open welcome")
+                .expect("welcome addressed to bob");
         let synced_epoch = alice.group().epoch().as_u64();
 
         // Bob builds a valid commit; alice builds her own → alice has a pending commit.
@@ -837,6 +851,64 @@ mod service_tests {
                 .iter()
                 .any(|m| m.index == bob_leaf && m.credential.serialized_content() == b"dave"),
             "reused leaf listed as added with the new member"
+        );
+    }
+
+    /// The pinned settings exist for this: a message sent just before a commit
+    /// lands still decrypts afterwards. At OpenMLS's `max_past_epochs` default
+    /// of 0 it is lost, which is what strands a member that missed a commit.
+    #[test]
+    fn a_message_from_the_previous_epoch_still_decrypts() {
+        use crate::protos::de_mls::messages::v1::{AppMessage, ConversationMessage, app_message};
+        let chat = AppMessage {
+            payload: Some(app_message::Payload::ConversationMessage(
+                ConversationMessage {
+                    message: "sent before the commit".into(),
+                    ..Default::default()
+                },
+            )),
+        };
+
+        let (mut alice, provider_a, signer_a) = make_creator_mls(b"alice");
+        let provider_b = TestProvider::default();
+        let (bob_kp, _bob_signer) = member_key_package(&provider_b, b"bob");
+        let artifacts = alice
+            .create_commit_candidate(&provider_a, &signer_a, &[MlsCommitInput::Add(bob_kp)])
+            .expect("add bob");
+        alice.merge_own_commit(&provider_a).unwrap();
+        let mut bob = MlsService::new_from_welcome(
+            &provider_b,
+            &artifacts.welcome.unwrap(),
+            MlsGroupJoinConfig::builder(),
+        )
+        .expect("open welcome")
+        .expect("welcome addressed to bob");
+
+        // In flight when the next commit lands.
+        let straggler = alice
+            .build_message(&provider_a, &signer_a, &chat)
+            .expect("chat at the current epoch");
+
+        // Both advance an epoch before it is delivered.
+        let carol_kp = fresh_key_package(&provider_a, b"carol");
+        let next = alice
+            .create_commit_candidate(&provider_a, &signer_a, &[MlsCommitInput::Add(carol_kp)])
+            .expect("add carol");
+        let staged = bob
+            .stage_remote_commit(&provider_b, &next.proposals, &next.commit)
+            .expect("stage");
+        assert!(matches!(staged, StagedCandidateResult::Staged { .. }));
+        bob.merge_staged_commit(&provider_b).expect("merge");
+        alice.merge_own_commit(&provider_a).expect("merge own");
+
+        let epoch = bob.group().epoch().as_u64();
+        let decrypted = bob
+            .decrypt_application_only(&provider_b, &straggler)
+            .expect("a past-epoch message is readable inside the pinned window");
+        assert!(
+            decrypted.is_some(),
+            "message from epoch {} dropped at epoch {epoch}",
+            epoch - 1
         );
     }
 }
