@@ -42,6 +42,10 @@ pub struct MlsService {
     conversation_id: String,
     group: MlsGroup,
     pending_staged_commit: Option<StagedCommit>,
+    /// The epoch this member entered the group at; the decrypt gate floors
+    /// here (earlier epochs used keys we never held). In-memory only — a
+    /// future reload-from-storage path must re-derive or persist it.
+    first_epoch: u64,
 }
 
 /// Parse and cryptographically validate a key package, returning the validated
@@ -112,6 +116,7 @@ impl MlsService {
 
         Ok(Self {
             conversation_id,
+            first_epoch: group.epoch().as_u64(),
             group,
             pending_staged_commit: None,
         })
@@ -153,6 +158,7 @@ impl MlsService {
         let conversation_id = String::from_utf8_lossy(group.group_id().as_slice()).to_string();
         Ok(Some(Self {
             conversation_id,
+            first_epoch: group.epoch().as_u64(),
             group,
             pending_staged_commit: None,
         }))
@@ -526,8 +532,8 @@ impl MlsService {
     /// else (proposals and commits included). Guards the application subtopic
     /// against MLS-state pollution from peers that misroute control messages.
     ///
-    /// Accepts the current epoch and the [`PAST_EPOCH_WINDOW`] epochs behind
-    /// it, so a message in flight when a commit landed still reads.
+    /// Accepts the current epoch and up to [`PAST_EPOCH_WINDOW`] behind it,
+    /// floored at our join epoch.
     ///
     /// Returns the [`DecryptedMessage`], or `None` when the message can't be
     /// taken as one (a proposal, commit, wrong group, or an epoch outside the
@@ -550,15 +556,15 @@ impl MlsService {
             return Ok(None);
         }
 
-        // Bound the epoch before handing the message to OpenMLS, which raises a
-        // hard error for anything it holds no key for. Neither direction is the
-        // sender's fault: a future epoch means a joiner sent at N+1 before we
-        // merged, and an epoch older than PAST_EPOCH_WINDOW is simply beyond
-        // what we retain. Both are drops. The bound matches the window OpenMLS
-        // is configured with, so nothing that would error reaches it.
+        // Drop epochs we hold no key for before OpenMLS raises a hard error:
+        // future (joiner sent at N+1 before we merged), older than the
+        // retained window, or before we joined. None is the sender's fault.
         let group_epoch = group.epoch().as_u64();
         let message_epoch = protocol_message.epoch().as_u64();
-        if message_epoch > group_epoch || group_epoch - message_epoch > PAST_EPOCH_WINDOW as u64 {
+        if message_epoch > group_epoch
+            || message_epoch < self.first_epoch
+            || group_epoch - message_epoch > PAST_EPOCH_WINDOW as u64
+        {
             return Ok(None);
         }
 
@@ -910,5 +916,45 @@ mod service_tests {
             "message from epoch {} dropped at epoch {epoch}",
             epoch - 1
         );
+    }
+
+    /// A pre-join straggler — sealed with epoch keys the joiner never held —
+    /// is dropped, never surfaced as an error.
+    #[test]
+    fn a_message_from_before_our_join_is_dropped_not_raised() {
+        use crate::protos::de_mls::messages::v1::{AppMessage, ConversationMessage, app_message};
+        let chat = AppMessage {
+            payload: Some(app_message::Payload::ConversationMessage(
+                ConversationMessage {
+                    message: "sent while bob was still outside".into(),
+                    ..Default::default()
+                },
+            )),
+        };
+
+        let (mut alice, provider_a, signer_a) = make_creator_mls(b"alice");
+        // In flight before bob exists.
+        let pre_join = alice
+            .build_message(&provider_a, &signer_a, &chat)
+            .expect("chat at epoch 0");
+
+        let provider_b = TestProvider::default();
+        let (bob_kp, _bob_signer) = member_key_package(&provider_b, b"bob");
+        let artifacts = alice
+            .create_commit_candidate(&provider_a, &signer_a, &[MlsCommitInput::Add(bob_kp)])
+            .expect("add bob");
+        alice.merge_own_commit(&provider_a).unwrap();
+        let mut bob = MlsService::new_from_welcome(
+            &provider_b,
+            &artifacts.welcome.unwrap(),
+            MlsGroupJoinConfig::builder(),
+        )
+        .expect("open welcome")
+        .expect("welcome addressed to bob");
+
+        let result = bob
+            .decrypt_application_only(&provider_b, &pre_join)
+            .expect("a pre-join straggler is not an error");
+        assert!(result.is_none(), "and it yields nothing");
     }
 }
