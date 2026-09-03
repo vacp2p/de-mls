@@ -1,15 +1,12 @@
-use hashgraph_like_consensus::{
-    protos::consensus::v1::{Proposal, Vote},
-    types::ConsensusEvent,
-};
+use hashgraph_like_consensus::protos::consensus::v1::{Proposal, Vote};
 
 use crate::{
     ConversationError, Member, ScoreEvent, ScoreOp,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, ConversationSync,
         ConversationSyncRequest, ConversationUpdateRequest, EmergencyCriteriaProposal,
-        EventMembershipChange, MemberWelcome, Outcome, ProposalAdded, UserVote, ViolationEvidence,
-        ViolationType, VotePayload, app_message, conversation_update_request,
+        EventMembershipChange, MemberWelcome, ViolationEvidence, ViolationType, app_message,
+        conversation_update_request,
     },
 };
 
@@ -220,29 +217,16 @@ macro_rules! impl_payload_from {
 
 impl_payload_from!(
     AppMessage,
-    VotePayload         => app_message::Payload::VotePayload,
-    UserVote            => app_message::Payload::UserVote,
     ConversationMessage => app_message::Payload::ConversationMessage,
     CommitCandidate     => app_message::Payload::CommitCandidate,
     BanRequest          => app_message::Payload::BanRequest,
     Proposal            => app_message::Payload::Proposal,
     Vote                => app_message::Payload::Vote,
     ConversationSync    => app_message::Payload::ConversationSync,
-    ProposalAdded       => app_message::Payload::ProposalAdded,
     MemberWelcome       => app_message::Payload::MemberWelcome,
     EventMembershipChange => app_message::Payload::MembershipChange,
     ConversationSyncRequest => app_message::Payload::ConversationSyncRequest,
 );
-
-impl From<ConsensusEvent> for Outcome {
-    fn from(ev: ConsensusEvent) -> Self {
-        match ev {
-            ConsensusEvent::ConsensusReached { result: true, .. } => Outcome::Accepted,
-            ConsensusEvent::ConsensusReached { result: false, .. } => Outcome::Rejected,
-            ConsensusEvent::ConsensusFailed { .. } => Outcome::Unspecified,
-        }
-    }
-}
 
 impl TryFrom<AppMessage> for ProcessResult {
     type Error = ConversationError;

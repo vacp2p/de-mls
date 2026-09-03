@@ -40,9 +40,6 @@ pub mod message_types {
     pub const BAN_REQUEST: &str = "BanRequest";
     pub const PROPOSAL: &str = "Proposal";
     pub const VOTE: &str = "Vote";
-    pub const VOTE_PAYLOAD: &str = "VotePayload";
-    pub const USER_VOTE: &str = "UserVote";
-    pub const PROPOSAL_ADDED: &str = "ProposalAdded";
     pub const COMMIT_CANDIDATE: &str = "CommitCandidate";
     pub const CONVERSATION_SYNC: &str = "ConversationSync";
     pub const CONVERSATION_SYNC_REQUEST: &str = "ConversationSyncRequest";
@@ -63,9 +60,6 @@ impl MessageType for app_message::Payload {
             app_message::Payload::BanRequest(_) => message_types::BAN_REQUEST,
             app_message::Payload::Proposal(_) => message_types::PROPOSAL,
             app_message::Payload::Vote(_) => message_types::VOTE,
-            app_message::Payload::VotePayload(_) => message_types::VOTE_PAYLOAD,
-            app_message::Payload::UserVote(_) => message_types::USER_VOTE,
-            app_message::Payload::ProposalAdded(_) => message_types::PROPOSAL_ADDED,
             app_message::Payload::CommitCandidate(_) => message_types::COMMIT_CANDIDATE,
             app_message::Payload::ConversationSync(_) => message_types::CONVERSATION_SYNC,
             app_message::Payload::ConversationSyncRequest(_) => {
