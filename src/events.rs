@@ -100,17 +100,15 @@ pub enum Info {
     /// The conversation carries on; log it or show it.
     Error { operation: String, message: String },
 
-    /// A commit merged and the epoch advanced, carrying the proposals that
-    /// landed in the order they applied.
-    CommitApplied(Vec<ConversationUpdateRequest>),
-
     /// The conversation moved to a new lifecycle phase, such as a commit round
     /// or steward selection.
     PhaseChange(ConversationState),
 
-    /// A consensus session has finished, and here's what was decided.
-    /// The `timestamp` is straight from the consensus layer.
-    /// To find out what this was about, use [`crate::Conversation::proposal`] with the `proposal_id`
+    /// A consensus session has finished, and here's what was decided. The
+    /// `timestamp` is straight from the consensus layer.
+    ///
+    /// A vote, not an outcome: an approved change still has to survive commit
+    /// building, so watch [`Self::MembersChanged`] for what actually landed.
     ConsensusReached {
         proposal_id: u32,
         approved: bool,
@@ -145,7 +143,7 @@ pub enum Info {
     /// to agree on state when needed. Never use a peer score alone to make decisions
     /// that require agreement from the group.
     MemberScoreChanged {
-        member_id: Vec<u8>,
+        member: MemberId,
         previous: i64,
         score: i64,
     },

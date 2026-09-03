@@ -153,7 +153,7 @@ where
         let allow_subset =
             in_recovery || self.services.steward_list.config().allow_subset_candidates;
         let self_member_id = self.self_member_id;
-        let mut finalize_result = match self.finalize_commit_round(
+        let finalize_result = match self.finalize_commit_round(
             provider,
             allow_subset,
             &self_member_id,
@@ -178,12 +178,6 @@ where
         {
             error!(conversation = %conversation_id, error = %e, "applying commit-round score ops failed");
             self.report_failure("apply_commit_round_score_ops", &e);
-        }
-
-        if !finalize_result.committed_batch.is_empty() {
-            self.emit_event(Info::CommitApplied(std::mem::take(
-                &mut finalize_result.committed_batch,
-            )));
         }
 
         match finalize_result.outcome {

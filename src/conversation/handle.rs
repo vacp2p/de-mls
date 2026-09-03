@@ -619,8 +619,14 @@ where
                 score = change.score,
                 "peer score changed"
             );
+            // A score can move for a member the commit just removed; there is
+            // no handle to issue for a vacated leaf, and nothing the integrator
+            // could do with one.
+            let Some(member) = self.mls().member_id_at(&change.member_id) else {
+                continue;
+            };
             self.emit_event(Info::MemberScoreChanged {
-                member_id: change.member_id,
+                member,
                 previous: change.previous,
                 score: change.score,
             });
@@ -1016,13 +1022,16 @@ mod tests {
     #[test]
     fn score_change_emits_an_event_and_proposes_nothing() {
         let mut convo = conversation_with_real_deltas();
-        convo.services.scoring.add_member(b"alice").unwrap();
+        // Score a seated member: the event reports a `MemberId`, and there is
+        // no handle to issue for a leaf nobody occupies.
+        let target = convo.member_id_bytes().to_vec();
+        convo.services.scoring.add_member(&target).unwrap();
         let _ = convo.drain_events();
         let _ = convo.drain_outbound();
 
         // CensorshipInactivity is -40 against a default 100: 100 → 60 → 20.
         let penalty = ScoreOp {
-            member_id: b"alice".to_vec(),
+            member_id: target.clone(),
             event: crate::ScoreEvent::CensorshipInactivity,
         };
         convo
@@ -1034,16 +1043,16 @@ mod tests {
             .into_iter()
             .filter_map(|e| match e {
                 ConversationEvent::Info(Info::MemberScoreChanged {
-                    member_id,
+                    member,
                     previous,
                     score,
-                }) => Some((member_id, previous, score)),
+                }) => Some((member, previous, score)),
                 _ => None,
             })
             .collect();
         assert_eq!(
             reported,
-            vec![(b"alice".to_vec(), 100, 20)],
+            vec![(convo.own_id(), 100, 20)],
             "one event per member, netted across the batch"
         );
         assert!(
@@ -1058,12 +1067,13 @@ mod tests {
     #[test]
     fn a_threshold_crossing_is_derivable_from_one_event() {
         let mut convo = conversation_with_real_deltas();
-        convo.services.scoring.add_member(b"alice").unwrap();
+        let target = convo.member_id_bytes().to_vec();
+        convo.services.scoring.add_member(&target).unwrap();
         let threshold = convo.score_threshold();
 
-        // 100 → 20 → -20: the second batch takes alice across the line.
+        // 100 → 20 → -20: the second batch takes the member across the line.
         let penalty = ScoreOp {
-            member_id: b"alice".to_vec(),
+            member_id: target,
             event: crate::ScoreEvent::CensorshipInactivity,
         };
         convo

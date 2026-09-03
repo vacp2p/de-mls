@@ -11,7 +11,7 @@ use crate::{
         apply::apply_in_priority_order, context::RoundContext, validate::rank_applicable_candidates,
     },
     mls_crypto::{MlsMessageKind, MlsService},
-    protos::de_mls::messages::v1::{CommitCandidate, ConversationUpdateRequest, MemberWelcome},
+    protos::de_mls::messages::v1::{CommitCandidate, MemberWelcome},
 };
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 use sha2::{Digest, Sha256};
@@ -25,9 +25,6 @@ use sha2::{Digest, Sha256};
 pub struct CommitRoundResult {
     pub outcome: CommitRoundOutcome,
     pub score_ops: Vec<ScoreOp>,
-    /// Just-committed approvals in FIFO order. Empty on no-op or when
-    /// an urgent-target commit drops only its entry.
-    pub committed_batch: Vec<ConversationUpdateRequest>,
 }
 
 #[derive(Debug, Clone, Default)]
