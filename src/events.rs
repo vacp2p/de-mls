@@ -104,9 +104,11 @@ pub enum Info {
     /// or steward selection.
     PhaseChange(ConversationState),
 
-    /// A consensus session has finished, and here's what was decided.
-    /// The `timestamp` is straight from the consensus layer.
-    /// To find out what this was about, use [`crate::Conversation::proposal`] with the `proposal_id`
+    /// A consensus session has finished, and here's what was decided. The
+    /// `timestamp` is straight from the consensus layer.
+    ///
+    /// A vote, not an outcome: an approved change still has to survive commit
+    /// building, so watch [`Self::MembersChanged`] for what actually landed.
     ConsensusReached {
         proposal_id: u32,
         approved: bool,
