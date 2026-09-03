@@ -30,6 +30,25 @@ fn double_self_leave_does_not_re_propose() {
     assert_eq!(second, 0, "second leave dedups — no new outbound");
 }
 
+/// A self-leave reaches the leaver as `Left` once a steward commits it —
+/// the leave completes on the commit, not on the `leave()` call.
+#[test]
+fn self_leave_reaches_the_leaver_once_committed() {
+    let mut h = TestHarness::<2>::bootstrap(
+        [ALICE, BOB],
+        "c5",
+        fast_config(),
+        StewardListConfig::new(1, 3).unwrap(),
+    );
+
+    h.member_mut(1).leave();
+    h.process_until("alice commits bob's leave", |h| {
+        h.member(0).member_count() == 1
+    });
+
+    assert!(h.member(1).saw_left(), "bob observes its own leave landing");
+}
+
 #[test]
 fn second_conversation_sync_is_a_no_op() {
     let mut h = TestHarness::<2>::bootstrap(
