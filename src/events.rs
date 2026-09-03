@@ -141,7 +141,7 @@ pub enum Info {
     /// to agree on state when needed. Never use a peer score alone to make decisions
     /// that require agreement from the group.
     MemberScoreChanged {
-        member_id: Vec<u8>,
+        member: MemberId,
         previous: i64,
         score: i64,
     },
