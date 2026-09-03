@@ -21,7 +21,7 @@ use crate::{
         },
     },
     mls_crypto::MlsService,
-    protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberWelcome},
+    protos::de_mls::messages::v1::MemberWelcome,
 };
 
 /// Outcome of applying one candidate. `Terminal` ends the round; `Drop`
@@ -34,7 +34,6 @@ enum CandidateOutcome {
     Terminal {
         outcome: CommitRoundOutcome,
         committer: Vec<u8>,
-        committed_batch: Vec<ConversationUpdateRequest>,
     },
     Drop(Option<ScoreOp>),
 }
@@ -66,11 +65,7 @@ where
         };
 
         match apply_result {
-            CandidateOutcome::Terminal {
-                outcome,
-                committer,
-                committed_batch,
-            } => {
+            CandidateOutcome::Terminal { outcome, committer } => {
                 record_winner_scores(
                     &mut score_ops,
                     &committer,
@@ -79,11 +74,7 @@ where
                     remaining,
                     steward_list,
                 );
-                return Ok(CommitRoundResult {
-                    outcome,
-                    score_ops,
-                    committed_batch,
-                });
+                return Ok(CommitRoundResult { outcome, score_ops });
             }
             CandidateOutcome::Drop(op) => score_ops.extend(op),
         }
@@ -162,8 +153,7 @@ where
 
     // The merge is the commit point (epoch advanced by one); derive it rather
     // than reading MLS again, so an already-applied commit can't become an error.
-    let committed_batch =
-        finalize_committed_batch(conversation, chosen.commit_hash, ctx.current_epoch + 1);
+    finalize_committed_batch(conversation, chosen.commit_hash, ctx.current_epoch + 1);
 
     // Build the welcome artifact only after merge.
     let joiner_identities = chosen.joiner_identities;
@@ -179,7 +169,6 @@ where
             welcome,
         },
         committer: chosen.candidate_msg.steward_member_id,
-        committed_batch,
     })
 }
 
@@ -254,8 +243,7 @@ where
     conversation.store_membership_delta(delta);
     // The merge is the commit point (epoch advanced by one); derive it rather
     // than reading MLS again, so an already-applied commit can't become an error.
-    let committed_batch =
-        finalize_committed_batch(conversation, chosen.commit_hash, ctx.current_epoch + 1);
+    finalize_committed_batch(conversation, chosen.commit_hash, ctx.current_epoch + 1);
 
     Ok(CandidateOutcome::Terminal {
         outcome: CommitRoundOutcome::Applied {
@@ -263,7 +251,6 @@ where
             welcome: None,
         },
         committer: commit_sender,
-        committed_batch,
     })
 }
 
@@ -290,7 +277,7 @@ fn finalize_committed_batch(
     conversation: &mut ConversationQueues,
     commit_hash: CommitHash,
     current_epoch: u64,
-) -> Vec<ConversationUpdateRequest> {
+) {
     conversation.insert_committed_hash(commit_hash);
     // Stamp join epochs and clear resolved pending/approved entries now, before
     // the steward-list reconcile reads settled membership.
@@ -298,9 +285,8 @@ fn finalize_committed_batch(
     if let Some(target) = conversation.take_urgent_commit_target() {
         // Urgent commit: leave the rest of the queue for the next cycle.
         conversation.drop_approved_removals_for(&target);
-        Vec::new()
     } else {
-        conversation.drain_approved_proposals()
+        conversation.drain_approved_proposals();
     }
 }
 

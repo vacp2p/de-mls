@@ -100,10 +100,6 @@ pub enum Info {
     /// The conversation carries on; log it or show it.
     Error { operation: String, message: String },
 
-    /// A commit merged and the epoch advanced, carrying the proposals that
-    /// landed in the order they applied.
-    CommitApplied(Vec<ConversationUpdateRequest>),
-
     /// The conversation moved to a new lifecycle phase, such as a commit round
     /// or steward selection.
     PhaseChange(ConversationState),

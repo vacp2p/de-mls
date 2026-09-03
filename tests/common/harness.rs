@@ -30,10 +30,8 @@ use prost::Message;
 
 use de_mls::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
-use de_mls::mls_crypto::signature_key_of_key_package;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
-    conversation_update_request,
 };
 use de_mls::{Conversation, ConversationConfig, CreatorVote, MemberId, MemberRole, Outbound};
 use de_mls::{ConversationError, ConversationEvent, ConversationState, MockClock, ScoringConfig};
@@ -474,31 +472,27 @@ impl Member {
             .collect()
     }
 
-    /// Member ids added by every commit this member applied, in commit order.
-    /// One entry per `MemberInvite` in the committed batch, so a member added
-    /// twice appears twice.
+    /// Signature keys of every member added by a commit this member applied,
+    /// in commit order. One entry per seated joiner, so a leaf reused by two
+    /// different members appears twice.
     pub fn committed_adds(&self) -> Vec<Vec<u8>> {
         self.events
             .iter()
             .filter_map(|e| match e {
-                ConversationEvent::Info(Info::CommitApplied(reqs)) => Some(reqs),
+                ConversationEvent::Info(Info::MembersChanged { added, .. }) => Some(added),
                 _ => None,
             })
             .flatten()
-            .filter_map(|r| match r.payload.as_ref() {
-                Some(conversation_update_request::Payload::MemberInvite(im)) => {
-                    signature_key_of_key_package(&im.key_package_bytes).ok()
-                }
-                _ => None,
-            })
+            .map(|m| m.signature_key.clone())
             .collect()
     }
 
-    /// Count of commits this member has applied (membership batches landed).
+    /// Count of commits this member has applied. Every commit carries a
+    /// membership change, so counting those counts commits.
     pub fn commits_applied(&self) -> usize {
         self.events
             .iter()
-            .filter(|e| matches!(e, ConversationEvent::Info(Info::CommitApplied(_))))
+            .filter(|e| matches!(e, ConversationEvent::Info(Info::MembersChanged { .. })))
             .count()
     }
 
