@@ -8,10 +8,10 @@ use indexmap::{IndexMap, IndexSet};
 
 use crate::{
     engine::{
+        proposal_kind::ProposalKind,
         types::{CommitHash, MembershipDelta, StagedFacts},
         util::{in_flight_target, member_set, self_leave_proposal_id, target_member_id_of},
     },
-    proposal_kind::ProposalKind,
     protos::de_mls::messages::v1::{
         CommitCandidate, ConversationUpdateRequest, conversation_update_request,
     },

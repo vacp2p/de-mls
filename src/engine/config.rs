@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use crate::DEFAULT_MAX_RETRIES;
 use crate::StewardListConfig;
 use crate::error::ConversationError;
 use crate::peer_scoring::ScoringConfig;
@@ -19,11 +18,6 @@ pub const DEFAULT_PROPOSAL_EXPIRATION: Duration = Duration::from_secs(600);
 /// Library deadline for a single consensus session — bounds how long a
 /// vote can stay open. MUST be `> voting_delay`.
 pub const DEFAULT_CONSENSUS_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Inactivity window during Layer 2 / Layer 3 recovery
-/// (RFC §Inactivity Timer #2, "Recovery inactivity").
-/// Typically shorter than `commit_batch_window`.
-pub const DEFAULT_RETRY_WINDOW: Duration = Duration::from_secs(5);
 
 /// How long a backup steward waits for a silent epoch steward before covering
 /// its propose / sync-resend (RFC §Inactivity Timer #3).
@@ -43,26 +37,16 @@ pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 pub const DEFAULT_MAX_CONSENSUS_SESSIONS: usize = 128;
 
 /// Cap on MLS proposals the steward packs into one commit batch — bounds
-/// runaway growth when freeze recovery preserves work across failed cycles.
+/// runaway growth when a busy epoch accumulates approved work.
 pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
 
 /// Default number of recent commit / welcome hashes kept for duplicate
-/// detection (see [`ConversationConfig::dedup_window`]).
+/// detection (see [`EngineConfig::dedup_window`]).
 pub const DEFAULT_DEDUP_WINDOW: usize = 10;
-
-/// Default grace before Layer-3 recovery auto-commits: how long the group waits
-/// for a *manual* `commit_in_recovery` before every online node auto-mints a
-/// candidate (see [`ConversationConfig::recovery_auto_commit_delay`]).
-pub const DEFAULT_RECOVERY_AUTO_COMMIT_DELAY: Duration = Duration::from_secs(5);
-
-/// Default Layer-3 recovery round cap: `0` retries the manual+auto cycle
-/// forever (RFC Layer 3 is terminal and assumes an honest majority eventually
-/// commits). See [`ConversationConfig::recovery_max_rounds`].
-pub const DEFAULT_RECOVERY_MAX_ROUNDS: u32 = 0;
 
 /// Default unanswered sync-request rounds before the conversation reports it:
 /// three tries across the answer latency. `0` never reports. See
-/// [`ConversationConfig::unanswered_sync_rounds`].
+/// [`EngineConfig::unanswered_sync_rounds`].
 pub const DEFAULT_UNANSWERED_SYNC_ROUNDS: u32 = 3;
 
 /// Per-conversation timing and policy config, fixed at conversation creation.
@@ -70,16 +54,13 @@ pub const DEFAULT_UNANSWERED_SYNC_ROUNDS: u32 = 3;
 /// the integrator builds; the steward-list bounds live here (the list is
 /// library-owned) as the nested [`steward_list`](Self::steward_list).
 #[derive(Debug, Clone)]
-pub struct ConversationConfig {
+pub struct EngineConfig {
     /// How long approved proposals are batched before every steward mints a
     /// commit candidate (RFC §Inactivity Timer #1).
     pub commit_batch_window: Duration,
     /// How long the freeze collects commit candidates before one is
     /// deterministically selected (RFC §Freezing).
     pub freeze_duration: Duration,
-    /// Per-round window for reelection rotation and recovery — short so a retry
-    /// doesn't burn a full epoch (RFC §Inactivity Timer #2).
-    pub retry_window: Duration,
     /// How long a backup steward waits for a silent epoch steward (to propose a
     /// buffered update, or answer a sync-resend) before covering it
     /// (RFC §Inactivity Timer #3).
@@ -98,9 +79,6 @@ pub struct ConversationConfig {
     /// seen at epoch `E` is dropped once `current_epoch - E` exceeds this
     /// value (so it survives epochs `E..=E + max_age` inclusive).
     pub pending_update_max_epochs: u32,
-    /// Max steward-election retries within one MLS epoch before the app
-    /// surfaces "reelection stuck". `0` disables retry entirely.
-    pub max_reelection_attempts: u32,
     /// Whether silent voters count as YES at `consensus_timeout` (RFC
     /// §Creating Voting Proposal). See [`DEFAULT_LIVENESS_CRITERIA_YES`].
     /// Also used by the auto-vote timer as the cast value.
@@ -115,20 +93,11 @@ pub struct ConversationConfig {
     /// (duplicate-candidate and duplicate-welcome-broadcast detection). See
     /// [`DEFAULT_DEDUP_WINDOW`].
     pub dedup_window: usize,
-    /// Layer-3 recovery policy: how long to wait for a manual `commit_in_recovery`
-    /// before every online node auto-mints. `None` = manual-only (never auto);
-    /// `Some(ZERO)` = immediate; `Some(d)` = grace then auto. See
-    /// [`DEFAULT_RECOVERY_AUTO_COMMIT_DELAY`].
-    pub recovery_auto_commit_delay: Option<Duration>,
     /// How many sync requests may go unanswered before the conversation emits
-    /// [`crate::Request::ConversationSyncUnanswered`]. Rounds are one
+    /// [`crate::engine::Event::SyncUnanswered`]. Rounds are one
     /// `backup_takeover_window` apart. `0` never emits it; requesting continues
     /// either way. See [`DEFAULT_UNANSWERED_SYNC_ROUNDS`].
     pub unanswered_sync_rounds: u32,
-    /// Layer-3 recovery stop-line: how many manual+auto rounds to attempt before
-    /// giving up and emitting [`crate::Request::RecoveryExhausted`].
-    /// `0` retries forever. See [`DEFAULT_RECOVERY_MAX_ROUNDS`].
-    pub recovery_max_rounds: u32,
     /// Steward-list size bounds (`sn_min` / `sn_max`). The list itself is
     /// library-owned; this is the only steward knob the integrator sets.
     pub steward_list: StewardListConfig,
@@ -136,24 +105,20 @@ pub struct ConversationConfig {
     pub scoring: ScoringConfig,
 }
 
-impl Default for ConversationConfig {
+impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             commit_batch_window: DEFAULT_COMMIT_BATCH_WINDOW,
             freeze_duration: DEFAULT_COMMIT_BATCH_WINDOW / 2,
-            retry_window: DEFAULT_RETRY_WINDOW,
             backup_takeover_window: DEFAULT_BACKUP_TAKEOVER_WINDOW,
             proposal_expiration: DEFAULT_PROPOSAL_EXPIRATION,
             consensus_timeout: DEFAULT_CONSENSUS_TIMEOUT,
             pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
-            max_reelection_attempts: DEFAULT_MAX_RETRIES,
             voting_delay: DEFAULT_VOTING_DELAY,
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
             max_consensus_sessions: DEFAULT_MAX_CONSENSUS_SESSIONS,
             commit_batch_max: DEFAULT_COMMIT_BATCH_MAX,
             dedup_window: DEFAULT_DEDUP_WINDOW,
-            recovery_auto_commit_delay: Some(DEFAULT_RECOVERY_AUTO_COMMIT_DELAY),
-            recovery_max_rounds: DEFAULT_RECOVERY_MAX_ROUNDS,
             unanswered_sync_rounds: DEFAULT_UNANSWERED_SYNC_ROUNDS,
             steward_list: StewardListConfig::default(),
             scoring: ScoringConfig::default(),
@@ -161,14 +126,13 @@ impl Default for ConversationConfig {
     }
 }
 
-impl ConversationConfig {
+impl EngineConfig {
     /// Overwrite the duration fields from a wire [`TimingConfig`]. Used on
     /// the joiner side when applying `ConversationSync`. Non-timing fields
     /// (`liveness_criteria_yes`, `pending_update_max_epochs`) stay untouched.
     pub fn apply_timing(&mut self, timing: &TimingConfig) {
         apply_nonzero_ms(&mut self.commit_batch_window, timing.commit_batch_window_ms);
         apply_nonzero_ms(&mut self.freeze_duration, timing.freeze_duration_ms);
-        apply_nonzero_ms(&mut self.retry_window, timing.retry_window_ms);
         apply_nonzero_ms(
             &mut self.backup_takeover_window,
             timing.backup_takeover_window_ms,
@@ -223,14 +187,13 @@ fn apply_nonzero_ms(field: &mut Duration, wire_ms: u64) {
     }
 }
 
-/// Build the wire [`TimingConfig`] from a [`ConversationConfig`]. Used on
+/// Build the wire [`TimingConfig`] from an [`EngineConfig`]. Used on
 /// the steward side when sending `ConversationSync` to joiners.
-impl From<&ConversationConfig> for TimingConfig {
-    fn from(config: &ConversationConfig) -> Self {
+impl From<&EngineConfig> for TimingConfig {
+    fn from(config: &EngineConfig) -> Self {
         Self {
             commit_batch_window_ms: config.commit_batch_window.as_millis() as u64,
             freeze_duration_ms: config.freeze_duration.as_millis() as u64,
-            retry_window_ms: config.retry_window.as_millis() as u64,
             backup_takeover_window_ms: config.backup_takeover_window.as_millis() as u64,
             proposal_expiration_ms: config.proposal_expiration.as_millis() as u64,
             consensus_timeout_ms: config.consensus_timeout.as_millis() as u64,
@@ -244,21 +207,19 @@ mod tests {
 
     #[test]
     fn timing_config_round_trip() {
-        let original = ConversationConfig {
+        let original = EngineConfig {
             commit_batch_window: Duration::from_millis(100),
             freeze_duration: Duration::from_millis(200),
-            retry_window: Duration::from_millis(300),
             backup_takeover_window: Duration::from_millis(600),
             proposal_expiration: Duration::from_millis(400),
             consensus_timeout: Duration::from_millis(500),
-            ..ConversationConfig::default()
+            ..EngineConfig::default()
         };
         let timing = TimingConfig::from(&original);
-        let mut applied = ConversationConfig::default();
+        let mut applied = EngineConfig::default();
         applied.apply_timing(&timing);
         assert_eq!(applied.commit_batch_window, Duration::from_millis(100));
         assert_eq!(applied.freeze_duration, Duration::from_millis(200));
-        assert_eq!(applied.retry_window, Duration::from_millis(300));
         assert_eq!(applied.proposal_expiration, Duration::from_millis(400));
         assert_eq!(applied.consensus_timeout, Duration::from_millis(500));
         assert_eq!(applied.backup_takeover_window, Duration::from_millis(600));
@@ -266,18 +227,17 @@ mod tests {
 
     #[test]
     fn apply_timing_ignores_zero_durations() {
-        let mut config = ConversationConfig {
+        let mut config = EngineConfig {
             consensus_timeout: Duration::from_secs(30),
             commit_batch_window: Duration::from_secs(60),
-            ..ConversationConfig::default()
+            ..EngineConfig::default()
         };
         let timing = TimingConfig {
             consensus_timeout_ms: 0,
             commit_batch_window_ms: 0,
             freeze_duration_ms: 250,
-            retry_window_ms: 0,
-            backup_takeover_window_ms: 0,
             proposal_expiration_ms: 0,
+            backup_takeover_window_ms: 0,
         };
         config.apply_timing(&timing);
         // Zero fields keep their prior values.
@@ -289,28 +249,28 @@ mod tests {
 
     #[test]
     fn default_config_is_valid() {
-        assert!(ConversationConfig::default().validate().is_ok());
+        assert!(EngineConfig::default().validate().is_ok());
     }
 
     #[test]
     fn millisecond_test_config_is_valid() {
-        let config = ConversationConfig {
+        let config = EngineConfig {
             voting_delay: Duration::from_millis(50),
             consensus_timeout: Duration::from_millis(250),
             commit_batch_window: Duration::from_millis(500),
             freeze_duration: Duration::from_millis(500),
             proposal_expiration: Duration::from_millis(4000),
-            ..ConversationConfig::default()
+            ..EngineConfig::default()
         };
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn validate_rejects_voting_delay_not_below_consensus_timeout() {
-        let config = ConversationConfig {
+        let config = EngineConfig {
             voting_delay: Duration::from_secs(30),
             consensus_timeout: Duration::from_secs(30),
-            ..ConversationConfig::default()
+            ..EngineConfig::default()
         };
         assert!(matches!(
             config.validate(),
@@ -322,20 +282,20 @@ mod tests {
     fn validate_allows_consensus_timeout_above_commit_batch_window() {
         // Voting and batching are sequential phases, so a consensus_timeout
         // larger than commit_batch_window is a valid (if less-batched) choice.
-        let config = ConversationConfig {
+        let config = EngineConfig {
             voting_delay: Duration::from_millis(30),
             consensus_timeout: Duration::from_millis(150),
             commit_batch_window: Duration::from_millis(50),
-            ..ConversationConfig::default()
+            ..EngineConfig::default()
         };
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn validate_rejects_zero_freeze_duration() {
-        let config = ConversationConfig {
+        let config = EngineConfig {
             freeze_duration: Duration::ZERO,
-            ..ConversationConfig::default()
+            ..EngineConfig::default()
         };
         assert!(matches!(
             config.validate(),
@@ -345,10 +305,10 @@ mod tests {
 
     #[test]
     fn validate_rejects_proposal_expiration_not_above_consensus_timeout() {
-        let config = ConversationConfig {
+        let config = EngineConfig {
             consensus_timeout: Duration::from_secs(5),
             proposal_expiration: Duration::from_secs(5),
-            ..ConversationConfig::default()
+            ..EngineConfig::default()
         };
         assert!(matches!(
             config.validate(),
@@ -358,7 +318,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_bad_steward_bounds() {
-        let mut config = ConversationConfig::default();
+        let mut config = EngineConfig::default();
         config.steward_list.sn_min = 3;
         config.steward_list.sn_max = 2;
         assert!(matches!(

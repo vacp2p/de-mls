@@ -10,13 +10,14 @@
 use tracing::info;
 
 use crate::{
-    ConversationError, ConversationState, CreatorVote, DEFAULT_PEER_SCORE, ElectionDecision,
-    ElectionSkip, ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig,
+    ConversationError, DEFAULT_PEER_SCORE, ElectionDecision, ElectionSkip, ScoreSnapshot,
+    ScoringConfig, StewardList, StewardListConfig,
     engine::{
         handle::Engine,
         store::EngineStore,
-        types::Event,
+        types::{Event, Phase},
         util::{member_set, target_member_id_of},
+        voting::CreatorVote,
     },
     protos::de_mls::messages::v1::{
         ControlMessage, ConversationSync, ConversationSyncRequest, ConversationUpdateRequest,
@@ -45,16 +46,16 @@ impl<St: EngineStore> Engine<St> {
     pub(crate) fn sync_scoring_members(&mut self) -> Result<(), ConversationError> {
         let scored: Vec<Vec<u8>> = self
             .scoring
-            .all_members_with_scores()?
+            .all_members_with_scores()
             .into_iter()
             .map(|(id, _)| id)
             .collect();
         let diff = scoring_member_diff(&scored, &self.members);
         for member_id in &diff.to_add {
-            self.scoring.add_member(member_id)?;
+            self.scoring.add_member(member_id);
         }
         for member_id in &diff.to_remove {
-            self.scoring.remove_member(member_id)?;
+            self.scoring.remove_member(member_id);
         }
         // store: scores (WP3g)
         Ok(())
@@ -125,9 +126,9 @@ impl<St: EngineStore> Engine<St> {
 
     /// Submit a steward-election proposal. Only the deterministic responsible
     /// proposer actually submits; others no-op, so this is safe to call on
-    /// every tick without double-proposing. Forces a proposal even when the
-    /// list still nominally covers the epoch: the natural-exhaustion caller
-    /// already checked that, and an application-requested election
+    /// every tick without double-proposing. Runs whether the list is
+    /// exhausted or not: the natural-exhaustion caller already checked that,
+    /// and an application-requested election
     /// ([`Engine::propose_election`]) needs to run when every remaining
     /// steward has been skipped rather than the list being exhausted.
     pub(crate) fn initiate_steward_election(&mut self) -> Result<(), ConversationError> {
@@ -147,29 +148,21 @@ impl<St: EngineStore> Engine<St> {
         let (proposed_stewards, election_epoch, retry_round) = {
             let queues = &self.queues;
             let eligible = |c: &[u8]| !queues.has_approved_removal(c);
-            let decision = self.steward_list.propose_election(
-                epoch,
-                &candidate_pool,
-                &self.own,
-                eligible,
-                true,
-            )?;
+            let decision =
+                self.steward_list
+                    .propose_election(epoch, &candidate_pool, &self.own, eligible)?;
             match decision {
                 ElectionDecision::Skip(skip) => {
                     match skip {
-                        // Bypassed by the forced call above.
-                        ElectionSkip::NotExhausted => {}
                         ElectionSkip::NotResponsibleProposer => {
-                            let round = self.steward_list.next_election_round();
                             let proposer = self.steward_list.responsible_proposer(
-                                round,
+                                0,
                                 &candidate_pool,
                                 eligible,
                             );
                             info!(
                                 conversation = %self.conversation_id,
                                 proposer = ?proposer,
-                                retry_round = round,
                                 "skipping election: {skip}"
                             );
                         }
@@ -229,7 +222,7 @@ impl<St: EngineStore> Engine<St> {
         &mut self,
         target: &[u8],
     ) -> Result<(), ConversationError> {
-        let Some(score) = self.scoring.score_for(target)? else {
+        let Some(score) = self.scoring.score_for(target) else {
             return Err(ConversationError::InvalidConversationUpdateRequest);
         };
         let request = ViolationEvidence::score_below_threshold(target.to_vec(), self.epoch, score)
@@ -270,7 +263,7 @@ impl<St: EngineStore> Engine<St> {
         // Only the epoch steward proposes immediately. The buffer survives
         // commit rounds so a later steward can retry.
         let is_epoch_steward = self.is_epoch_steward();
-        let should_propose = is_epoch_steward && state == ConversationState::Working;
+        let should_propose = is_epoch_steward && state == Phase::Working;
         info!(
             conversation = %self.conversation_id,
             epoch = self.epoch,
@@ -367,7 +360,7 @@ impl<St: EngineStore> Engine<St> {
         // them. Saves wire size at scale.
         let peer_scores: Vec<PeerScore> = self
             .scoring
-            .snapshot()?
+            .snapshot()
             .diverged
             .into_iter()
             .map(|(member_id, score)| PeerScore { member_id, score })
@@ -404,7 +397,6 @@ impl<St: EngineStore> Engine<St> {
             default_peer_score: self.scoring.default_score(),
             timing: Some(TimingConfig::from(&self.config)),
             retry_round,
-            max_reelection_attempts: self.steward_list.max_retries(),
             liveness_criteria_yes: self.config.liveness_criteria_yes,
             threshold_peer_score: self.scoring.threshold(),
             pending_update_max_epochs: self.config.pending_update_max_epochs,
@@ -441,7 +433,7 @@ impl<St: EngineStore> Engine<St> {
     /// `backup_takeover_window` first, so a silent epoch steward can't strand
     /// a buffered membership change.
     pub(crate) fn drive_buffered_proposals(&mut self) -> Result<(), ConversationError> {
-        let idle = self.current_state() != ConversationState::Working
+        let idle = self.current_state() != Phase::Working
             || self.queues.approved_proposals_count() > 0
             || self.actionable_buffered_updates().is_empty();
         if idle {
@@ -626,14 +618,12 @@ impl<St: EngineStore> Engine<St> {
             sn,
             sync.retry_round,
         )?;
-        self.steward_list
-            .set_max_retries(sync.max_reelection_attempts);
         // store: steward_list (WP3g)
         self.scoring.set_threshold(sync.threshold_peer_score);
         // Before the snapshot: it rebases members off our assumed default onto
         // the group's, which is exactly the set the sparse `peer_scores` omits.
         self.scoring
-            .set_default_score(synced_default_peer_score(sync))?;
+            .set_default_score(synced_default_peer_score(sync));
         let snapshot = ScoreSnapshot {
             diverged: sync
                 .peer_scores
@@ -643,7 +633,7 @@ impl<St: EngineStore> Engine<St> {
         };
         // Record the bootstrap scores, reporting how far each member had
         // already diverged from the default this node would have assumed.
-        self.apply_score_snapshot(&snapshot)?;
+        self.apply_score_snapshot(&snapshot);
         // store: scores (WP3g)
         self.config.liveness_criteria_yes = sync.liveness_criteria_yes;
         self.config.pending_update_max_epochs = sync.pending_update_max_epochs;
@@ -790,8 +780,6 @@ fn first_zero_timing_field(timing: &TimingConfig) -> Option<&'static str> {
         Some("proposal_expiration_ms")
     } else if timing.consensus_timeout_ms == 0 {
         Some("consensus_timeout_ms")
-    } else if timing.retry_window_ms == 0 {
-        Some("retry_window_ms")
     } else {
         None
     }
@@ -807,7 +795,6 @@ mod conversation_sync_tests {
             freeze_duration_ms: 30_000,
             proposal_expiration_ms: 3_600_000,
             consensus_timeout_ms: 30_000,
-            retry_window_ms: 5_000,
             backup_takeover_window_ms: 30_000,
         }
     }
@@ -822,7 +809,6 @@ mod conversation_sync_tests {
             peer_scores: vec![],
             timing: Some(nonzero_timing()),
             retry_round: 0,
-            max_reelection_attempts: 1,
             liveness_criteria_yes: true,
             threshold_peer_score: threshold,
             pending_update_max_epochs: 3,
@@ -947,13 +933,6 @@ mod conversation_sync_tests {
                     ..nonzero_timing()
                 },
             ),
-            (
-                "retry_window_ms",
-                TimingConfig {
-                    retry_window_ms: 0,
-                    ..nonzero_timing()
-                },
-            ),
         ];
         for (name, timing) in cases {
             assert_eq!(
@@ -967,9 +946,8 @@ mod conversation_sync_tests {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use crate::{
-        ConversationConfig,
-        engine::{handle::Engine, store::InMemoryStore, types::MemberId},
+    use crate::engine::{
+        config::EngineConfig, handle::Engine, store::InMemoryStore, types::MemberId,
     };
 
     /// A member id as the group would issue it: a signature key.
@@ -989,7 +967,7 @@ pub(crate) mod test_support {
             id("alice"),
             1,
             &[id("alice")],
-            ConversationConfig::default(),
+            EngineConfig::default(),
             InMemoryStore::default(),
         )
         .expect("create")
@@ -1004,7 +982,7 @@ pub(crate) mod test_support {
             id("alice"),
             1,
             &[id("alice"), id("bob")],
-            ConversationConfig::default(),
+            EngineConfig::default(),
             InMemoryStore::default(),
         )
         .expect("create")
@@ -1020,7 +998,7 @@ pub(crate) mod test_support {
             1,
             &[id("alice"), id("bob")],
             &[],
-            ConversationConfig::default(),
+            EngineConfig::default(),
             InMemoryStore::default(),
         )
         .expect("join")
@@ -1033,8 +1011,8 @@ mod steward_tests {
     use super::test_support::{creator, founder, id, joiner, member};
     use super::*;
     use crate::{
-        ConversationConfig,
         engine::{
+            config::EngineConfig,
             store::InMemoryStore,
             types::{Outbound, Timestamp},
         },
@@ -1167,7 +1145,7 @@ mod steward_tests {
             1,
             &[id("alice"), id("bob")],
             &[],
-            ConversationConfig::default(),
+            EngineConfig::default(),
             InMemoryStore::default(),
         )
         .expect("join");

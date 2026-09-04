@@ -9,8 +9,8 @@ use std::{fmt, time::Duration};
 
 use sha2::{Digest, Sha256};
 
+pub use crate::engine::timestamp::Timestamp;
 use crate::protos::de_mls::messages::v1::ConversationUpdateRequest;
-pub use crate::wall_clock::Timestamp;
 
 /// A member of the conversation: the signature key of its leaf.
 ///
@@ -206,6 +206,16 @@ pub enum Phase {
     Freezing,
     /// A candidate has been picked and is being merged.
     Selection,
+}
+
+impl fmt::Display for Phase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Phase::Working => write!(f, "Working"),
+            Phase::Freezing => write!(f, "Freezing"),
+            Phase::Selection => write!(f, "Selection"),
+        }
+    }
 }
 
 /// Something the engine observed or did. Informational: dropping one loses

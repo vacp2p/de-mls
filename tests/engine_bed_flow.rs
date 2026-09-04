@@ -7,19 +7,18 @@ mod common;
 use std::time::Duration;
 
 use common::fake_router::Bed;
-use de_mls::ConversationConfig;
+use de_mls::EngineConfig;
 use de_mls::engine::Event;
 
-fn fast() -> ConversationConfig {
-    ConversationConfig {
+fn fast() -> EngineConfig {
+    EngineConfig {
         commit_batch_window: Duration::from_millis(200),
         freeze_duration: Duration::from_millis(150),
         voting_delay: Duration::from_millis(100),
         consensus_timeout: Duration::from_millis(500),
         proposal_expiration: Duration::from_secs(5),
         backup_takeover_window: Duration::from_millis(300),
-        retry_window: Duration::from_millis(100),
-        ..ConversationConfig::default()
+        ..EngineConfig::default()
     }
 }
 

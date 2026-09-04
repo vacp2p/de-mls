@@ -4,10 +4,10 @@ resolver = "3"
 
 [package]
 name = "de-mls"
-version = "4.0.0"
+version = "5.0.0"
 edition = "2024"
 rust-version = "1.95"
-description = "Decentralized MLS — end-to-end encrypted group messaging with consensus-based membership management over gossipsub-like networks"
+description = "Decentralized MLS policy engine — proposal voting, steward election and commit selection, recovery, and peer scoring for a group the application owns"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/vacp2p/de-mls"
 homepage = "https://github.com/vacp2p/de-mls"
@@ -18,9 +18,6 @@ categories = ["cryptography", "network-programming"]
 exclude = ["tests/", ".github/"]
 
 [dependencies]
-openmls = "0.8.1"
-openmls_traits = "0.5.0"
-
 sha2 = "0.11.0"
 thiserror = "2.0.18"
 uuid = "1.23.2"
@@ -29,13 +26,6 @@ indexmap = "2.14.0"
 prost = "0.14"
 
 hashgraph-like-consensus = "0.6.0"
-
-[dev-dependencies]
-alloy = { version = "2.0.5", default-features = false, features = [
-    "signer-local",
-] }
-openmls_basic_credential = { version = "0.5.0", features = ["clonable"] }
-openmls_rust_crypto = "0.5.1"
 
 [build-dependencies]
 prost-build = "0.14"

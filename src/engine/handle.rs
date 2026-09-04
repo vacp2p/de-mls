@@ -16,14 +16,15 @@ use hashgraph_like_consensus::{
 use tracing::{info, warn};
 
 use crate::{
-    ConversationConfig, ConversationError, ConversationStateMachine, PhaseTimer, ScoreChange,
-    ScoreOp, ScoreSnapshot, StewardListService,
-    consensus::outcome_bus::{OutcomeBus, OutcomeReceiver},
-    defaults::InMemoryPeerScoreStorage,
+    ConversationError, ScoreChange, ScoreOp, ScoreSnapshot, StewardListService,
     engine::{
         commit::CommitRoundBuffer,
+        config::EngineConfig,
         consensus_signer::MemberSigner,
+        outcome_bus::{OutcomeBus, OutcomeReceiver},
+        phase_timer::PhaseTimer,
         queues::EngineQueues,
+        state_machine::ConversationStateMachine,
         store::EngineStore,
         types::{
             Action, CommitHash, Decision, Event, MemberId, Outbound, Output, Phase, StagedFacts,
@@ -111,10 +112,10 @@ pub struct Engine<St: EngineStore> {
     pub(crate) queues: EngineQueues,
     pub(crate) state_machine: ConversationStateMachine,
     pub(crate) steward_list: StewardListService,
-    pub(crate) scoring: PeerScoringService<InMemoryPeerScoreStorage>,
+    pub(crate) scoring: PeerScoringService,
     pub(crate) consensus: EngineConsensus,
     pub(crate) consensus_rx: OutcomeReceiver,
-    pub(crate) config: ConversationConfig,
+    pub(crate) config: EngineConfig,
     pub(crate) timing: Timing,
     pub(crate) store: St,
     /// The current driving call's clock reading.
@@ -136,20 +137,16 @@ impl<St: EngineStore> Engine<St> {
         own: MemberId,
         epoch: u64,
         members: &[MemberId],
-        config: ConversationConfig,
+        config: EngineConfig,
         store: St,
     ) -> Result<Self, ConversationError> {
         config.validate()?;
-        let scoring = PeerScoringService::new(
-            InMemoryPeerScoreStorage::default(),
-            crate::default_score_deltas(),
-            config.scoring.clone(),
-        );
+        let scoring =
+            PeerScoringService::new(crate::default_score_deltas(), config.scoring.clone());
         scoring.validate_config()?;
 
         let mut steward_list = StewardListService::empty(config.steward_list.clone());
         steward_list.set_conversation_id(conversation_id.as_bytes());
-        steward_list.set_max_retries(config.max_reelection_attempts);
 
         let outcome_bus = OutcomeBus::default();
         let consensus_rx = outcome_bus.subscribe();
@@ -213,13 +210,7 @@ impl<St: EngineStore> Engine<St> {
 
     /// The lifecycle phase.
     pub fn phase(&self) -> Phase {
-        match self.state_machine.current_state() {
-            crate::ConversationState::Working => Phase::Working,
-            crate::ConversationState::Freezing => Phase::Freezing,
-            crate::ConversationState::Selection => Phase::Selection,
-            // The engine never enters the old machine's reelection state.
-            crate::ConversationState::Reelection => Phase::Working,
-        }
+        self.state_machine.current_state()
     }
 
     /// Whether this member is on the current steward list.
@@ -248,11 +239,11 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// The timing and policy this conversation runs with.
-    pub fn config(&self) -> &ConversationConfig {
+    pub fn config(&self) -> &EngineConfig {
         &self.config
     }
 
-    pub(crate) fn current_state(&self) -> crate::ConversationState {
+    pub(crate) fn current_state(&self) -> Phase {
         self.state_machine.current_state()
     }
 
@@ -284,7 +275,7 @@ impl<St: EngineStore> Engine<St> {
     /// clock the moment it lands, so the wakeup this call reports already
     /// covers the round that has to follow.
     fn anchor_inactivity_timer(&mut self) {
-        if self.current_state() == crate::ConversationState::Working
+        if self.current_state() == Phase::Working
             && self.queues.approved_proposals_count() > 0
             && self.timing.phase_timer.started_at().is_none()
         {
@@ -298,7 +289,7 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// Record a phase change, if there was one.
-    pub(crate) fn emit_phase(&mut self, state: Option<crate::ConversationState>) {
+    pub(crate) fn emit_phase(&mut self, state: Option<Phase>) {
         if state.is_some() {
             let phase = self.phase();
             self.emit(Event::PhaseChange(phase));
@@ -345,20 +336,15 @@ impl<St: EngineStore> Engine<St> {
     // ── scoring ────────────────────────────────────────────────────────
 
     /// Apply `ops` to the score table, reporting each moved score.
-    pub(crate) fn apply_score_ops(&mut self, ops: &[ScoreOp]) -> Result<(), ConversationError> {
-        let changes = self.scoring.apply_ops(ops)?;
+    pub(crate) fn apply_score_ops(&mut self, ops: &[ScoreOp]) {
+        let changes = self.scoring.apply_ops(ops);
         self.emit_score_changes(changes);
-        Ok(())
     }
 
     /// Adopt a bootstrap score snapshot, reporting each moved score.
-    pub(crate) fn apply_score_snapshot(
-        &mut self,
-        snapshot: &ScoreSnapshot,
-    ) -> Result<(), ConversationError> {
-        let changes = self.scoring.apply_snapshot(snapshot)?;
+    pub(crate) fn apply_score_snapshot(&mut self, snapshot: &ScoreSnapshot) {
+        let changes = self.scoring.apply_snapshot(snapshot);
         self.emit_score_changes(changes);
-        Ok(())
     }
 
     fn emit_score_changes(&mut self, changes: Vec<ScoreChange>) {
@@ -408,8 +394,8 @@ impl<St: EngineStore> Engine<St> {
     fn phase_deadline(&self) -> Option<Timestamp> {
         let anchor = self.timing.phase_timer.started_at()?;
         match self.current_state() {
-            crate::ConversationState::Freezing => Some(anchor + self.config.freeze_duration),
-            crate::ConversationState::Working if self.queues.approved_proposals_count() > 0 => {
+            Phase::Freezing => Some(anchor + self.config.freeze_duration),
+            Phase::Working if self.queues.approved_proposals_count() > 0 => {
                 Some(anchor + self.config.commit_batch_window)
             }
             _ => None,
@@ -448,34 +434,34 @@ impl<St: EngineStore> Engine<St> {
 
     // ── state machine + phase timer ────────────────────────────────────
 
-    pub(crate) fn start_working(&mut self) -> crate::ConversationState {
+    pub(crate) fn start_working(&mut self) -> Phase {
         self.state_machine.start_working();
         self.timing.phase_timer.clear();
         info!(state = "Working", "state transition");
-        crate::ConversationState::Working
+        Phase::Working
     }
 
     /// Enter `Freezing` from `Working`, anchoring the
     /// freeze timer. `None` from any other state.
-    pub(crate) fn start_freezing(&mut self) -> Option<crate::ConversationState> {
+    pub(crate) fn start_freezing(&mut self) -> Option<Phase> {
         if self.state_machine.start_freezing() {
             self.timing.phase_timer.start(self.now);
             info!(state = "Freezing", "state transition");
-            Some(crate::ConversationState::Freezing)
+            Some(Phase::Freezing)
         } else {
             None
         }
     }
 
-    pub(crate) fn start_selection(&mut self) -> crate::ConversationState {
+    pub(crate) fn start_selection(&mut self) -> Phase {
         self.state_machine.start_selection();
         info!(state = "Selection", "state transition");
-        crate::ConversationState::Selection
+        Phase::Selection
     }
 
     /// `true` once the freeze window elapsed while in `Freezing`.
     pub(crate) fn is_freeze_window_elapsed(&self) -> bool {
-        self.current_state() == crate::ConversationState::Freezing
+        self.current_state() == Phase::Freezing
             && self
                 .timing
                 .phase_timer
@@ -489,10 +475,8 @@ impl<St: EngineStore> Engine<St> {
         &mut self,
         approved_proposals_count: usize,
         inactivity_duration: Duration,
-    ) -> Option<crate::ConversationState> {
-        if self.current_state() != crate::ConversationState::Working
-            || approved_proposals_count == 0
-        {
+    ) -> Option<Phase> {
+        if self.current_state() != Phase::Working || approved_proposals_count == 0 {
             return None;
         }
         if self.timing.phase_timer.started_at().is_none() {

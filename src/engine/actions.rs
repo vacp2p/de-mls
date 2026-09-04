@@ -6,11 +6,12 @@
 //! exactly as it was.
 
 use crate::{
-    ConversationError, ConversationState, CreatorVote,
+    ConversationError,
     engine::{
         handle::Engine,
         store::EngineStore,
-        types::{MemberId, Output, Timestamp},
+        types::{MemberId, Output, Phase, Timestamp},
+        voting::CreatorVote,
     },
     protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberInvite},
 };
@@ -26,7 +27,7 @@ impl<St: EngineStore> Engine<St> {
     ) -> Result<Output, ConversationError> {
         self.begin(now);
         let state = self.current_state();
-        if state != ConversationState::Working {
+        if state != Phase::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
         if self.is_member(member.as_bytes()) {
@@ -64,7 +65,7 @@ impl<St: EngineStore> Engine<St> {
     ) -> Result<Output, ConversationError> {
         self.begin(now);
         let state = self.current_state();
-        if state != ConversationState::Working {
+        if state != Phase::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
         if !self.is_member(member.as_bytes()) {
@@ -119,10 +120,7 @@ impl<St: EngineStore> Engine<St> {
     ) -> Result<Output, ConversationError> {
         self.begin(now);
         let state = self.current_state();
-        if matches!(
-            state,
-            ConversationState::Freezing | ConversationState::Selection
-        ) {
+        if matches!(state, Phase::Freezing | Phase::Selection) {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
         self.cancel_auto_vote(proposal_id);

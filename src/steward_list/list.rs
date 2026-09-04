@@ -97,8 +97,8 @@ pub struct StewardList {
     election_epoch: u64,
     /// The retry round this list was generated with — the seed baked into its
     /// SHA256 sort. Frozen provenance, so any peer can re-derive and validate
-    /// the exact same list. Distinct from the service's live
-    /// `next_election_round` counter.
+    /// the exact same list. Always `0` in the current engine; the field and
+    /// the RFC hash input survive on the wire.
     retry_round: u32,
 }
 
@@ -164,19 +164,6 @@ impl StewardList {
         self.steward_from(epoch, 0, eligible)
     }
 
-    /// The epoch steward and its backup (the next eligible slot), distinct when
-    /// two members are eligible. Either is `None` when unavailable.
-    pub fn epoch_and_backup<F: Fn(&[u8]) -> bool>(
-        &self,
-        epoch: u64,
-        eligible: F,
-    ) -> (Option<&[u8]>, Option<&[u8]>) {
-        let epoch_steward = self.steward_from(epoch, 0, &eligible);
-        let backup =
-            epoch_steward.and_then(|es| self.steward_from(epoch, 1, |c| c != es && eligible(c)));
-        (epoch_steward, backup)
-    }
-
     /// Walk the rotation from `epoch`'s slot plus `offset`, returning the first
     /// member `eligible` accepts. `None` if exhausted or none match.
     fn steward_from<F: Fn(&[u8]) -> bool>(
@@ -235,7 +222,7 @@ impl StewardList {
     }
 
     /// Retry round frozen into this list as its SHA256-sort seed (carried in
-    /// `ConversationSync`). Distinct from the service's live `next_election_round`.
+    /// `ConversationSync`).
     pub fn retry_round(&self) -> u32 {
         self.retry_round
     }
@@ -423,21 +410,6 @@ mod tests {
     }
 
     #[test]
-    fn test_backup_is_next_rotation_slot() {
-        let config = StewardListConfig::new(3, 3).unwrap();
-        let mems = members(&[1, 2, 3]);
-
-        let list = StewardList::generate(0, b"conversation", &mems, 3, config, 0).unwrap();
-        let order: Vec<&[u8]> = list.members().iter().map(|m| m.as_slice()).collect();
-
-        for epoch in 0..3u64 {
-            let (epoch_steward, backup) = list.epoch_and_backup(epoch, |_| true);
-            assert_eq!(epoch_steward, Some(order[epoch as usize % 3]));
-            assert_eq!(backup, Some(order[(epoch as usize + 1) % 3]));
-        }
-    }
-
-    #[test]
     fn test_list_exhaustion() {
         let config = StewardListConfig::new(2, 3).unwrap();
         let mems = members(&[1, 2, 3]);
@@ -454,7 +426,6 @@ mod tests {
         );
 
         assert!(list.epoch_steward(8, |_| true).is_none());
-        assert!(list.epoch_and_backup(8, |_| true).1.is_none());
     }
 
     #[test]
@@ -528,9 +499,7 @@ mod tests {
 
         let list = StewardList::generate(0, b"conversation", &mems, 1, config, 0).unwrap();
         assert_eq!(list.len(), 1);
-        let (e, b) = list.epoch_and_backup(0, |_| true);
-        assert!(e.is_some());
-        assert!(b.is_none());
+        assert!(list.epoch_steward(0, |_| true).is_some());
         assert!(list.is_exhausted(1));
     }
 
@@ -554,46 +523,6 @@ mod tests {
             .unwrap();
         assert_ne!(live, nominal.as_slice());
         assert!(after.iter().any(|m| m == live));
-    }
-
-    #[test]
-    fn test_epoch_and_backup_all_ineligible_and_single_survivor() {
-        let config = StewardListConfig::new(2, 2).unwrap();
-        let mems = members(&[1, 2]);
-        let list = StewardList::generate(0, b"conversation", &mems, 2, config, 0).unwrap();
-
-        let (e, b) = list.epoch_and_backup(0, |_| false);
-        assert!(e.is_none() && b.is_none());
-
-        let survivor = mems[0].clone();
-        let (e, b) = list.epoch_and_backup(0, |c| c == survivor.as_slice());
-        assert_eq!(e.unwrap(), survivor.as_slice());
-        assert!(b.is_none());
-    }
-
-    #[test]
-    fn test_epoch_and_backup_rotates_when_epoch_leaves() {
-        let config = StewardListConfig::new(3, 3).unwrap();
-        let mems = members(&[1, 2, 3]);
-        let list = StewardList::generate(0, b"conversation", &mems, 3, config, 0).unwrap();
-
-        let nominal = list.epoch_steward(0, |_| true).unwrap().to_vec();
-        let (e, b) = list.epoch_and_backup(0, |c| c != nominal.as_slice());
-        assert!(e.is_some() && b.is_some());
-        assert_ne!(e.unwrap(), b.unwrap());
-        assert_ne!(e.unwrap(), nominal.as_slice());
-        assert_ne!(b.unwrap(), nominal.as_slice());
-    }
-
-    #[test]
-    fn test_epoch_and_backup_matches_nominal_when_all_eligible() {
-        let config = StewardListConfig::new(3, 3).unwrap();
-        let mems = members(&[1, 2, 3]);
-        let list = StewardList::generate(0, b"conversation", &mems, 3, config, 0).unwrap();
-
-        let (e, b) = list.epoch_and_backup(0, |_| true);
-        assert_eq!(e, list.epoch_steward(0, |_| true));
-        assert_eq!(b, list.epoch_steward(1, |_| true));
     }
 
     #[test]

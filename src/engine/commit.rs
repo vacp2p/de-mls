@@ -13,17 +13,17 @@ use prost::Message;
 use tracing::{debug, info, warn};
 
 use crate::{
-    ConversationError, ConversationState, ScoreEvent, ScoreOp,
+    ConversationError, ScoreEvent, ScoreOp,
     engine::{
         handle::{Engine, PendingBuild, PendingMerge},
+        proposal_kind::ProposalKind,
         queues::{EarlyCandidate, EngineQueues},
         store::EngineStore,
         types::{
             Action, Admission, CommitHash, Decision, DecisionFailure, Event, MemberId,
-            MembershipDelta, Outbound, Output, StagedFacts, Timestamp,
+            MembershipDelta, Outbound, Output, Phase, StagedFacts, Timestamp,
         },
     },
-    proposal_kind::ProposalKind,
     protos::de_mls::messages::v1::{
         CommitCandidate, ConversationUpdateRequest, conversation_update_request::Payload,
     },
@@ -274,7 +274,7 @@ impl<St: EngineStore> Engine<St> {
     /// A peer's candidate opens the round locally: from `Working` we enter
     /// `Freezing` and, if we are the epoch steward, mint our own.
     fn open_round_on_peer_candidate(&mut self) -> Result<(), ConversationError> {
-        if self.current_state() != ConversationState::Working {
+        if self.current_state() != Phase::Working {
             return Ok(());
         }
         let Some(event) = self.start_freezing() else {
@@ -285,7 +285,7 @@ impl<St: EngineStore> Engine<St> {
 
     /// Emit [`Event::CommitRoundProgress`] when the count moved.
     fn report_round_progress(&mut self) {
-        if self.current_state() != ConversationState::Freezing {
+        if self.current_state() != Phase::Freezing {
             return;
         }
         let progress = self.commit_candidate_count();
@@ -465,10 +465,7 @@ impl<St: EngineStore> Engine<St> {
 
     /// Finish entering `Freezing`: ask the router for our own candidate — a
     /// no-op unless we are the epoch steward — then announce the phase.
-    pub(crate) fn on_freeze_entered(
-        &mut self,
-        event: ConversationState,
-    ) -> Result<(), ConversationError> {
+    pub(crate) fn on_freeze_entered(&mut self, event: Phase) -> Result<(), ConversationError> {
         if let Err(e) = self.request_own_candidate() {
             // A mint failure stalls this round and repeats on every retry, and
             // the phase change alone reads as a healthy freeze.
@@ -526,7 +523,7 @@ impl<St: EngineStore> Engine<St> {
         }
 
         if !ops.is_empty() {
-            self.apply_score_ops(&ops)?;
+            self.apply_score_ops(&ops);
         }
 
         Ok(winner.map(|w| RoundWinner {
@@ -626,7 +623,7 @@ impl<St: EngineStore> Engine<St> {
             self.apply_score_ops(&[ScoreOp {
                 member_id: steward.to_vec(),
                 event: ScoreEvent::CensorshipInactivity,
-            }])?;
+            }]);
         }
 
         self.emit(Event::CommitMissing {
@@ -691,7 +688,6 @@ impl<St: EngineStore> Engine<St> {
             return Ok(self.finish());
         }
 
-        self.steward_list.reset_retry();
         if let Err(e) = self.steward_list_housekeeping() {
             self.report_failure("steward_list_housekeeping", &e);
         }
@@ -743,10 +739,10 @@ impl<St: EngineStore> Engine<St> {
     ) -> Result<(), ConversationError> {
         let _ = self.queues.take_membership_delta();
         for member in &delta.removed {
-            self.scoring.remove_member(member)?;
+            self.scoring.remove_member(member);
         }
         for member in &delta.added {
-            self.scoring.add_member(member)?;
+            self.scoring.add_member(member);
         }
         let max_epochs = self.config.pending_update_max_epochs;
         let _ = self.queues.expire_pending_updates(epoch, max_epochs);
@@ -856,8 +852,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        ConversationConfig,
-        engine::{store::InMemoryStore, types::Timestamp},
+        engine::{config::EngineConfig, store::InMemoryStore, types::Timestamp},
         protos::de_mls::messages::v1::{MemberInvite, RemoveMember},
     };
 
@@ -878,7 +873,7 @@ mod tests {
             ids[0].clone(),
             0,
             &ids,
-            ConversationConfig::default(),
+            EngineConfig::default(),
             InMemoryStore::default(),
         )
         .expect("create");
@@ -1310,10 +1305,10 @@ mod tests {
         });
         e.round.insert(0, candidate, 3);
 
-        let before = e.scoring.score_for(impostor.as_bytes()).unwrap().unwrap();
+        let before = e.scoring.score_for(impostor.as_bytes()).unwrap();
         let winner = e.select_epoch_steward_candidate().unwrap();
         assert!(winner.is_none(), "no epoch-steward candidate was submitted");
-        let after = e.scoring.score_for(impostor.as_bytes()).unwrap().unwrap();
+        let after = e.scoring.score_for(impostor.as_bytes()).unwrap();
         assert!(after < before, "the impostor is penalised");
     }
 
@@ -1333,7 +1328,7 @@ mod tests {
         assert_ne!(es, e.own, "the test needs a steward other than us");
 
         e.begin(at(0));
-        let before = e.scoring.score_for(&es).unwrap().unwrap();
+        let before = e.scoring.score_for(&es).unwrap();
         e.close_round_without_commit().unwrap();
         let out = e.finish();
 
@@ -1341,7 +1336,7 @@ mod tests {
             ev,
             Event::CommitMissing { steward, .. } if steward == &Some(MemberId::from(es.as_slice()))
         )));
-        let after = e.scoring.score_for(&es).unwrap().unwrap();
+        let after = e.scoring.score_for(&es).unwrap();
         assert!(after < before, "the silent steward is penalised");
         assert_eq!(
             e.queues.approved_proposals_count(),

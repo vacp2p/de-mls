@@ -1,12 +1,12 @@
 use std::time::Duration;
 
-use crate::wall_clock::Timestamp;
+use crate::engine::timestamp::Timestamp;
 
 /// Wall-clock anchor for the active phase. Holds only the anchor
 /// [`Timestamp`]; queries take the current time and the relevant
 /// `Duration` as parameters — the caller supplies the clock reading.
-/// [`crate::Conversation`] composes the timer with the state
-/// machine and [`crate::ConversationConfig`] durations.
+/// [`crate::engine::Engine`] composes the timer with the state
+/// machine and [`crate::engine::EngineConfig`] durations.
 #[derive(Debug, Clone, Default)]
 pub struct PhaseTimer {
     /// Meaning depends on the orchestrator's intent at start time:

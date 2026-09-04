@@ -4,156 +4,90 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-Decentralized MLS — end-to-end encrypted group messaging with consensus-based
-membership over gossipsub-like networks. de-mls implements the [Decentralized MLS Off-Chain Consensus](https://github.com/logos-co/logos-lips/blob/master/docs/anoncomms/raw/decentralized-mls-offchain-consensus.md)
-protocol on top of [OpenMLS](https://github.com/openmls/openmls): MLS
-cryptography for the secure channel, and a hashgraph-like consensus service for
-proposal voting and steward election.
-
-The library's product is a single per-conversation handle — `Conversation` —
-modeled on OpenMLS's `MlsGroup`. It owns every protocol decision (MLS encryption,
-proposal voting, steward commits, freeze timing); transport and identity stay on
-your side of the boundary. It runs synchronously and is generic over its
-consensus plug-in and its peer-score storage backend.
+Decentralized MLS — the policy engine behind end-to-end encrypted group
+messaging with consensus-based membership over gossipsub-like networks.
+de-mls implements the [Decentralized MLS Off-Chain Consensus](https://github.com/logos-co/logos-lips/blob/master/docs/anoncomms/raw/decentralized-mls-offchain-consensus.md)
+protocol: proposal voting, steward election and commit selection, recovery,
+and peer scoring, driven by a hashgraph-like consensus service. It imports no
+MLS library and never touches ciphertext or the group itself.
 
 > Looking for a runnable app? An example integration — a gateway, a Waku
-> delivery service, and a Dioxus desktop client wired onto this library — lives
-> in the **[de-mls-poc](https://github.com/vacp2p/de-mls-poc)** repository.
+> delivery service, and a Dioxus desktop client wired onto this library —
+> lives in the **[de-mls-poc](https://github.com/vacp2p/de-mls-poc)**
+> repository.
 
 ## What you own vs. what de-mls owns
 
-**You provide:** identity — each member's MLS credential and the map from a
-member to its transport address — the transport itself, the OpenMLS provider
-(crypto + storage), the consensus backend (proposal/vote storage + a
-vote-signing key), key-package minting, and the registry of conversations.
+**You provide:** the MLS group itself, behind the `mls-reference` crate's
+group-operations contract — creation, welcomes, sealing and opening frames,
+staging and merging commits — plus the router that drives the engine and
+executes what it returns, transport, and key-package minting.
 
-**de-mls owns:** the protocol — MLS commits, proposal voting, steward election,
-and freeze timing — along with the per-conversation state behind it: member
-identity (it hands you each member as an OpenMLS `Member` and takes back an
-opaque `MemberId` handle to act on one), proposal queues, deduplication, the
-steward list, peer scores, and the `Conversation` state machine.
+**de-mls owns:** the protocol — proposal voting, steward election, commit
+selection, recovery, and peer scoring — along with the per-conversation state
+behind it: proposal queues, deduplication, the steward list, and peer scores.
 
-## The `Conversation` API
+## Three parties, one loop
 
-```rust,ignore
-use de_mls::Conversation;
-use de_mls::defaults::{DefaultConsensusPlugin, InMemoryPeerScoreStorage};
+A conversation has three parties: an MLS service that owns the group, the
+[`Engine`](src/engine/mod.rs) (this crate), and a router between them that is
+application code. The router opens every frame, hands the engine control
+bytes with the MLS-authenticated sender, and executes what the engine
+returns — a decision against the group, bytes to seal and send, an event to
+observe. Executing a decision leads to a report call that returns its own
+output, so the router loops until one is empty; see `src/lib.rs` for the loop
+in full.
 
-// The first generic is the consensus backend, the second the peer-score
-// *storage* backend. `consensus` is a `ConsensusPlugin` instance you hold and
-// pass by reference; `scoring` is a `PeerScoringService` built over the storage
-// (see `de_mls::defaults::DefaultPeerScoring`). The steward list is
-// library-owned — you set its size bounds on `config` (a `ConversationConfig`).
-// The third generic is the time source: a `WallClock` impl you provide —
-// wrap `SystemTime` in production, use `MockClock` for virtual-time tests.
-// Create a conversation you steward, or join one from a welcome:
-let mut convo: Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, _> =
-    Conversation::create(id, &provider, credential, group_config, &signer,
-                         &consensus, scoring, clock, app_id, config, initial_members)?;
-
-// let joined = Conversation::join(&provider, &signer,
-//                                 welcome_bytes, sync_bytes, …)?;  // Ok(None) = not for us
-// de-mls surfaces members as OpenMLS `Member`s (via `members_view()` and the
-// `MembersChanged` event) and takes back an opaque `MemberId` handle
-// (`MemberId::from(&member)`) for `remove_member` / `member_score`.
-
-// Drive it once per wakeup cycle, then drain its products:
-convo.process_inbound(&provider, &signer, &sender, &payload)?; // feed inbound bytes
-convo.poll(&provider, &signer);                                // tick timers / freeze / commits
-for event in convo.drain_events()   { /* AppMessage, WelcomeReady, PhaseChange, … */ }
-for out   in convo.drain_outbound() { /* publish out.payload on your transport */ }
-```
-
-The conversation is pull-based: it **buffers** outbound for you to publish, and
-reports its next deadline via `next_wakeup_in()`, advancing when you call
-`poll()`. Membership and chat are plain methods: `add_member` / `sponsor_member`,
-`remove_member`, `vote`, `send_message`, `leave`.
-
-Default implementations (consensus over `hashgraph-like-consensus` and
-in-memory peer-score storage) live in `de_mls::defaults` — adopt them
-wholesale or swap either. The steward list is library-owned; you set its size
-bounds via `ConversationConfig`'s `steward_list` field.
-
-A complete, runnable construction — creator and joiner built straight from
-direct arguments — is in
-[`tests/standalone_construction.rs`](tests/standalone_construction.rs).
+`mls-reference/README.md` documents the group-operations contract an MLS
+service must meet and the router contract each call is held to, and ships a
+reference implementation over OpenMLS plus a conformance suite.
 
 ## Consensus
 
-Membership changes are agreed by vote before they commit, and de-mls owns that
-orchestration end to end: opening a proposal, collecting votes, the auto-vote
-and timeout deadlines, and turning a resolved decision into the next steward
-commit, freeze, or election.
-
-You supply a `ConsensusPlugin` — the consensus backend, which is two things:
-where proposals and votes are stored, and the key that signs votes. The
-conversation id serves as the consensus scope, and outcome delivery and
-per-conversation session capacity are library-owned, so the backend stays that
-small. One backend instance backs all of a member's conversations; you hand it
-to each by reference.
-
-`de_mls::defaults::DefaultConsensusPlugin` runs the `hashgraph-like-consensus`
-library over an in-memory store and an Ethereum vote signer — build it with
-`DefaultConsensusPlugin::new(signer)`. A durable integrator keeps the same
-shape and swaps the store for one backed by a database.
+Membership changes are agreed by vote before they commit, and de-mls owns
+that orchestration end to end: opening a proposal, collecting votes, the
+auto-vote and timeout deadlines, and turning a resolved decision into the
+next steward commit or election. The engine runs the
+`hashgraph-like-consensus` library over in-memory sessions; the conversation
+id serves as the consensus scope.
 
 ## Peer scoring
 
 de-mls turns observed protocol events into score deltas and keeps the
-per-member table. What a score *means* is your policy: a member whose score
-moves surfaces as a `MemberScoreChanged { member_id, previous, score }` event
-and keeps every protocol right it had. Compare either end against
-`score_threshold()`, band the range however suits your UI, or watch the trend.
-Act on it with `remove_member`, or `propose_score_removal` to raise the
-`SCORE_BELOW_THRESHOLD` emergency the group votes on — any member may raise
-one, and on YES it commits immediately instead of waiting out the inactivity
-timer.
+per-member table. What a score *means* is the application's policy: a member
+whose score moves surfaces as a `MemberScoreChanged { member, previous,
+score }` event and keeps every protocol right it had. Compare either end
+against the removal threshold, or watch the trend. Act on it by calling
+`propose_remove`, or `propose_score_removal` to raise the emergency the group
+votes on — any member may raise one, and on YES it commits immediately
+instead of waiting out the inactivity timer.
 
-Scores are per-node. They travel once, in the joiner's `ConversationSync`
-bootstrap; after that each member scores what it observes, so two members hold
-different scores for the same peer. Use them to inform a person, not to drive
-a decision members have to agree on. That bootstrap is also the one case where
-a `MemberScoreChanged` means "the score *is* this" rather than "the score
-moved by this much".
-
-You supply a `PeerScoreStorage` backend and a `ScoringConfig` — the starting
-score and the removal threshold — which de-mls combines into its own
-`PeerScoringService`. Per-event deltas are a separate argument that
-*overrides* `default_score_deltas()` entry by entry, so you can retune one
-event without restating the rest. There is no scoring-behavior trait: score
-updates are a protocol decision, so the library keeps one implementation.
-Unlike the scores themselves the config is group-wide, set by the creator and
-adopted by joiners from `ConversationSync` — which matters because the wire
-format is sparse (members sitting at the default are omitted), so both ends
-have to agree on what "default" means.
-
-`de_mls::defaults::InMemoryPeerScoreStorage` is a ready in-memory backend; a
-durable integrator can back the table with sqlite or a key-value store.
-Storage methods are fallible, so a durable backend surfaces I/O failures
-rather than swallowing a score write.
+Scores are per-node: they travel once, in a joiner's `ConversationSync`
+bootstrap, and after that each member scores what it observes, so two
+members can hold different scores for the same peer.
 
 ## Steward list
 
-Who may commit each epoch — the steward list and its epoch/backup rotation —
-is fully library-owned. You set only its size bounds (`sn_min` / `sn_max`, the
-`steward_list` field on `ConversationConfig`); de-mls generates the list,
-validates election proposals, runs the election through consensus, and rotates
-the epoch steward.
+Who may commit each epoch — the deterministic steward list and its epoch
+rotation — is fully engine-owned. The application sets only its size bounds
+(`sn_min` / `sn_max`, the `steward_list` field on `EngineConfig`); de-mls
+generates the list, validates election proposals, runs the election through
+consensus, and rotates the epoch steward. Only the epoch steward's candidate
+may win a commit round (RFC deviation, tracked); a silent steward is skipped
+by a vote rather than covered by a backup timer.
 
-Generation is deterministic and normative: every member derives the identical
-steward list by sorting on `SHA256(epoch ‖ retry_round ‖ member_id ‖
-conversation_id)`, and a proposal that doesn't reproduce it is rejected by all
-peers (RFC §"Steward list creation"). There is nothing to override — a
-divergent generator would fork the group — so, unlike consensus and scoring,
-the steward list takes no plug-in.
+Generation is deterministic and normative: every member derives the
+identical steward list by sorting on `SHA256(epoch ‖ retry_round ‖ member_id
+‖ conversation_id)`, and a proposal that doesn't reproduce it is rejected by
+all peers (RFC §"Steward list creation").
 
 ## Build & test
 
 ```bash
-cargo build -p de-mls
-cargo test  -p de-mls --release
-cargo clippy -p de-mls --tests -- -D warnings
-RUSTDOCFLAGS='-Dwarnings' cargo doc -p de-mls --lib --no-deps --document-private-items
+cargo build --workspace
+cargo test  --workspace --release
+cargo clippy --workspace --tests -- -D warnings
+RUSTDOCFLAGS='-Dwarnings' cargo doc --workspace --no-deps --document-private-items
 ```
 
 Building requires the Rust toolchain (edition 2024) and `protoc`, which
@@ -161,10 +95,10 @@ Building requires the Rust toolchain (edition 2024) and `protoc`, which
 
 ## Documentation
 
-- **API:** every public trait carries its contract in rustdoc — run
+- **API:** every public item carries its contract in rustdoc — run
   `cargo doc -p de-mls --open`.
-- **Living example:** [`tests/standalone_construction.rs`](tests/standalone_construction.rs)
-  builds a creator and a joiner straight from direct arguments.
+- **The bed:** `tests/engine_bed_flow.rs` and `tests/engine_bed_smoke.rs`
+  drive the engine end to end over a fake router and a fake group.
 - **Protocol:** de-mls follows the
   [Decentralized MLS Off-Chain Consensus](https://github.com/logos-co/logos-lips/blob/master/docs/anoncomms/raw/decentralized-mls-offchain-consensus.md)
   specification.

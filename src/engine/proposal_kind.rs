@@ -1,9 +1,9 @@
-//! Classification of [`ConversationUpdateRequest`](crate::protos::de_mls::messages::v1::ConversationUpdateRequest)s by protocol role.
+//! Classification of [`ConversationUpdateRequest`]s by protocol role.
 //!
 //! `ProposalKind` is the canonical classifier for membership-vs-governance
 //! proposals. The ordinal order encodes RFC partial-freeze priority
 //! (Commit < StewardElection < Emergency), used by
-//! `ConversationQueues::partial_freeze_blocks`.
+//! `EngineQueues::partial_freeze_blocks`.
 
 use crate::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, conversation_update_request::Payload,

@@ -6,11 +6,11 @@ mod common;
 use std::time::Duration;
 
 use common::fake_router::Bed;
-use de_mls::ConversationConfig;
+use de_mls::EngineConfig;
 
 #[test]
 fn creator_seats_two_joiners_and_chat_crosses() {
-    let mut bed = Bed::new("conv", "alice", ConversationConfig::default());
+    let mut bed = Bed::new("conv", "alice", EngineConfig::default());
     let bob = bed.add_pending("bob");
     let carol = bed.add_pending("carol");
     bed.seed(&[bob, carol]);
@@ -40,7 +40,7 @@ fn creator_seats_two_joiners_and_chat_crosses() {
 
 #[test]
 fn partition_holds_frames_back() {
-    let mut bed = Bed::new("conv", "alice", ConversationConfig::default());
+    let mut bed = Bed::new("conv", "alice", EngineConfig::default());
     let bob = bed.add_pending("bob");
     bed.seed(&[bob]);
     bed.process(Duration::from_millis(50));

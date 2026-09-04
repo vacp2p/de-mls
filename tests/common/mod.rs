@@ -1,95 +1,9 @@
-//! Shared fixtures for de-mls integration tests.
-//!
-//! Helpers that build the per-conversation plug-in instances, credentials, and
-//! key packages over the OpenMLS reference provider (`OpenMlsRustCrypto`) —
-//! exactly the inline wiring an integrator does. The library builds the MLS
-//! service itself from the provider + credential; tests supply those.
+//! The fake bed for de-mls integration tests: a cryptography-free MLS group
+//! stand-in, the reference router built over it, and virtual-time network
+//! delivery. Some methods here are scaffolding for scenarios not yet
+//! written (design 9.2).
 #![allow(dead_code)]
 
 pub mod fake_mls;
 pub mod fake_router;
-pub mod harness;
 pub mod net;
-pub mod wallet;
-
-use de_mls::defaults::{DefaultPeerScoring, InMemoryPeerScoreStorage};
-use de_mls::{PeerScoringService, ScoringConfig, default_score_deltas};
-use openmls::credentials::{BasicCredential, CredentialWithKey};
-use openmls::group::{MlsGroupCreateConfig, MlsGroupCreateConfigBuilder};
-use openmls::key_packages::KeyPackage;
-use openmls::prelude::Ciphersuite;
-use openmls::prelude::tls_codec::Serialize as _;
-use openmls_basic_credential::SignatureKeyPair;
-use openmls_rust_crypto::OpenMlsRustCrypto;
-
-/// OpenMLS provider the tests run: the reference `OpenMlsRustCrypto`.
-pub type TestProvider = OpenMlsRustCrypto;
-
-/// Build a fresh credential + signer for `member_id` (the integrator-side
-/// "credentials" the library no longer owns).
-pub fn test_credential(member_id: &[u8]) -> (CredentialWithKey, SignatureKeyPair) {
-    let signer = SignatureKeyPair::new(TEST_CIPHERSUITE.signature_algorithm()).expect("signer");
-    let credential = CredentialWithKey {
-        credential: BasicCredential::new(member_id.to_vec()).into(),
-        signature_key: signer.to_public_vec().into(),
-    };
-    (credential, signer)
-}
-
-/// The ciphersuite the tests build credentials and key packages with.
-pub const TEST_CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
-
-/// The integrator-side half of the create config. de-mls stamps its own
-/// reliability settings on top, so nothing here needs to set them.
-pub fn test_mls_group_config() -> MlsGroupCreateConfigBuilder {
-    MlsGroupCreateConfig::builder().ciphersuite(TEST_CIPHERSUITE)
-}
-
-/// A minted key package plus the owner's `member_id` — the (bytes, id) bundle
-/// an integrator keeps for itself now that de-mls takes both as raw bytes.
-pub struct MintedKeyPackage {
-    pub bytes: Vec<u8>,
-    pub signature_key: Vec<u8>,
-}
-
-impl MintedKeyPackage {
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    /// The joiner id de-mls tracks this key package by until it has a leaf.
-    pub fn signature_key(&self) -> &[u8] {
-        &self.signature_key
-    }
-}
-
-/// Mint a single-use key package into `provider` — the integrator's one
-/// reused provider, which thereby holds the KP's private keys needed to join
-/// once the matching welcome arrives.
-pub fn mint_key_package(
-    provider: &TestProvider,
-    credential: &CredentialWithKey,
-    signer: &SignatureKeyPair,
-) -> MintedKeyPackage {
-    let signature_key = credential.signature_key.as_slice().to_vec();
-    let bundle = KeyPackage::builder()
-        .build(TEST_CIPHERSUITE, provider, signer, credential.clone())
-        .expect("key package");
-    let bytes = bundle
-        .key_package()
-        .tls_serialize_detached()
-        .expect("kp tls");
-    MintedKeyPackage {
-        bytes,
-        signature_key,
-    }
-}
-
-/// Build a fresh peer-scoring plug-in.
-pub fn make_scoring(config: &ScoringConfig) -> DefaultPeerScoring {
-    PeerScoringService::new(
-        InMemoryPeerScoreStorage::default(),
-        default_score_deltas(),
-        config.clone(),
-    )
-}

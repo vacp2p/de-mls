@@ -1210,15 +1210,10 @@ dependencies = [
 
 [[package]]
 name = "de-mls"
-version = "4.0.0"
+version = "5.0.0"
 dependencies = [
- "alloy",
  "hashgraph-like-consensus",
  "indexmap 2.14.0",
- "openmls",
- "openmls_basic_credential",
- "openmls_rust_crypto",
- "openmls_traits",
  "prost",
  "prost-build",
  "sha2 0.11.0",
