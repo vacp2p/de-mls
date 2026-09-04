@@ -20,6 +20,18 @@ message AppMessage {
   }
 }
 
+// Everything de-mls itself puts on the wire, sealed by the router at the
+// current epoch. Chat content is not here: it is the application's.
+message ControlMessage {
+  oneof payload {
+    consensus.v1.Proposal proposal = 1;
+    consensus.v1.Vote vote = 2;
+    ConversationSync conversation_sync = 3;
+    ConversationSyncRequest conversation_sync_request = 4;
+    EventMembershipChange membership_change = 5;
+  }
+}
+
 message BanRequest {
   bytes member_id = 1;
   string conversation_id = 2;
@@ -38,8 +50,11 @@ message EventMembershipChange {
 
 enum TypeMembershipChange{
   Add = 0;
+  Remove = 1;
 }
 
+// Broadcast in the clear: the commit must be readable before it is merged.
+// Encoded standalone by the engine, never inside a sealed message.
 message CommitCandidate {
   bytes conversation_id = 1;
   bytes commit_message = 2;
@@ -91,6 +106,10 @@ message EmergencyCriteriaProposal {
 
 message MemberInvite {
   bytes key_package_bytes = 1;
+  // The joiner's member id (its leaf signature key), as the proposer read it
+  // from the key package. Every member checks it against the key package
+  // before voting.
+  bytes member_id = 2;
 }
 
 message RemoveMember {

@@ -32,6 +32,9 @@ pub enum ConversationError {
     #[error("Score storage error: {0}")]
     ScoreStorage(Box<dyn std::error::Error + Send + Sync>),
 
+    #[error("Engine store error: {0}")]
+    Store(Box<dyn std::error::Error + Send + Sync>),
+
     #[error("Caller is not a steward")]
     NotASteward,
 
