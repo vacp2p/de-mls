@@ -171,7 +171,7 @@ fn invite(member: &MemberId, key_package: Vec<u8>) -> ConversationUpdateRequest 
 mod tests {
     use super::*;
     use crate::engine::{
-        steward::test_support::{creator, id, joiner, member},
+        test_support::{creator, id, joiner, member},
         types::Outbound,
     };
 

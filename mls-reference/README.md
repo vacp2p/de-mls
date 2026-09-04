@@ -65,8 +65,6 @@ MUST.
    execute `decisions` in the order given, then handle `events`. A report
    call made while executing a decision returns its own `Output`, which
    is executed the same way; the router loops until an `Output` is empty.
-   The one exception to "seal at the current epoch" is
-   `Outbound::Bootstrap`, sealed after the merge it belongs to.
 4. A decision the router could not execute (an MLS error on merge, a
    missing staged commit) is reported with `decision_failed(now, decision,
    reason)` before any other engine call. The engine discards and moves on.
@@ -77,8 +75,9 @@ MUST.
    only with the sender MLS authenticated and the epoch it was sealed at.
    A payload the router could not authenticate never reaches the engine.
 6. The router never reads, interprets or generates control bytes, and
-   never ranks or validates candidates. `admit_candidate` is asked before
-   staging; a refused candidate is not staged.
+   never ranks or validates candidates. A candidate on the wire is the raw
+   commit bytes; the router stages it and reports the facts through
+   `handle_candidate`, the group rejecting a foreign or stale commit.
 7. Chat content never reaches the engine.
 7a. An invite proposal carries the joiner's id as the proposer read it from
     the key package. Every member executes `Decision::ValidateKeyPackage`
@@ -96,8 +95,11 @@ MUST.
 11. After a merge, `commit_applied(now, hash, epoch, members)` is called
     before any other engine call. A missed report forks the steward
     election on that node.
-12. The welcome for a commit is delivered with that commit's bootstrap
-    bytes, sealed at the post-merge epoch.
+12. After `Decision::BuildCommit` the router builds, keeps the commit
+    pending, broadcasts the commit bytes, and reports it through
+    `handle_candidate` with the facts the build returned. The welcome
+    carries nothing but the MLS welcome; the joiner's sync arrives as an
+    ordinary control message.
 
 **Storage and restart**
 
@@ -108,7 +110,7 @@ MUST.
     `Engine::restore(store, own, epoch, members)`, then executes the
     returned `Output` (it may contain a sync request).
 15. On join the router opens the welcome first, then
-    `Engine::join(store, own, epoch, members, bootstrap_bytes)`.
+    `Engine::join(store, own, epoch, members)`.
 16. Exactly one live group instance per storage scope.
 
 ## 4. Reference router
@@ -121,7 +123,6 @@ struct Router {
     mls: MlsService,                       // application-owned group
     engine: Engine<KvStore>,
     staged: HashMap<CommitHash, StagedCommit>,
-    welcomes: HashMap<CommitHash, Welcome>,
 }
 
 impl Router {
@@ -135,12 +136,11 @@ impl Router {
                         .handle_control(now, opened.sender, opened.epoch, &opened.plaintext),
                 }
             }
-            Frame::Candidate(env) => {
-                if !self.engine.admit_candidate(&env.hash, &env.steward, env.epoch) { return }
-                let staged = self.mls.stage(&env.commit);         // authenticates the sender
-                let facts = Candidate::from(&env, &staged);
-                self.staged.insert(env.hash, staged);
-                self.engine.handle_candidate(now, facts)
+            Frame::Commit(bytes) => {
+                let Ok(facts) = self.mls.stage(&bytes) else { return };   // authenticates
+                let hash = CommitHash::of(&bytes);
+                self.staged.insert(hash, facts.staged);
+                self.engine.handle_candidate(now, hash, facts)
             }
         };
         self.drive(now, out);
@@ -169,28 +169,29 @@ impl Router {
         match d {
             Decision::BuildCommit { actions } => {
                 let built = self.mls.build_commit(&actions);          // stays pending
-                if let Some(w) = built.welcome { self.welcomes.insert(built.hash, w); }
-                self.engine.own_candidate_built(now, built.hash, built.count, built.commit)
+                self.broadcast_commit(&built.commit);
+                self.engine.handle_candidate(now, built.hash, built.facts)
             }
             Decision::Merge { hash } => {
                 let applied = if self.mls.pending_hash() == Some(hash) {
                     self.mls.merge_pending()
                 } else {
                     self.mls.clear_pending();
-                    let staged = self.staged.remove(&hash).expect("admitted and staged");
+                    let staged = self.staged.remove(&hash).expect("staged");
                     self.mls.merge_staged(staged)
                 };
                 self.staged.clear();                                 // the rest are stale
-                let out = self.engine.commit_applied(now, hash, applied.epoch, applied.members);
-                if let Some(w) = self.welcomes.remove(&hash) {
-                    let bootstrap = out.bootstrap_for(hash);          // Outbound::Bootstrap
-                    self.inbox.deliver(w, self.mls.seal(bootstrap));   // post-merge epoch
-                }
-                out
+                if let Some(w) = self.mls.take_welcome(hash) { self.inbox.deliver(w); }
+                self.engine.commit_applied(now, hash, applied.epoch, applied.members)
             }
             Decision::Discard { hashes } => {
                 for h in hashes { self.staged.remove(&h); }
                 Output::default()
+            }
+            Decision::ValidateKeyPackage { proposal_id, member, key_package } => {
+                let ok = self.mls.validate_key_package(&key_package).is_ok()
+                    && MlsService::key_package_identity(&key_package) == Ok(member);
+                self.engine.key_package_checked(now, proposal_id, ok)
             }
             Decision::Leave => { self.mls.delete(); Output::default() }
         }
