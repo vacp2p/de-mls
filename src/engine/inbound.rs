@@ -260,7 +260,6 @@ mod tests {
             peer_scores: vec![],
             timing: Some(TimingConfig::from(engine.config())),
             retry_round: 0,
-            max_reelection_attempts: 1,
             liveness_criteria_yes: true,
             threshold_peer_score: 0,
             pending_update_max_epochs: 3,

@@ -3,7 +3,7 @@
 
 use std::{collections::HashMap, time::Duration};
 
-use de_mls::ConversationConfig;
+use de_mls::EngineConfig;
 use de_mls::engine::{
     Admission, CommitHash, Decision, DecisionFailure, Engine, Event, InMemoryStore, MemberId,
     Outbound, Output, Timestamp,
@@ -38,7 +38,7 @@ impl FakeRouter {
         now: Timestamp,
         conversation_id: &str,
         own: MemberId,
-        config: ConversationConfig,
+        config: EngineConfig,
     ) -> Self {
         let mls = FakeMls::create(conversation_id, own.clone());
         let (engine, out) = Engine::create(
@@ -56,12 +56,7 @@ impl FakeRouter {
     }
 
     /// Joiner side: adopt the welcome, open its bootstrap, start the engine.
-    pub fn join(
-        now: Timestamp,
-        own: MemberId,
-        welcome: &Welcome,
-        config: ConversationConfig,
-    ) -> Self {
+    pub fn join(now: Timestamp, own: MemberId, welcome: &Welcome, config: EngineConfig) -> Self {
         let mls = FakeMls::from_welcome(own.clone(), &welcome.snapshot);
         let bootstrap = welcome
             .bootstrap
@@ -325,12 +320,12 @@ pub struct Bed {
     pub net: Net,
     pub nodes: Vec<Node>,
     conversation_id: String,
-    config: ConversationConfig,
+    config: EngineConfig,
 }
 
 impl Bed {
     /// A bed whose node 0 created the conversation.
-    pub fn new(conversation_id: &str, creator: &str, config: ConversationConfig) -> Self {
+    pub fn new(conversation_id: &str, creator: &str, config: EngineConfig) -> Self {
         let now = Timestamp::from_duration_since_epoch(Duration::from_secs(1_000));
         let own = FakeMls::member_id(creator);
         let router = FakeRouter::create(now, conversation_id, own.clone(), config.clone());

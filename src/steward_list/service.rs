@@ -2,20 +2,13 @@
 //! for one conversation.
 //!
 //! It owns the steward-list protocol: generating and validating the
-//! deterministic list, rotating the epoch/backup steward, proposing elections,
-//! and tracking retry rounds. The integrator supplies only a
-//! [`StewardListConfig`].
+//! deterministic list, rotating the epoch/backup steward, and proposing
+//! elections. The integrator supplies only a [`StewardListConfig`].
 
 use std::fmt::{Display, Formatter};
 
 use crate::error::ConversationError;
 use crate::steward_list::list::{StewardList, StewardListConfig};
-
-/// Default steward-election retry cap before `Deadlock` escalation (`2` = three
-/// rounds). Offline stewards are rotated past by `retry_round`, so the ladder
-/// needs room to reach a live one before Layer 3. The app sets this per group
-/// via `ConversationConfig.max_reelection_attempts`.
-pub const DEFAULT_MAX_RETRIES: u32 = 2;
 
 /// Result of [`StewardListService::propose_election`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,8 +24,6 @@ pub enum ElectionDecision {
 /// Why [`StewardListService::propose_election`] declined to propose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElectionSkip {
-    /// The current list still covers this epoch — no election due yet.
-    NotExhausted,
     /// This node isn't the deterministically-responsible proposer.
     NotResponsibleProposer,
     /// No eligible candidates remain after the eligibility filter.
@@ -42,22 +33,10 @@ pub enum ElectionSkip {
 impl Display for ElectionSkip {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::NotExhausted => "steward list not exhausted",
             Self::NotResponsibleProposer => "not the responsible proposer",
             Self::NoEligibleCandidates => "no eligible candidates after filter",
         })
     }
-}
-
-/// The installed list plus the election retry counters. The sort salt isn't
-/// stored — it's re-seeded at restore. Taken with
-/// [`crate::Conversation::steward_list_snapshot`], put back with
-/// [`crate::Conversation::restore_steward_list`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StewardListSnapshot {
-    list: StewardList,
-    next_election_round: u32,
-    max_retries: u32,
 }
 
 /// Per-conversation steward list. Eligibility flows in via `Fn(&[u8]) -> bool`
@@ -67,12 +46,6 @@ pub struct StewardListService {
     list: Option<StewardList>,
     config: StewardListConfig,
     conversation_id: Vec<u8>,
-    /// The live retry counter: the seed the *next* election attempt will feed
-    /// into generation. Bumped on a rejected election, reset to 0 on success.
-    /// Distinct from a [`StewardList`]'s own `retry_round`, which records the
-    /// seed an already-elected list was built with.
-    next_election_round: u32,
-    max_retries: u32,
 }
 
 impl StewardListService {
@@ -85,8 +58,6 @@ impl StewardListService {
             list: None,
             config,
             conversation_id: Vec::new(),
-            next_election_round: 0,
-            max_retries: DEFAULT_MAX_RETRIES,
         }
     }
 
@@ -96,7 +67,7 @@ impl StewardListService {
         &self.config
     }
 
-    /// Adopt conversation-wide bounds; keeps list and retry state.
+    /// Adopt conversation-wide bounds; keeps the installed list.
     pub fn set_config(&mut self, config: StewardListConfig) {
         self.config = config;
     }
@@ -118,23 +89,6 @@ impl StewardListService {
     /// Epoch the active list was elected for, or `None` if no list is installed.
     pub fn election_epoch(&self) -> Option<u64> {
         self.list.as_ref().map(|l| l.election_epoch())
-    }
-
-    /// Round the *next* election attempt will use as its generation seed.
-    /// Distinct from [`StewardList::retry_round`] — the seed frozen into the
-    /// current list.
-    pub fn next_election_round(&self) -> u32 {
-        self.next_election_round
-    }
-
-    /// Retry cap before an unanswered election escalates to `Deadlock`.
-    pub fn max_retries(&self) -> u32 {
-        self.max_retries
-    }
-
-    /// Set the retry cap. The library applies `ConversationConfig.max_reelection_attempts`.
-    pub fn set_max_retries(&mut self, max: u32) {
-        self.max_retries = max;
     }
 
     /// Whether `member_id` is on the active list.
@@ -166,27 +120,11 @@ impl StewardListService {
             .and_then(|l| l.epoch_steward(epoch, eligible))
     }
 
-    /// The epoch steward and its backup for `epoch`, or `(None, None)` with no
-    /// list. See [`StewardList::epoch_and_backup`].
-    pub fn epoch_and_backup<F: Fn(&[u8]) -> bool>(
-        &self,
-        epoch: u64,
-        eligible: F,
-    ) -> (Option<&[u8]>, Option<&[u8]>) {
-        match self.list.as_ref() {
-            Some(l) => l.epoch_and_backup(epoch, eligible),
-            None => (None, None),
-        }
-    }
-
-    /// The member authorized to act for election retry round `round`: entry
-    /// `round % len` of the authority sequence — the installed list's eligible
-    /// members in rotation order, followed by the remaining eligible
-    /// candidates in ascending id order. Round 0 is the eligible steward at the
-    /// list's election-epoch slot; every failed round (rejected by vote or
-    /// silent past the reelection window) hands authority to the next entry,
-    /// so an unresponsive proposer can't strand the election or the
-    /// `Deadlock` escalation. `None` when nobody is eligible.
+    /// The member authorized to propose the election: entry `round % len` of
+    /// the authority sequence — the installed list's eligible members in
+    /// rotation order, followed by the remaining eligible candidates in
+    /// ascending id order. Round 0 is the eligible steward at the list's
+    /// election-epoch slot. `None` when nobody is eligible.
     pub fn responsible_proposer<'a, F: Fn(&[u8]) -> bool>(
         &'a self,
         round: u32,
@@ -252,26 +190,22 @@ impl StewardListService {
     }
 
     /// Decide whether to propose a steward election at `epoch`: `Proposed` with
-    /// a freshly generated list when this node is the responsible proposer and
-    /// an election is due, otherwise `Skip` with the reason. `recovery` forces a
-    /// proposal even when the list isn't exhausted (deadlock recovery).
+    /// a freshly generated list when this node is the responsible proposer,
+    /// otherwise `Skip` with the reason. The caller decides whether an
+    /// election is due (natural exhaustion, or an application request); this
+    /// always proposes when called.
     pub fn propose_election<F: Fn(&[u8]) -> bool>(
         &self,
         epoch: u64,
         candidate_pool: &[Vec<u8>],
         self_member_id: &[u8],
         eligible: F,
-        recovery: bool,
     ) -> Result<ElectionDecision, ConversationError> {
-        if !recovery && !self.is_exhausted(epoch) {
-            return Ok(ElectionDecision::Skip(ElectionSkip::NotExhausted));
-        }
         if candidate_pool.is_empty() {
             return Ok(ElectionDecision::Skip(ElectionSkip::NoEligibleCandidates));
         }
-        let retry_round = self.next_election_round();
         let is_authorized = self
-            .responsible_proposer(retry_round, candidate_pool, &eligible)
+            .responsible_proposer(0, candidate_pool, &eligible)
             .is_some_and(|proposer| proposer == self_member_id);
         if !is_authorized {
             return Ok(ElectionDecision::Skip(ElectionSkip::NotResponsibleProposer));
@@ -284,47 +218,13 @@ impl StewardListService {
             candidate_pool,
             sn,
             self.config.clone(),
-            retry_round,
+            0,
         )?;
         Ok(ElectionDecision::Proposed {
             proposed_stewards: list.members().to_vec(),
             election_epoch: epoch,
-            retry_round,
+            retry_round: 0,
         })
-    }
-
-    /// Increment the retry round. Exhaustion is detected by the caller via
-    /// [`Self::next_election_round`] vs [`Self::max_retries`].
-    pub fn bump_retry(&mut self) {
-        self.next_election_round = self.next_election_round.saturating_add(1);
-    }
-
-    /// Reset the retry round to 0 — a fresh election landed.
-    pub fn reset_retry(&mut self) {
-        self.next_election_round = 0;
-    }
-
-    /// Snapshot the installed list and retry state for persistence. Pulled
-    /// by-request; the conversation-id salt isn't captured (re-seeded at
-    /// restore). Errors when no list is installed — there's nothing to capture.
-    pub fn snapshot(&self) -> Result<StewardListSnapshot, ConversationError> {
-        if self.list.is_none() {
-            return Err(ConversationError::EmptyMembersList);
-        }
-        Ok(StewardListSnapshot {
-            list: self.list.clone().unwrap(),
-            next_election_round: self.next_election_round,
-            max_retries: self.max_retries,
-        })
-    }
-
-    /// Restore state captured by [`Self::snapshot`]. Call
-    /// [`Self::set_conversation_id`] first if a later subset election must
-    /// regenerate against the same salt.
-    pub fn restore(&mut self, snapshot: StewardListSnapshot) {
-        self.list = Some(snapshot.list);
-        self.next_election_round = snapshot.next_election_round;
-        self.max_retries = snapshot.max_retries;
     }
 }
 
@@ -378,55 +278,6 @@ mod tests {
     }
 
     #[test]
-    fn epoch_and_backup_distinct_when_two_eligible() {
-        let mut p = StewardListService::empty(StewardListConfig::new(3, 3).unwrap());
-        let mems = members(&[1, 2, 3]);
-        p.install_list(0, &mems, 3, 0).unwrap();
-
-        let (e, b) = p.epoch_and_backup(0, |_: &[u8]| true);
-        assert!(e.is_some() && b.is_some());
-        assert_ne!(e.unwrap(), b.unwrap());
-    }
-
-    #[test]
-    fn backup_is_none_when_only_one_eligible() {
-        let mut p = StewardListService::empty(config());
-        let mems = members(&[1, 2, 3]);
-        p.install_list(0, &mems, 3, 0).unwrap();
-
-        let survivor = mems[0].clone();
-        let (e, b) = p.epoch_and_backup(0, |c: &[u8]| c == survivor.as_slice());
-        assert_eq!(e.unwrap(), survivor.as_slice());
-        assert!(b.is_none());
-    }
-
-    #[test]
-    fn bump_retry_increments_round_past_max() {
-        let mut p = StewardListService::empty(config());
-        p.set_max_retries(1);
-        p.bump_retry();
-        assert_eq!(p.next_election_round(), 1);
-        assert!(p.next_election_round() <= p.max_retries());
-
-        p.bump_retry();
-        assert_eq!(p.next_election_round(), 2);
-        assert!(
-            p.next_election_round() > p.max_retries(),
-            "round 2 exceeds max 1"
-        );
-    }
-
-    #[test]
-    fn reset_retry_clears_round() {
-        let mut p = StewardListService::empty(config());
-        p.bump_retry();
-        p.bump_retry();
-        assert_eq!(p.next_election_round(), 2);
-        p.reset_retry();
-        assert_eq!(p.next_election_round(), 0);
-    }
-
-    #[test]
     fn validate_proposed_against_self_derived_list() {
         let mut p = StewardListService::empty(config());
         let mems = members(&[1, 2, 3]);
@@ -445,25 +296,8 @@ mod tests {
         assert!(!p.validate_proposed(&tampered, 0, &mems, 0).unwrap());
     }
 
-    #[test]
-    fn set_max_retries_updates_threshold() {
-        let mut p = StewardListService::empty(config());
-        p.set_max_retries(3);
-        assert_eq!(p.max_retries(), 3);
-
-        for _ in 0..3 {
-            p.bump_retry();
-            assert!(p.next_election_round() <= p.max_retries());
-        }
-        p.bump_retry();
-        assert!(
-            p.next_election_round() > p.max_retries(),
-            "round 4 exceeds max 3"
-        );
-    }
-
     /// Round 0 hands authority to the eligible steward at the list's
-    /// election-epoch slot; later rounds walk on from there.
+    /// election-epoch slot.
     #[test]
     fn responsible_proposer_round_zero_is_the_election_epoch_steward() {
         let mut p = StewardListService::empty(StewardListConfig::new(3, 3).unwrap());
@@ -496,7 +330,7 @@ mod tests {
     fn responsible_proposer_rotates_by_round() {
         // Authority sequence: eligible list members in list order, then the
         // remaining eligible pool ids ascending; the round indexes it (mod
-        // len), so every failed round hands authority to the next candidate.
+        // len).
         let mut p = StewardListService::empty(StewardListConfig::new(1, 1).unwrap());
         let listed = members(&[9]);
         p.install_list(0, &listed, 1, 0).unwrap();
@@ -526,33 +360,5 @@ mod tests {
         assert!(!p.election_required(1));
         assert!(!p.election_required(3));
         assert!(p.election_required(4));
-    }
-
-    #[test]
-    fn snapshot_restore_round_trips_list_and_retry() {
-        let mut p = StewardListService::empty(config());
-        p.set_conversation_id(b"conv");
-        let mems = members(&[1, 2, 3]);
-        p.install_list(0, &mems, 3, 0).unwrap();
-        p.bump_retry();
-
-        let snap = p.snapshot().unwrap();
-        let mut restored = StewardListService::empty(config());
-        restored.set_conversation_id(b"conv");
-        restored.restore(snap);
-
-        assert_eq!(
-            restored.current_list().unwrap().members(),
-            p.current_list().unwrap().members()
-        );
-        assert_eq!(restored.election_epoch(), Some(0));
-        assert_eq!(restored.next_election_round(), 1);
-    }
-
-    #[test]
-    fn snapshot_of_empty_service_errors() {
-        // A service with no installed list has nothing to snapshot.
-        let p = StewardListService::empty(config());
-        assert!(p.snapshot().is_err());
     }
 }

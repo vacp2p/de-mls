@@ -21,18 +21,33 @@ use prost::Message;
 use tracing::{debug, info, warn};
 
 use crate::{
-    ConversationError, ConversationState, CreatorVote,
+    ConversationError,
     engine::{
         handle::Engine,
+        proposal_kind::ProposalKind,
         store::EngineStore,
-        types::{Decision, Event, MemberId, Output, Timestamp},
+        types::{Decision, Event, MemberId, Output, Phase, Timestamp},
         util::{in_flight_target, self_leave_proposal_id},
     },
-    proposal_kind::ProposalKind,
     protos::de_mls::messages::v1::{
         ControlMessage, ConversationUpdateRequest, control_message, conversation_update_request,
     },
 };
+
+/// The creator's intent at proposal submit time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CreatorVote {
+    /// Bundle a YES vote with the proposal in one atomic wire message; no vote
+    /// request reaches the router, since the vote is already cast. For actions
+    /// where submitting already expresses the vote (member add, remove,
+    /// self-executing protocol moves).
+    Yes,
+    /// Broadcast the proposal unbundled and treat the creator like any
+    /// other voter: `VoteRequested` plus the auto-vote timer. For steward
+    /// auto-propose paths, where the steward forwards peer intent without
+    /// endorsing it.
+    Deferred,
+}
 
 /// Per-proposal consensus-session parameters.
 struct ProposalParams {
@@ -570,7 +585,7 @@ impl<St: EngineStore> Engine<St> {
     /// also blocks lower-priority proposals.
     fn check_proposal_allowed(&self, kind: ProposalKind) -> Result<u32, ConversationError> {
         let state = self.current_state();
-        if state != ConversationState::Working {
+        if state != Phase::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
         if self.queues.partial_freeze_blocks(kind) {
@@ -717,8 +732,7 @@ impl<St: EngineStore> Engine<St> {
 mod tests {
     use super::*;
     use crate::{
-        ConversationConfig,
-        engine::{store::InMemoryStore, types::Outbound},
+        engine::{config::EngineConfig, store::InMemoryStore, types::Outbound},
         protos::de_mls::messages::v1::MemberInvite,
     };
 
@@ -735,7 +749,7 @@ mod tests {
             MemberId::from(member(1)),
             1,
             &members,
-            ConversationConfig::default(),
+            EngineConfig::default(),
             InMemoryStore::default(),
         )
         .expect("engine");

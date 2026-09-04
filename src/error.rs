@@ -1,15 +1,13 @@
-//! Library error type: [`ConversationError`], raised by conversation operations.
+//! Library error type: [`ConversationError`], raised by engine operations.
 
 use hashgraph_like_consensus::error::ConsensusError;
-
-use crate::mls_crypto::MlsError;
 
 /// Errors from operations on a single conversation — protocol faults and
 /// caller-facing guard failures alike.
 ///
 /// Registry-level failures (conversation lookup, lock poisoning, transport
 /// delivery) are integrator concerns and live in the integrator's own error
-/// type — see the reference `User` in the gateway crate.
+/// type.
 #[derive(Debug, thiserror::Error)]
 pub enum ConversationError {
     #[error("Cannot send message: conversation is in {0} state")]
@@ -20,26 +18,11 @@ pub enum ConversationError {
     )]
     PartialFreeze,
 
-    #[error("MLS error: {0}")]
-    Mls(#[from] MlsError),
-
     #[error("Consensus error: {0}")]
     Consensus(#[from] ConsensusError),
 
     #[error("Message error: {0}")]
     Message(#[from] prost::DecodeError),
-
-    #[error("Score storage error: {0}")]
-    ScoreStorage(Box<dyn std::error::Error + Send + Sync>),
-
-    #[error("Engine store error: {0}")]
-    Store(Box<dyn std::error::Error + Send + Sync>),
-
-    #[error("Caller is not a steward")]
-    NotASteward,
-
-    #[error("Not in Layer-3 recovery mode")]
-    NotInRecovery,
 
     #[error("No proposals available")]
     NoProposals,

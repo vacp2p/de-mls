@@ -2,8 +2,9 @@
 //! id, this member, and the group's epoch and member set.
 
 use crate::{
-    ConversationConfig, ConversationError,
+    ConversationError,
     engine::{
+        config::EngineConfig,
         handle::Engine,
         store::EngineStore,
         types::{Event, MemberId, Output, Timestamp},
@@ -20,7 +21,7 @@ impl<St: EngineStore> Engine<St> {
         own: MemberId,
         epoch: u64,
         members: &[MemberId],
-        config: ConversationConfig,
+        config: EngineConfig,
         store: St,
     ) -> Result<(Self, Output), ConversationError> {
         if !members.contains(&own) {
@@ -29,7 +30,7 @@ impl<St: EngineStore> Engine<St> {
         let mut engine = Self::assemble(conversation_id, own, epoch, members, config, store)?;
         engine.begin(Timestamp::ZERO);
         for member in engine.members.clone() {
-            engine.scoring.add_member(&member)?;
+            engine.scoring.add_member(&member);
         }
         let settled = engine.members.clone();
         let sn = engine
@@ -46,14 +47,13 @@ impl<St: EngineStore> Engine<St> {
     /// Start a conversation this member joined from a welcome. `bootstrap`
     /// is the `ControlMessage` delivered with the welcome; empty means the
     /// engine starts unsynced and asks a steward for one.
-    #[allow(clippy::too_many_arguments)]
     pub fn join(
         conversation_id: &str,
         own: MemberId,
         epoch: u64,
         members: &[MemberId],
         bootstrap: &[u8],
-        config: ConversationConfig,
+        config: EngineConfig,
         store: St,
     ) -> Result<(Self, Output), ConversationError> {
         let mut engine = Self::assemble(conversation_id, own, epoch, members, config, store)?;
@@ -77,7 +77,7 @@ impl<St: EngineStore> Engine<St> {
         members: &[MemberId],
         store: St,
     ) -> Result<(Self, Output), ConversationError> {
-        let config = ConversationConfig::default();
+        let config = EngineConfig::default();
         Self::join(conversation_id, own, epoch, members, &[], config, store)
     }
 }

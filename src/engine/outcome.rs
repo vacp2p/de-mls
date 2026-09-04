@@ -455,7 +455,7 @@ impl<St: EngineStore> Engine<St> {
         proposal_id: u32,
         score_ops: &[ScoreOp],
     ) -> Result<(), ConversationError> {
-        self.apply_score_ops(score_ops)?;
+        self.apply_score_ops(score_ops);
         self.queues.remove_emergency(proposal_id);
         Ok(())
     }

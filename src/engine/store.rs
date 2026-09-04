@@ -6,7 +6,7 @@ use std::{collections::HashMap, convert::Infallible, error::Error};
 
 /// Keys the engine writes. Each holds one protobuf message.
 pub mod keys {
-    /// Steward list, election epoch, retry round, next election round.
+    /// Steward list, election epoch, retry round.
     pub const STEWARD_LIST: &str = "steward_list";
     /// Approved proposals not yet committed, buffered adds and removes.
     pub const PROPOSALS: &str = "proposals";

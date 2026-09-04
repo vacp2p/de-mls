@@ -18,9 +18,12 @@ pub mod de_mls {
 }
 
 use de_mls::messages::v1::{
-    ConversationUpdateRequest, MemberInvite, RemoveMember, StewardElectionProposal,
+    ConversationUpdateRequest, EmergencyCriteriaProposal, MemberInvite, RemoveMember,
+    StewardElectionProposal, ViolationEvidence, ViolationType,
     conversation_update_request::Payload,
 };
+
+use crate::{ConversationError, ScoreEvent, ScoreOp};
 
 impl ConversationUpdateRequest {
     /// `RemoveMember` request targeting `member_id`.
@@ -52,5 +55,92 @@ impl ConversationUpdateRequest {
             self.payload.as_ref(),
             Some(Payload::MemberInvite(_) | Payload::RemoveMember(_))
         )
+    }
+}
+
+// ── ViolationEvidence constructors ────────────────────────────────
+
+impl ViolationEvidence {
+    /// Steward included different proposal IDs than what was voted on,
+    /// or IDs match but content digest differs.
+    pub fn broken_commit(target: Vec<u8>, epoch: u64, payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            violation_type: ViolationType::BrokenCommit as i32,
+            target_member_id: target,
+            evidence_payload: payload.into(),
+            epoch,
+            creator_member_id: Vec::new(),
+        }
+    }
+
+    /// Member's peer score dropped to or below the removal threshold.
+    pub fn score_below_threshold(target: Vec<u8>, epoch: u64, current_score: i64) -> Self {
+        Self {
+            violation_type: ViolationType::ScoreBelowThreshold as i32,
+            target_member_id: target,
+            evidence_payload: current_score.to_le_bytes().to_vec(),
+            epoch,
+            creator_member_id: Vec::new(),
+        }
+    }
+
+    /// Layer 3 anti-deadlock signal — on YES the silent epoch steward is
+    /// skipped for the epoch and the next eligible steward takes over. No
+    /// specific target.
+    pub fn deadlock(epoch: u64) -> Self {
+        Self {
+            violation_type: ViolationType::Deadlock as i32,
+            target_member_id: Vec::new(),
+            evidence_payload: Vec::new(),
+            epoch,
+            creator_member_id: Vec::new(),
+        }
+    }
+
+    /// Set the creator member_id on this evidence (called by app layer before voting).
+    pub fn with_creator(mut self, creator: Vec<u8>) -> Self {
+        self.creator_member_id = creator;
+        self
+    }
+
+    /// Wrap this evidence into a `ConversationUpdateRequest` for consensus voting.
+    ///
+    /// Returns an error if `creator_member_id` is empty. Call `.with_creator()` before this
+    /// method — every ECP must carry the creator member_id for peer scoring (RFC §"Peer Scoring").
+    pub fn into_update_request(self) -> Result<ConversationUpdateRequest, ConversationError> {
+        if self.creator_member_id.is_empty() {
+            return Err(ConversationError::InvalidConversationUpdateRequest);
+        }
+        Ok(ConversationUpdateRequest {
+            payload: Some(Payload::EmergencyCriteria(EmergencyCriteriaProposal {
+                evidence: Some(self),
+            })),
+        })
+    }
+
+    /// Peer-score penalty the target takes for this violation, or `None`
+    /// for violation types that have no target-side score (`ScoreBelowThreshold`
+    /// drives a removal, not a penalty; `Deadlock` has no target;
+    /// `Unspecified` and unknown wire values are malformed).
+    fn target_score_event(&self) -> Option<ScoreEvent> {
+        match ViolationType::try_from(self.violation_type) {
+            Ok(ViolationType::BrokenCommit) => Some(ScoreEvent::BrokenCommit),
+            Ok(ViolationType::BrokenMlsProposal) => Some(ScoreEvent::BrokenMlsProposal),
+            Ok(ViolationType::CensorshipInactivity) => Some(ScoreEvent::CensorshipInactivity),
+            Ok(ViolationType::MisbehavingCommit) => Some(ScoreEvent::MisbehavingCommit),
+            Ok(ViolationType::ScoreBelowThreshold)
+            | Ok(ViolationType::Deadlock)
+            | Ok(ViolationType::ViolationUnspecified)
+            | Err(_) => None,
+        }
+    }
+
+    /// `ScoreOp` applying [`Self::target_score_event`] to `target_member_id`.
+    /// `None` when the violation type carries no target-side score.
+    pub(crate) fn target_score_op(&self) -> Option<ScoreOp> {
+        Some(ScoreOp {
+            member_id: self.target_member_id.clone(),
+            event: self.target_score_event()?,
+        })
     }
 }

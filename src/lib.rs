@@ -1,142 +1,94 @@
-//! # DE-MLS: Decentralized MLS Chat Protocol
+//! # DE-MLS: a decentralized MLS policy engine
 //!
-//! A library for building decentralized, end-to-end encrypted chat applications
-//! using the MLS (Messaging Layer Security) protocol with consensus-based membership management.
+//! `de-mls` is [`Engine`], a synchronous, caller-driven policy engine for
+//! group membership over MLS: proposal voting, steward election and commit
+//! selection, recovery, and peer scoring. It imports no MLS library and
+//! never touches ciphertext or the group itself — its boundary is protobuf
+//! bytes for anything that travels on the wire, plus plain facts (member
+//! ids, epoch, hashes).
 //!
 //! ## Modules
 //!
-//! - **[`conversation`]** - The [`Conversation`] handle plus its
-//!   per-conversation state, state machine, and inbound dispatch
-//! - **[`consensus`]** - Consensus plug-in contract, outcome application, and voting
-//! - **[`peer_scoring`]** / **[`steward_list`]** - Protocol plug-ins
-//! - **[`mls_crypto`]** - MLS cryptographic operations (OpenMLS wrapper)
-//! - **[`protos`]** - Protobuf message definitions
+//! - **[`engine`]** — the [`Engine`] handle and everything it drives:
+//!   commit-round buffering and selection, consensus wiring, steward-list
+//!   housekeeping, peer scoring hooks, and the [`Output`] vocabulary.
+//! - **[`peer_scoring`]** — score events, the library-owned
+//!   [`PeerScoringService`], and the RFC scoring deltas.
+//! - **[`steward_list`]** — the deterministic steward list and its
+//!   per-conversation service.
+//! - **[`protos`]** — protobuf message definitions.
+//! - **[`error`]** — [`ConversationError`].
 //!
-//! The library carries no transport. The reference delivery service (the
-//! `DeliveryService` trait + Waku implementation) lives in the `de-mls-ds`
-//! crate, and the reference integrator (`User`) in `de-mls-gateway`.
+//! ## The router
 //!
-//! ## Getting Started
+//! A conversation has three parties: an MLS service that owns the group
+//! (opens and seals frames, stages and merges commits), the engine (owns
+//! every protocol decision), and a router between them that executes what
+//! the engine returns. The router is application code — this crate ships
+//! no router and no MLS service; `mls-reference/README.md` documents the
+//! group-operations contract an MLS service must meet, and gives a
+//! reference implementation.
 //!
-//! The library exposes the per-conversation [`Conversation`]
-//! handle. It carries no transport: it buffers outbound and consumes inbound
-//! payloads, and the integrator owns routing. Everything above one conversation
-//! — the registry of many, transport, and identity — belongs to the
-//! application.
+//! Every driving call — `handle_control`, `admit_candidate` +
+//! `handle_candidate`, the report calls (`own_candidate_built`,
+//! `commit_applied`, `decision_failed`, `key_package_checked`), the local
+//! actions, and `tick` — returns an [`Output`]: decisions to execute
+//! against the group, bytes to seal and send, events to observe, and the
+//! next wakeup. Executing a decision leads to a report call that returns
+//! its own `Output`, so the router loops until one is empty.
 //!
-//! A conversation has three outputs. [`ConversationEvent`]s say what
-//! happened, [`Outbound`] is bytes to publish, and
-//! [`Conversation::next_wakeup_in`] is when to call back. Everything that
-//! drives it — inbound, poll, a local action — returns
-//! `Result<(), ConversationError>` and speaks through those.
+//! ```rust,ignore
+//! struct Router {
+//!     mls: MlsService,             // application-owned group
+//!     engine: Engine<KvStore>,
+//! }
 //!
-//! ## Quick Example
+//! impl Router {
+//!     fn on_frame(&mut self, now: Timestamp, frame: Frame) {
+//!         let out = match frame {
+//!             Frame::Sealed(bytes) => {
+//!                 let opened = self.mls.open(&bytes);
+//!                 self.engine.handle_control(now, opened.sender, opened.epoch, &opened.plaintext)
+//!             }
+//!             Frame::Candidate(bytes) => {
+//!                 let Admission::Stage { hash, commit } = self.engine.admit_candidate(now, &bytes)? else { return };
+//!                 let facts = self.mls.stage(&commit);     // authenticates the sender
+//!                 self.engine.handle_candidate(now, hash, facts)
+//!             }
+//!         };
+//!         self.drive(now, out)
+//!     }
 //!
-//! ```ignore
-//! use de_mls::Conversation;
-//!
-//! // Everything the conversation needs is passed in: the OpenMLS provider and
-//! // signer are borrowed per call and stored nowhere, the plug-ins are moved
-//! // in, and `clock` is your `WallClock` (wrap `SystemTime` in production,
-//! // `MockClock` in tests). Pass no `initial_members` for a plain create.
-//! let mut conversation = Conversation::create(
-//!     "de-mls-test",
-//!     &provider,
-//!     credential,
-//!     &group_config,
-//!     &signer,
-//!     &consensus,
-//!     scoring,
-//!     clock,
-//!     app_id,
-//!     config,
-//!     &[],
-//! )?;
-//!
-//! // Send a chat message — buffered, never auto-sent.
-//! conversation.send_message(&provider, &signer, b"Hello, world!".to_vec())?;
-//!
-//! // Drain outbound and publish it on your own transport.
-//! for out in conversation.drain_outbound() { /* publish */ }
+//!     // Seals and sends `outbound`, executes `decisions` in order (a report
+//!     // call's Output feeds back in), then hands `events` to the
+//!     // application. Loops until nothing is left; arms `wakeup` for `tick`.
+//!     fn drive(&mut self, now: Timestamp, out: Output) { /* .. */ }
+//! }
 //! ```
 //!
-//! `tests/standalone_construction.rs` builds this end to end and is compiled on
-//! every run, so it stays honest where this sketch cannot.
+//! `tests/engine_bed_flow.rs` and `tests/engine_bed_smoke.rs` drive a fake
+//! router and a fake group over this exact loop and stay honest where this
+//! sketch cannot.
 
-/// The [`Conversation`](conversation) handle, per-conversation
-/// state, state machine, and inbound dispatch.
-pub mod conversation;
+/// The [`Engine`](engine::Engine) handle: facts in, [`Output`](engine::Output)
+/// out, no MLS inside.
+pub mod engine;
 
-/// Consensus plug-in contract, outcome application, and voting.
-pub mod consensus;
-
-/// Peer scoring: vocabulary, the library-owned service, and the one trait an
-/// integrator implements ([`peer_scoring::PeerScoreStorage`]).
+/// Peer scoring: vocabulary and the library-owned [`PeerScoringService`](peer_scoring::PeerScoringService).
 pub mod peer_scoring;
 
 /// Steward-list plug-in: deterministic list and rotation queries.
 pub mod steward_list;
 
-/// Commit round candidate processing, selection, and commit application.
-pub(crate) mod commit_round;
-
-/// Conversation-event types produced for the integrator.
-pub mod events;
-
-/// Inbound-dispatch vocabulary, plus the `ViolationEvidence` constructors for
-/// filing an emergency-criteria proposal.
-pub mod process_result;
-
-/// Proposal classification.
-pub(crate) mod proposal_kind;
-
-/// Wall-clock anchor combined with the conversation state machine.
-pub(crate) mod phase_timer;
-
-/// Caller-supplied time source: [`WallClock`] trait, [`Timestamp`],
-/// and the test-oriented [`MockClock`].
-pub mod wall_clock;
-
 /// Library error types.
 pub mod error;
 
-/// The policy engine that replaces [`Conversation`]: facts in, `Output`
-/// out, no MLS inside. Namespaced, not re-exported, until the cut.
-pub mod engine;
+/// Protobuf message definitions.
+pub mod protos;
 
 // Crate-root re-exports so flat-name imports resolve without the owning
 // module path.
-pub use conversation::*;
+pub use engine::*;
 pub use error::*;
-pub use events::*;
 pub use peer_scoring::*;
-pub(crate) use process_result::*;
-pub(crate) use proposal_kind::*;
 pub use steward_list::*;
-
-// `consensus` and `phase_timer` are re-exported explicitly below to avoid glob
-// collisions with the conversation glob.
-pub(crate) use commit_round::*;
-pub(crate) use consensus::{ConsensusApplyResult, ConsensusEngine, apply_consensus_result};
-pub use consensus::{ConsensusPlugin, CreatorVote};
-
-pub(crate) use phase_timer::PhaseTimer;
-
-pub use wall_clock::{MockClock, Timestamp, WallClock};
-
-/// MLS cryptographic operations: OpenMLS wrapper for encryption/decryption.
-pub mod mls_crypto;
-
-pub use mls_crypto::MemberId;
-pub use openmls::prelude::{Extensions, GroupContext, LeafNodeIndex, Member, MlsGroup};
-
-/// Reference implementations of the library's plug-in traits — in-memory
-/// MLS / peer-score storage, default consensus + per-conversation
-/// plug-in bundles, and a reference key-package provider. Production
-/// integrators swap one or more for their own implementations.
-pub mod defaults;
-
-#[cfg(test)]
-pub mod test_fixtures;
-
-pub mod protos;
