@@ -24,7 +24,7 @@ use crate::{
         consensus::{OutcomeBus, OutcomeReceiver},
         phase_timer::PhaseTimer,
         queues::EngineQueues,
-        store::EngineStore,
+        store::{Dirty, EngineStore},
         types::{
             CommitHash, Decision, Event, MemberId, Outbound, Output, Phase, StagedFacts, Timestamp,
         },
@@ -107,6 +107,8 @@ pub struct Engine<St: EngineStore> {
     pub(crate) config: EngineConfig,
     pub(crate) timing: Timing,
     pub(crate) store: St,
+    /// Which store keys the current driving call changed; flushed by `finish`.
+    pub(crate) dirty: Dirty,
     /// The current driving call's clock reading.
     pub(crate) now: Timestamp,
     /// What the current driving call has produced so far.
@@ -164,6 +166,7 @@ impl<St: EngineStore> Engine<St> {
             config,
             timing: Timing::new(),
             store,
+            dirty: Dirty::default(),
             now: Timestamp::ZERO,
             out: Output::default(),
             pending_merge: None,
@@ -246,13 +249,16 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// End a driving call: drain pending consensus outcomes, compute the
-    /// next wakeup, and hand back everything the call produced.
-    pub(crate) fn finish(&mut self) -> Output {
+    /// next wakeup, write the keys this call changed before the output is
+    /// returned (contract rule 13), and hand back everything the call
+    /// produced.
+    pub(crate) fn finish(&mut self) -> Result<Output, ConversationError> {
         self.drain_consensus_outcomes();
         self.anchor_inactivity_timer();
+        self.flush()?;
         let mut out = std::mem::take(&mut self.out);
         out.wakeup = self.next_wakeup_in();
-        out
+        Ok(out)
     }
 
     /// Approved work waiting in `Working` starts the commit-inactivity
@@ -304,12 +310,14 @@ impl<St: EngineStore> Engine<St> {
     /// Apply `ops` to the score table, reporting each moved score.
     pub(crate) fn apply_score_ops(&mut self, ops: &[ScoreOp]) {
         let changes = self.scoring.apply_ops(ops);
+        self.dirty.scores = true;
         self.emit_score_changes(changes);
     }
 
     /// Adopt a bootstrap score snapshot, reporting each moved score.
     pub(crate) fn apply_score_snapshot(&mut self, snapshot: &ScoreSnapshot) {
         let changes = self.scoring.apply_snapshot(snapshot);
+        self.dirty.scores = true;
         self.emit_score_changes(changes);
     }
 

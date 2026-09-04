@@ -125,7 +125,8 @@ MUST.
     it can forget.
 14. On restart the router loads the group first, then
     `Engine::restore(store, own, epoch, members)`, then executes the
-    returned `Output` (it may contain a sync request).
+    returned `Output` (it may contain a sync request). A store the engine
+    never wrote starts the engine as `join` does.
 15. On join the router opens the welcome first, then
     `Engine::join(store, own, epoch, members)`.
 16. Exactly one live group instance per storage scope.

@@ -119,3 +119,94 @@ fn announcement_during_a_round_is_retried_after_it_closes() {
     assert!(bed.converged() && bed.membership_agrees());
     assert_eq!(bed.router(0).mls.members().len(), 4);
 }
+
+/// A restart mid-vote resumes cleanly: the restarted node's consensus
+/// session and its side of the vote are rebuilt from the store rather than
+/// lost, and the round still converges.
+#[test]
+fn restart_mid_vote_resumes_and_merges() {
+    let mut bed = Bed::new("conv", "alice", fast());
+    let bob = bed.add_pending("bob");
+    let kp_bob = bed.key_package_of(bob);
+    let bob_id = bed.nodes[bob].own.clone();
+    let now = bed.now;
+    bed.router_mut(0).announce(now, bob_id.clone(), kp_bob);
+    bed.process_until("bob seated", |b| b.is_live(bob) && b.epochs_agree());
+    bed.process_until("bob synced", |b| b.router(bob).engine.is_synced());
+
+    let carol = bed.add_pending("carol");
+    let kp_carol = bed.key_package_of(carol);
+    let carol_id = bed.nodes[carol].own.clone();
+    let now = bed.now;
+    bed.router_mut(0).announce(now, carol_id.clone(), kp_carol);
+    bed.process_until("carol seated", |b| b.is_live(carol) && b.epochs_agree());
+    bed.process_until("carol synced", |b| b.router(carol).engine.is_synced());
+
+    // Announce a fourth member; node 1 (bob) is asked to vote on it.
+    let before = bed.router(bob).events.len();
+    let dave = bed.add_pending("dave");
+    let kp_dave = bed.key_package_of(dave);
+    let dave_id = bed.nodes[dave].own.clone();
+    let now = bed.now;
+    bed.router_mut(0).announce(now, dave_id.clone(), kp_dave);
+    bed.process_until("bob asked to vote", |b| {
+        b.router(bob).events[before..]
+            .iter()
+            .any(|e| matches!(e, Event::VoteRequested { .. }))
+    });
+
+    // Restart bob mid-vote: its consensus session and vote are rebuilt from
+    // the store rather than lost.
+    bed.restart(bob);
+
+    bed.process_until("dave seated", |b| b.is_live(dave) && b.epochs_agree());
+    assert!(bed.converged() && bed.membership_agrees());
+    for node in [0, bob, carol, dave] {
+        assert_eq!(bed.router(node).mls.members().len(), 4);
+    }
+}
+
+/// A restart with a store from a past epoch is stale: the restarted node
+/// drops its steward list rather than trusting an out-of-date snapshot,
+/// asks for a sync, and resyncs to the group's current state.
+#[test]
+fn restart_with_a_stale_snapshot_resyncs() {
+    let mut bed = Bed::new("conv", "alice", fast());
+    let bob = bed.add_pending("bob");
+    let kp_bob = bed.key_package_of(bob);
+    let bob_id = bed.nodes[bob].own.clone();
+    let now = bed.now;
+    bed.router_mut(0).announce(now, bob_id.clone(), kp_bob);
+    bed.process_until("bob seated", |b| b.is_live(bob) && b.epochs_agree());
+    bed.process_until("bob synced", |b| b.router(bob).engine.is_synced());
+
+    let carol = bed.add_pending("carol");
+    let kp_carol = bed.key_package_of(carol);
+    let carol_id = bed.nodes[carol].own.clone();
+    let now = bed.now;
+    bed.router_mut(0).announce(now, carol_id.clone(), kp_carol);
+    bed.process_until("carol seated", |b| b.is_live(carol) && b.epochs_agree());
+    bed.process_until("bob synced after carol", |b| {
+        b.router(bob).engine.is_synced()
+    });
+
+    // A store from before dave joins.
+    let old = bed.store_of(bob);
+
+    let dave = bed.add_pending("dave");
+    let kp_dave = bed.key_package_of(dave);
+    let dave_id = bed.nodes[dave].own.clone();
+    let now = bed.now;
+    bed.router_mut(0).announce(now, dave_id.clone(), kp_dave);
+    bed.process_until("dave seated", |b| b.is_live(dave) && b.epochs_agree());
+    assert!(bed.converged() && bed.membership_agrees());
+
+    // bob restarts from the stale, pre-dave snapshot: it drops the list it
+    // held and re-syncs to the group's current membership.
+    bed.restart_with(bob, old);
+
+    bed.process_until("bob resynced", |b| {
+        b.router(bob).engine.is_synced() && b.converged() && b.membership_agrees()
+    });
+    assert_eq!(bed.router(bob).mls.members().len(), 4);
+}

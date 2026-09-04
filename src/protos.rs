@@ -15,6 +15,13 @@ pub mod de_mls {
             include!(concat!(env!("OUT_DIR"), "/de_mls.messages.v1.rs"));
         }
     }
+
+    /// Engine state snapshots; local encoding, never sent.
+    pub mod engine {
+        pub mod v1 {
+            include!(concat!(env!("OUT_DIR"), "/de_mls.engine.v1.rs"));
+        }
+    }
 }
 
 use de_mls::messages::v1::{

@@ -88,6 +88,8 @@ impl<St: EngineStore> Engine<St> {
         );
         self.queues.mark_consensus_outcome_applied(proposal_id);
         let outcome = apply_outcome(&mut self.queues, proposal_id, verdict, &request);
+        self.dirty.proposals = true;
+        self.dirty.consensus = true;
 
         match outcome {
             ApplyOutcome::NoAction => {}
@@ -97,7 +99,10 @@ impl<St: EngineStore> Engine<St> {
             // No retry ladder: the next request_recovery / propose_election
             // call is the application's move.
             ApplyOutcome::ElectionDropped => {}
-            ApplyOutcome::DeadlockAccepted => self.skip_silent_epoch_steward(),
+            ApplyOutcome::DeadlockAccepted => {
+                self.skip_silent_epoch_steward();
+                self.dirty.skipped_stewards = true;
+            }
             ApplyOutcome::UrgentRemoval { target } => {
                 // A steward-gated removal: enter freezing and mint it now.
                 if let Some(event) = self.start_freezing() {
@@ -122,7 +127,6 @@ impl<St: EngineStore> Engine<St> {
         self.consensus
             .storage()
             .remove_session(&scope, proposal_id)?;
-        // store: consensus sessions (WP3g)
 
         Ok(())
     }
@@ -198,7 +202,7 @@ impl<St: EngineStore> Engine<St> {
             retry_round = election.retry_round,
             "steward election applied"
         );
-        // store: steward list (WP3g)
+        self.dirty.steward_list = true;
 
         // Broadcast the elected list so a member that missed the vote learns
         // it and authorizes the next steward's commit.

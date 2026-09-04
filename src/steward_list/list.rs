@@ -95,6 +95,22 @@ pub struct StewardList {
 }
 
 impl StewardList {
+    /// A list read back from the store: already validated when it was
+    /// installed.
+    pub(crate) fn from_parts(
+        members: Vec<Vec<u8>>,
+        config: StewardListConfig,
+        election_epoch: u64,
+        retry_round: u32,
+    ) -> Self {
+        Self {
+            members,
+            config,
+            election_epoch,
+            retry_round,
+        }
+    }
+
     /// Elect `sn` stewards: sort `member_ids` by ascending steward hash and keep
     /// the first `sn`. Deterministic — every member derives the same list.
     /// Errors on an empty member set or an `sn` outside the config bounds.

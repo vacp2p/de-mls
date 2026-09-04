@@ -617,7 +617,7 @@ mod outcome_application {
         drop(eligible);
 
         e.skip_silent_epoch_steward();
-        let out = e.finish();
+        let out = e.finish().unwrap();
 
         assert!(out.events.iter().any(|ev| matches!(
             ev,

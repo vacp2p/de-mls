@@ -11,7 +11,10 @@ fn main() -> Result<(), std::io::Error> {
     );
 
     config.compile_protos(
-        &["src/protos/messages/v1/application.proto"],
+        &[
+            "src/protos/messages/v1/application.proto",
+            "src/protos/engine/v1/state.proto",
+        ],
         &["src/protos/"],
     )?;
     Ok(())

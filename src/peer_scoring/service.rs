@@ -111,6 +111,12 @@ impl PeerScoringService {
         changes
     }
 
+    /// Replace the score table with one read back from the store: the same
+    /// table, not a change, so no [`ScoreChange`] is reported.
+    pub(crate) fn restore_scores(&mut self, scores: Vec<(Vec<u8>, i64)>) {
+        self.scores = scores.into_iter().collect();
+    }
+
     /// Snapshot of scores that aren't set to the default, for ConversationSync.
     pub(crate) fn snapshot(&self) -> ScoreSnapshot {
         let default = self.config.default_score;

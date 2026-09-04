@@ -169,7 +169,7 @@ impl<St: EngineStore> Engine<St> {
             sn,
             sync.retry_round,
         )?;
-        // store: steward_list (WP3g)
+        self.dirty.steward_list = true;
         // Before the snapshot: it rebases members off our assumed default onto
         // the group's, which is exactly the set the sparse `peer_scores` omits.
         self.scoring
@@ -184,7 +184,6 @@ impl<St: EngineStore> Engine<St> {
         // Record the bootstrap scores, reporting how far each member had
         // already diverged from the default this node would have assumed.
         self.apply_score_snapshot(&snapshot);
-        // store: scores (WP3g)
         self.config.liveness_criteria_yes = sync.liveness_criteria_yes;
         if let Some(timing) = &sync.timing {
             self.config.apply_timing(timing);
@@ -202,7 +201,7 @@ impl<St: EngineStore> Engine<St> {
             );
             self.config.voting_delay = clamped;
         }
-        // store: meta (WP3g)
+        self.dirty.meta = true;
         Ok(())
     }
 }

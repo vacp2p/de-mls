@@ -104,7 +104,7 @@ impl<St: EngineStore> Engine<St> {
             "YES vote cast (bundled at submit)"
         );
         self.send_control(control_proposal(proposal));
-        // store: consensus sessions (WP3g)
+        self.dirty.consensus = true;
 
         Ok(())
     }
@@ -130,7 +130,7 @@ impl<St: EngineStore> Engine<St> {
         let now = self.now.as_secs();
         let vote_msg = self.consensus.cast_vote(&scope, proposal_id, vote, now)?;
         self.send_control(control_vote(vote_msg));
-        // store: consensus sessions (WP3g)
+        self.dirty.consensus = true;
         Ok(())
     }
 
@@ -161,7 +161,7 @@ impl<St: EngineStore> Engine<St> {
         let now = self.now.as_secs();
         match self.consensus.process_incoming_vote(&scope, vote, now) {
             Ok(()) => {
-                // store: consensus sessions (WP3g)
+                self.dirty.consensus = true;
                 Ok(())
             }
             Err(ConsensusError::SessionNotActive) => {
@@ -285,46 +285,117 @@ impl<St: EngineStore> Engine<St> {
             }
             return Err(e.into());
         }
-        // store: consensus sessions (WP3g)
+        self.dirty.consensus = true;
 
         if let Some(req) = decoded.as_ref() {
             self.queues.track_voting_proposal(proposal_id, req);
         }
 
         if expected_voters > 1 {
-            match decoded.as_ref().and_then(|r| r.payload.as_ref()) {
-                Some(conversation_update_request::Payload::StewardElection(election)) => {
-                    // Recomputed locally, so no vote request reaches the
-                    // router: the verdict is deterministic.
-                    let verdict = self.validate_election_list(election)?;
-                    self.register_auto_vote(proposal_id, Duration::ZERO, verdict);
-                }
-                Some(conversation_update_request::Payload::MemberInvite(invite)) => {
-                    // The vote waits for the router's verdict on the key
-                    // package; no auto-vote is armed until then, so silence
-                    // cannot approve an unvalidated joiner.
-                    let member = MemberId::from(invite.member_id.clone());
-                    let key_package = invite.key_package_bytes.clone();
-                    self.decide(Decision::ValidateKeyPackage {
+            self.arm_local_vote(proposal_id, decoded)?;
+        }
+        Ok(())
+    }
+
+    /// Replay a persisted consensus session on restore: feed the bundled
+    /// proposal (and every vote it carries) back into the library so it
+    /// recomputes its state — a session already decided by its bundled
+    /// votes resolves inside `process_incoming_proposal` and rides its
+    /// verdict out through `drain_consensus_outcomes` in `finish`.
+    ///
+    /// A session this member already voted in before the restart is not
+    /// re-armed: a fresh auto-vote would double the vote (the library
+    /// rejects it) and a fresh key-package check would ask the router for a
+    /// decision it already made. Every session's consensus-timeout deadline
+    /// is pinned to its original absolute time
+    /// (`created_at + consensus_timeout`), so the restart neither extends
+    /// nor shortens it.
+    pub(crate) fn replay_session(
+        &mut self,
+        proposal: Proposal,
+        created_at: u64,
+    ) -> Result<(), ConversationError> {
+        let proposal_id = proposal.proposal_id;
+        let expected_voters = proposal.expected_voters_count;
+        let already_voted = proposal.votes.iter().any(|v| v.vote_owner == self.own);
+        let decoded = match ConversationUpdateRequest::decode(proposal.payload.as_slice()) {
+            Ok(req) => Some(req),
+            Err(e) => {
+                debug!(
+                    proposal_id,
+                    error = %e,
+                    "replayed proposal payload failed to decode; treated as opaque commit"
+                );
+                None
+            }
+        };
+
+        let scope = self.conversation_id.clone();
+        self.consensus
+            .process_incoming_proposal(&scope, proposal.clone(), self.now.as_secs())?;
+
+        if let Some(req) = decoded.as_ref() {
+            self.queues.track_voting_proposal(proposal_id, req);
+        }
+
+        if expected_voters > 1 {
+            if !already_voted {
+                self.arm_local_vote(proposal_id, decoded)?;
+            }
+            // The deadline stays where it was before the restart: relative
+            // to when the session opened, not to when it was replayed, so a
+            // restarted node resolves the vote no earlier than its peers.
+            self.timing.pending_consensus_timeouts.insert(
+                proposal_id,
+                Timestamp::from_duration_since_epoch(Duration::from_secs(created_at))
+                    + self.config.consensus_timeout,
+            );
+        }
+        Ok(())
+    }
+
+    /// Arm this member's side of a proposal that expects more than one
+    /// voter: a deterministic verdict for a steward election, a
+    /// key-package check for an invite (the vote waits for the router's
+    /// answer), or an auto-vote for anything else — then the
+    /// consensus-timeout deadline.
+    fn arm_local_vote(
+        &mut self,
+        proposal_id: u32,
+        decoded: Option<ConversationUpdateRequest>,
+    ) -> Result<(), ConversationError> {
+        match decoded.as_ref().and_then(|r| r.payload.as_ref()) {
+            Some(conversation_update_request::Payload::StewardElection(election)) => {
+                // Recomputed locally, so no vote request reaches the
+                // router: the verdict is deterministic.
+                let verdict = self.validate_election_list(election)?;
+                self.register_auto_vote(proposal_id, Duration::ZERO, verdict);
+            }
+            Some(conversation_update_request::Payload::MemberInvite(invite)) => {
+                // The vote waits for the router's verdict on the key
+                // package; no auto-vote is armed until then, so silence
+                // cannot approve an unvalidated joiner.
+                let member = MemberId::from(invite.member_id.clone());
+                let key_package = invite.key_package_bytes.clone();
+                self.decide(Decision::ValidateKeyPackage {
+                    proposal_id,
+                    member,
+                    key_package,
+                });
+            }
+            _ => {
+                if let Some(request) = decoded {
+                    self.emit(Event::VoteRequested {
                         proposal_id,
-                        member,
-                        key_package,
+                        request,
                     });
                 }
-                _ => {
-                    if let Some(request) = decoded {
-                        self.emit(Event::VoteRequested {
-                            proposal_id,
-                            request,
-                        });
-                    }
-                    let delay = self.config.voting_delay;
-                    let vote = self.config.liveness_criteria_yes;
-                    self.register_auto_vote(proposal_id, delay, vote);
-                }
+                let delay = self.config.voting_delay;
+                let vote = self.config.liveness_criteria_yes;
+                self.register_auto_vote(proposal_id, delay, vote);
             }
-            self.register_consensus_timeout(proposal_id, self.config.consensus_timeout);
         }
+        self.register_consensus_timeout(proposal_id, self.config.consensus_timeout);
         Ok(())
     }
 
@@ -350,7 +421,7 @@ impl<St: EngineStore> Engine<St> {
             if let Err(e) = self.cast_local_vote(proposal_id, false) {
                 self.report_failure("key_package_checked", &e);
             }
-            return Ok(self.finish());
+            return self.finish();
         }
 
         let scope = self.conversation_id.clone();
@@ -366,7 +437,7 @@ impl<St: EngineStore> Engine<St> {
                 proposal_id,
                 "key-package verdict dropped: the session is no longer active"
             );
-            return Ok(self.finish());
+            return self.finish();
         };
         let request = ConversationUpdateRequest::decode(stored.payload.as_slice())?;
         self.emit(Event::VoteRequested {
@@ -376,7 +447,7 @@ impl<St: EngineStore> Engine<St> {
         let delay = self.config.voting_delay;
         let vote = self.config.liveness_criteria_yes;
         self.register_auto_vote(proposal_id, delay, vote);
-        Ok(self.finish())
+        self.finish()
     }
 
     // ── private ──────────────────────────────────────────────────────
