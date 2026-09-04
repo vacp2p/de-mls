@@ -44,10 +44,7 @@ fn creator_adds_one_then_a_member_adds_another() {
             .any(|e| matches!(e, Event::MembersChanged { added, .. } if !added.is_empty())),
         "the creator reports the membership change"
     );
-    assert!(
-        bed.router(bob).engine.is_synced(),
-        "bob adopted the bootstrap"
-    );
+    bed.process_until("bob synced", |b| b.router(bob).engine.is_synced());
 
     // A non-steward proposes; the steward auto-votes and builds.
     let carol = bed.add_pending("carol");

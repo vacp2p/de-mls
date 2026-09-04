@@ -44,15 +44,15 @@ impl<St: EngineStore> Engine<St> {
         Ok((engine, out))
     }
 
-    /// Start a conversation this member joined from a welcome. `bootstrap`
-    /// is the `ControlMessage` delivered with the welcome; empty means the
-    /// engine starts unsynced and asks a steward for one.
+    /// Start a conversation this member joined from a welcome. The welcome
+    /// carries nothing but the group state: the engine starts unsynced and
+    /// adopts the first `ConversationSync` a steward broadcasts, falling
+    /// back to `request_sync` if none arrives.
     pub fn join(
         conversation_id: &str,
         own: MemberId,
         epoch: u64,
         members: &[MemberId],
-        bootstrap: &[u8],
         config: EngineConfig,
         store: St,
     ) -> Result<(Self, Output), ConversationError> {
@@ -60,9 +60,6 @@ impl<St: EngineStore> Engine<St> {
         engine.begin(Timestamp::ZERO);
         let phase = engine.phase();
         engine.emit(Event::PhaseChange(phase));
-        if !bootstrap.is_empty() {
-            engine.apply_bootstrap(bootstrap)?;
-        }
         let out = engine.finish();
         Ok((engine, out))
     }
@@ -78,6 +75,6 @@ impl<St: EngineStore> Engine<St> {
         store: St,
     ) -> Result<(Self, Output), ConversationError> {
         let config = EngineConfig::default();
-        Self::join(conversation_id, own, epoch, members, &[], config, store)
+        Self::join(conversation_id, own, epoch, members, config, store)
     }
 }

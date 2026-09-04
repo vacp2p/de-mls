@@ -1,32 +1,24 @@
 use std::time::Duration;
 
-use prost::Message;
-
-use super::select::{CandidateVerdict, actions_match_voted};
+use super::select::actions_match_voted;
 use crate::{
-    Action, ScoreEvent,
+    Action,
     engine::{
-        commit::buffer::{BufferedCandidate, CommitRoundBuffer},
         config::EngineConfig,
         handle::{Engine, PendingMerge},
         store::InMemoryStore,
+        test_support::{id, member},
         types::{
-            Admission, CommitHash, Decision, DecisionFailure, Event, MemberId, Outbound,
-            StagedFacts, Timestamp,
+            CommitHash, Decision, DecisionFailure, Event, MemberId, Phase, StagedFacts, Timestamp,
         },
     },
     protos::de_mls::messages::v1::{
-        CommitCandidate, ConversationUpdateRequest, MemberInvite, RemoveMember,
-        conversation_update_request::Payload,
+        ConversationUpdateRequest, MemberInvite, RemoveMember, conversation_update_request::Payload,
     },
 };
 
 fn at(secs: u64) -> Timestamp {
     Timestamp::from_duration_since_epoch(Duration::from_secs(secs))
-}
-
-fn id(name: &str) -> MemberId {
-    MemberId::from(name.as_bytes())
 }
 
 /// An engine over `members`, the first of which is this node. `create`
@@ -49,7 +41,7 @@ fn invite(joiner: &str) -> ConversationUpdateRequest {
     ConversationUpdateRequest {
         payload: Some(Payload::MemberInvite(MemberInvite {
             key_package_bytes: format!("kp:{joiner}").into_bytes(),
-            member_id: joiner.as_bytes().to_vec(),
+            member_id: member(joiner),
         })),
     }
 }
@@ -57,283 +49,73 @@ fn invite(joiner: &str) -> ConversationUpdateRequest {
 fn removal(target: &str) -> ConversationUpdateRequest {
     ConversationUpdateRequest {
         payload: Some(Payload::RemoveMember(RemoveMember {
-            member_id: target.as_bytes().to_vec(),
+            member_id: member(target),
         })),
     }
 }
 
-fn envelope(steward: &str, count: u32, commit: &[u8]) -> CommitCandidate {
-    CommitCandidate {
-        conversation_id: b"conv".to_vec(),
-        commit_message: commit.to_vec(),
-        steward_member_id: steward.as_bytes().to_vec(),
-        proposal_count: count,
-    }
-}
+// ── admission at handle_candidate ───────────────────────────────────
 
-fn remote(steward: &str, count: u32, commit: &[u8]) -> BufferedCandidate {
-    BufferedCandidate {
-        hash: CommitHash::of(commit),
-        envelope: envelope(steward, count, commit),
-        facts: Some(StagedFacts {
-            sender: id(steward),
-            epoch: 0,
-            actions: Vec::new(),
-            proposal_count: count,
-            self_removed: false,
-        }),
-        is_local: false,
-    }
-}
-
-// ── the buffer ─────────────────────────────────────────────────────
-
+/// A candidate sealed at any epoch but the current one is discarded on
+/// sight, with no score against its sender: staleness is not misbehaviour.
 #[test]
-fn the_buffer_dedupes_by_hash_and_caps_at_one_per_member() {
-    let mut buffer = CommitRoundBuffer::default();
-    assert!(buffer.insert(0, remote("a", 1, b"aa"), 2));
-    assert!(
-        !buffer.insert(0, remote("a", 1, b"aa"), 2),
-        "the same commit twice is one candidate"
-    );
-    assert!(buffer.insert(0, remote("b", 1, b"bb"), 2));
-    assert!(
-        !buffer.insert(0, remote("c", 1, b"cc"), 2),
-        "beyond one per member a distinct candidate is a fork"
-    );
-    assert_eq!(buffer.candidates(0).len(), 2);
-}
-
-#[test]
-fn a_new_epoch_starts_a_fresh_round() {
-    let mut buffer = CommitRoundBuffer::default();
-    buffer.insert(0, remote("a", 1, b"aa"), 2);
-    buffer.await_facts(0, CommitHash::of(b"bb"), envelope("b", 1, b"bb"));
-    buffer.insert(1, remote("c", 1, b"cc"), 2);
-    assert!(buffer.candidates(0).is_empty(), "epoch 0 is stale");
-    assert_eq!(buffer.candidates(1).len(), 1);
-    assert!(buffer.take_awaited(&CommitHash::of(b"bb")).is_none());
-}
-
-#[test]
-fn only_our_own_candidate_counts_as_local() {
-    let mut buffer = CommitRoundBuffer::default();
-    buffer.insert(0, remote("a", 1, b"aa"), 4);
-    assert!(buffer.candidates(0).iter().all(|c| !c.is_local));
-    let mut ours = remote("b", 1, b"bb");
-    ours.is_local = true;
-    ours.facts = None;
-    buffer.insert(0, ours, 4);
-    assert!(buffer.candidates(0).iter().any(|c| c.is_local));
-}
-
-// ── admission ──────────────────────────────────────────────────────
-
-#[test]
-fn admission_takes_a_well_formed_envelope_and_drops_the_rest() {
+fn a_stale_epoch_candidate_is_discarded_without_a_score() {
     let mut e = engine(&["alice", "bob"]);
-    let good = envelope("bob", 1, b"commit").encode_to_vec();
-    assert_eq!(
-        e.admit_candidate(at(0), &good).unwrap(),
-        Admission::Stage {
-            hash: CommitHash::of(b"commit"),
-            commit: b"commit".to_vec(),
-        }
-    );
-    assert_eq!(
-        e.admit_candidate(at(0), &good).unwrap(),
-        Admission::Drop,
-        "a second sighting of the same commit is already in the round"
-    );
-
-    let mut e = engine(&["alice", "bob"]);
-    assert_eq!(
-        e.admit_candidate(at(0), b"not a proto\xff\xff").unwrap(),
-        Admission::Drop
-    );
-    assert_eq!(
-        e.admit_candidate(at(0), &envelope("bob", 0, b"commit").encode_to_vec())
-            .unwrap(),
-        Admission::Drop,
-        "a candidate claiming no proposals commits nothing"
-    );
-    assert_eq!(
-        e.admit_candidate(at(0), &envelope("bob", 1, b"").encode_to_vec())
-            .unwrap(),
-        Admission::Drop
-    );
-    assert_eq!(
-        e.admit_candidate(at(0), &envelope("", 1, b"commit").encode_to_vec())
-            .unwrap(),
-        Admission::Drop
-    );
-    let mut other = envelope("bob", 1, b"commit");
-    other.conversation_id = b"elsewhere".to_vec();
-    assert_eq!(
-        e.admit_candidate(at(0), &other.encode_to_vec()).unwrap(),
-        Admission::Drop
-    );
-}
-
-#[test]
-fn an_already_committed_commit_is_never_re_admitted() {
-    let mut e = engine(&["alice", "bob"]);
-    e.queues.insert_committed_hash(CommitHash::of(b"commit"));
-    assert_eq!(
-        e.admit_candidate(at(0), &envelope("bob", 1, b"commit").encode_to_vec())
-            .unwrap(),
-        Admission::Drop
-    );
-}
-
-#[test]
-fn a_candidate_ahead_of_its_approval_is_stashed_and_replayed() {
-    let mut e = engine(&["alice", "bob"]);
-    let admitted = e
-        .admit_candidate(at(0), &envelope("bob", 1, b"commit").encode_to_vec())
+    let before = e.scoring.score_for(&member("bob")).unwrap();
+    let hash = CommitHash::of(b"commit");
+    let out = e
+        .handle_candidate(
+            at(0),
+            hash,
+            StagedFacts {
+                sender: id("bob"),
+                epoch: e.epoch + 5,
+                actions: Vec::new(),
+                proposal_count: 0,
+                self_removed: false,
+            },
+        )
         .unwrap();
-    let Admission::Stage { hash, .. } = admitted else {
-        panic!("expected a staging admission, got {admitted:?}");
-    };
-    let facts = StagedFacts {
-        sender: id("bob"),
-        epoch: 0,
-        actions: vec![Action::Add {
-            member: id("carol"),
-            key_package: b"kp:carol".to_vec(),
-        }],
-        proposal_count: 1,
-        self_removed: false,
-    };
-    e.handle_candidate(at(0), hash, facts).unwrap();
     assert_eq!(
-        e.commit_candidate_count().0,
-        0,
-        "nothing approved yet, so the candidate waits outside the round"
+        out.decisions,
+        vec![Decision::Discard { hashes: vec![hash] }]
     );
-
-    e.queues.insert_approved_proposal(7, invite("carol"));
-    e.replay_early_candidates().unwrap();
-    assert_eq!(e.commit_candidate_count().0, 1);
+    let after = e.scoring.score_for(&member("bob")).unwrap();
+    assert_eq!(before, after, "staleness alone scores nothing");
 }
 
-// ── the validation ladder ──────────────────────────────────────────
-
-/// A claimed count that contradicts the staged commit is a violation
-/// pinned on the authenticated signer; an honest claim passes.
+/// A candidate from anyone but the epoch steward is discarded on sight and
+/// its sender scored `MisbehavingCommit`, whatever it carries.
 #[test]
-fn a_lying_proposal_count_is_a_violation_and_an_honest_one_passes() {
-    let mut e = engine(&["alice", "bob"]);
-    e.queues.insert_approved_proposal(7, invite("carol"));
-    let action = Action::Add {
-        member: id("carol"),
-        key_package: b"kp:carol".to_vec(),
-    };
+fn a_non_epoch_steward_candidate_is_discarded_and_scored() {
+    let mut e = engine(&["alice", "bob", "carol"]);
+    let es = e.expected_steward().unwrap();
+    let impostor = ["alice", "bob", "carol"]
+        .into_iter()
+        .find(|m| id(m).as_bytes() != es.as_slice())
+        .expect("at least one member isn't the epoch steward");
 
-    let mut lying = remote("bob", 2, b"commit");
-    lying.facts = Some(StagedFacts {
-        sender: id("bob"),
-        epoch: 0,
-        actions: vec![action.clone()],
-        proposal_count: 1,
-        self_removed: false,
-    });
-    match e.verdict(&lying) {
-        CandidateVerdict::Reject(Some(op)) => {
-            assert_eq!(op.member_id, b"bob");
-            assert_eq!(op.event, ScoreEvent::BrokenCommit);
-        }
-        _ => panic!("a claim that contradicts the commit must be rejected"),
-    }
-
-    let mut honest = remote("bob", 1, b"commit");
-    honest.facts = Some(StagedFacts {
-        sender: id("bob"),
-        epoch: 0,
-        actions: vec![action],
-        proposal_count: 1,
-        self_removed: false,
-    });
-    assert!(matches!(e.verdict(&honest), CandidateVerdict::Accept));
-}
-
-/// The wire id is forgeable, so it is checked against the signer and the
-/// penalty follows the signer.
-#[test]
-fn a_forged_steward_id_is_pinned_on_the_signer() {
-    let mut e = engine(&["alice", "bob"]);
-    e.queues.insert_approved_proposal(7, invite("carol"));
-    let mut forged = remote("alice", 1, b"commit");
-    forged.facts = Some(StagedFacts {
-        sender: id("bob"),
-        epoch: 0,
-        actions: Vec::new(),
-        proposal_count: 1,
-        self_removed: false,
-    });
-    match e.verdict(&forged) {
-        CandidateVerdict::Reject(Some(op)) => {
-            assert_eq!(op.member_id, b"bob", "the signer, not the wire claim");
-            assert_eq!(op.event, ScoreEvent::BrokenCommit);
-        }
-        _ => panic!("a forged steward id must be rejected"),
-    }
-}
-
-/// A commit carrying proposal kinds the engine cannot read has no
-/// checkable action set.
-#[test]
-fn a_commit_with_unreadable_proposals_is_rejected() {
-    let mut e = engine(&["alice", "bob"]);
-    e.queues.insert_approved_proposal(7, invite("carol"));
-    let mut opaque = remote("bob", 2, b"commit");
-    opaque.facts = Some(StagedFacts {
-        sender: id("bob"),
-        epoch: 0,
-        actions: vec![Action::Add {
-            member: id("carol"),
-            key_package: b"kp:carol".to_vec(),
-        }],
-        proposal_count: 2,
-        self_removed: false,
-    });
-    match e.verdict(&opaque) {
-        CandidateVerdict::Reject(Some(op)) => {
-            assert_eq!(op.event, ScoreEvent::BrokenMlsProposal)
-        }
-        _ => panic!("a commit the round cannot read must be rejected"),
-    }
-}
-
-/// The actions must be exactly the voted set, keyed the same on both
-/// sides.
-#[test]
-fn actions_beyond_the_voted_set_are_rejected() {
-    let mut e = engine(&["alice", "bob"]);
-    e.queues.insert_approved_proposal(7, invite("carol"));
-    let mut extra = remote("bob", 2, b"commit");
-    extra.envelope.proposal_count = 2;
-    extra.facts = Some(StagedFacts {
-        sender: id("bob"),
-        epoch: 0,
-        actions: vec![
-            Action::Add {
-                member: id("carol"),
-                key_package: b"kp:carol".to_vec(),
+    let before = e.scoring.score_for(&member(impostor)).unwrap();
+    let hash = CommitHash::of(b"commit");
+    let out = e
+        .handle_candidate(
+            at(0),
+            hash,
+            StagedFacts {
+                sender: id(impostor),
+                epoch: 0,
+                actions: Vec::new(),
+                proposal_count: 0,
+                self_removed: false,
             },
-            Action::Remove {
-                member: id("alice"),
-            },
-        ],
-        proposal_count: 2,
-        self_removed: true,
-    });
-    match e.verdict(&extra) {
-        CandidateVerdict::Reject(Some(op)) => {
-            assert_eq!(op.event, ScoreEvent::BrokenMlsProposal)
-        }
-        _ => panic!("actions beyond the voted set must be rejected"),
-    }
+        )
+        .unwrap();
+    assert_eq!(
+        out.decisions,
+        vec![Decision::Discard { hashes: vec![hash] }]
+    );
+    let after = e.scoring.score_for(&member(impostor)).unwrap();
+    assert!(after < before, "the impostor is penalised");
 }
 
 /// The voted set and the commit are compared as deduplicated sets: two
@@ -354,32 +136,85 @@ fn duplicate_approvals_of_one_change_match_a_single_action() {
 
 // ── the round end to end ───────────────────────────────────────────
 
+/// The epoch steward's candidate sits in `round_candidate` until the round
+/// is closed; it merges only then, not the instant `handle_candidate`
+/// accepts it.
 #[test]
-fn our_own_candidate_wins_and_the_merge_report_moves_the_view() {
+fn the_epoch_stewards_candidate_merges_only_at_window_close() {
+    let mut e = engine(&["alice"]);
+    e.queues.insert_approved_proposal(7, invite("bob"));
+    e.begin(at(0));
+    let event = e.start_freezing().expect("enters freezing");
+    e.on_freeze_entered(event).unwrap();
+
+    let hash = CommitHash::of(b"commit");
+    e.handle_candidate(
+        at(0),
+        hash,
+        StagedFacts {
+            sender: id("alice"),
+            epoch: 0,
+            actions: vec![Action::Add {
+                member: id("bob"),
+                key_package: b"kp:bob".to_vec(),
+            }],
+            proposal_count: 1,
+            self_removed: false,
+        },
+    )
+    .unwrap();
+    assert!(e.round_candidate.is_some(), "held, not merged yet");
+
+    e.start_selection();
+    e.close_round().unwrap();
+    let out = e.finish();
+    assert!(
+        out.decisions
+            .iter()
+            .any(|d| matches!(d, Decision::Merge { hash: h } if *h == hash)),
+        "merges once the round closes"
+    );
+}
+
+/// The steward's own commit, reported back through `handle_candidate` the
+/// same way a peer's is, merges with `pending_merge.is_local` set.
+#[test]
+fn the_own_commit_reported_through_handle_candidate_merges() {
     let mut e = engine(&["alice"]);
     e.queues.insert_approved_proposal(7, invite("bob"));
     e.begin(at(0));
     assert!(e.request_own_candidate().unwrap());
-    assert_eq!(
-        e.pending_build.as_ref().map(|b| b.actions.clone()),
-        Some(vec![Action::Add {
-            member: id("bob"),
-            key_package: b"kp:bob".to_vec(),
-        }])
-    );
 
     let hash = CommitHash::of(b"commit");
     let out = e
-        .own_candidate_built(at(0), hash, 1, b"commit".to_vec())
+        .handle_candidate(
+            at(0),
+            hash,
+            StagedFacts {
+                sender: id("alice"),
+                epoch: 0,
+                actions: vec![Action::Add {
+                    member: id("bob"),
+                    key_package: b"kp:bob".to_vec(),
+                }],
+                proposal_count: 1,
+                self_removed: false,
+            },
+        )
         .unwrap();
-    assert!(matches!(out.outbound.first(), Some(Outbound::Candidate(_))));
+    assert!(out.events.contains(&Event::CommitRoundProgress {
+        received: 1,
+        expected: 1,
+    }));
 
-    let winner = e
-        .select_epoch_steward_candidate()
-        .unwrap()
-        .expect("our own candidate wins");
-    assert!(winner.is_local && winner.losers.is_empty());
-    e.decide_winner(winner);
+    e.start_selection();
+    e.close_round().unwrap();
+    assert!(e.pending_merge.as_ref().is_some_and(|m| m.is_local));
+    let out = e.finish();
+    assert!(matches!(
+        out.decisions.as_slice(),
+        [Decision::Merge { hash: h }] if *h == hash
+    ));
 
     let out = e
         .commit_applied(at(0), hash, 1, &[id("alice"), id("bob")])
@@ -401,7 +236,6 @@ fn our_own_candidate_wins_and_the_merge_report_moves_the_view() {
         "the committed batch leaves the queue"
     );
     assert!(e.queues.has_committed_hash(&hash));
-    assert_eq!(e.commit_candidate_count().0, 0, "the round is over");
 }
 
 /// A merge report for a commit the engine never decided still moves the
@@ -444,39 +278,6 @@ fn a_commit_that_removes_us_asks_the_router_to_leave() {
     assert_eq!(out.decisions, vec![Decision::Leave]);
 }
 
-/// A candidate from a non-epoch-steward is rejected and scored
-/// `MisbehavingCommit`, even when its actions exactly match the voted
-/// set — only the epoch steward's own candidate may win a round.
-#[test]
-fn a_non_epoch_steward_candidate_is_rejected_even_with_matching_actions() {
-    let mut e = engine(&["alice", "bob", "carol"]);
-    e.queues.insert_approved_proposal(7, invite("dave"));
-    let es = e.expected_steward().unwrap();
-    let impostor = ["alice", "bob", "carol"]
-        .into_iter()
-        .find(|m| id(m).as_bytes() != es.as_slice())
-        .expect("at least one member isn't the epoch steward");
-    let action = Action::Add {
-        member: id("dave"),
-        key_package: b"kp:dave".to_vec(),
-    };
-    let mut candidate = remote(impostor, 1, b"commit");
-    candidate.facts = Some(StagedFacts {
-        sender: id(impostor),
-        epoch: 0,
-        actions: vec![action],
-        proposal_count: 1,
-        self_removed: false,
-    });
-    e.round.insert(0, candidate, 3);
-
-    let before = e.scoring.score_for(impostor.as_bytes()).unwrap();
-    let winner = e.select_epoch_steward_candidate().unwrap();
-    assert!(winner.is_none(), "no epoch-steward candidate was submitted");
-    let after = e.scoring.score_for(impostor.as_bytes()).unwrap();
-    assert!(after < before, "the impostor is penalised");
-}
-
 /// A silent epoch steward — no candidate submitted before the round
 /// closes — yields `CommitMissing` naming it, keeps the approved batch
 /// queued, and scores it `CensorshipInactivity`.
@@ -508,7 +309,56 @@ fn a_silent_epoch_steward_yields_commit_missing_and_keeps_the_batch() {
         1,
         "the approved batch stays queued"
     );
-    assert_eq!(e.phase(), crate::engine::types::Phase::Working);
+    assert_eq!(e.phase(), Phase::Working);
+}
+
+/// A candidate whose actions don't match the voted set is discarded and its
+/// sender scored `BrokenMlsProposal`, and the round then reports the same
+/// miss it would for an absent candidate.
+#[test]
+fn a_mismatching_candidate_is_discarded_and_commit_missing_follows() {
+    let mut e = engine(&["alice"]);
+    e.queues.insert_approved_proposal(7, invite("bob"));
+    let hash = CommitHash::of(b"commit");
+    e.handle_candidate(
+        at(0),
+        hash,
+        StagedFacts {
+            sender: id("alice"),
+            epoch: 0,
+            actions: vec![Action::Add {
+                member: id("carol"),
+                key_package: b"kp:carol".to_vec(),
+            }],
+            proposal_count: 1,
+            self_removed: false,
+        },
+    )
+    .unwrap();
+
+    e.start_selection();
+    let before = e.scoring.score_for(&member("alice")).unwrap();
+    e.close_round().unwrap();
+    let out = e.finish();
+
+    assert!(
+        out.decisions
+            .iter()
+            .any(|d| matches!(d, Decision::Discard { hashes } if hashes == &vec![hash])),
+        "the mismatching commit is discarded"
+    );
+    assert!(out.events.iter().any(|ev| matches!(
+        ev,
+        Event::CommitMissing { steward, .. } if steward == &Some(id("alice"))
+    )));
+    let after = e.scoring.score_for(&member("alice")).unwrap();
+    assert!(after < before, "the sender is penalised for the mismatch");
+    assert_eq!(e.phase(), Phase::Working);
+    assert_eq!(
+        e.queues.approved_proposals_count(),
+        1,
+        "the approved batch stays queued for the next round"
+    );
 }
 
 /// A merge the router could not execute closes the round with no commit:
@@ -518,33 +368,31 @@ fn a_silent_epoch_steward_yields_commit_missing_and_keeps_the_batch() {
 fn a_failed_merge_closes_the_round_without_a_commit() {
     let mut e = engine(&["alice", "bob", "carol"]);
     e.queues.insert_approved_proposal(7, invite("dave"));
-    let es = String::from_utf8(e.expected_steward().unwrap()).unwrap();
+    let es = e.expected_steward().unwrap();
     let action = Action::Add {
         member: id("dave"),
         key_package: b"kp:dave".to_vec(),
     };
-    let commit = format!("commit:{es}").into_bytes();
-    let mut candidate = remote(&es, 1, &commit);
-    candidate.facts = Some(StagedFacts {
-        sender: id(&es),
-        epoch: 0,
-        actions: vec![action],
-        proposal_count: 1,
-        self_removed: false,
-    });
-    let hash = candidate.hash;
-    e.round.insert(0, candidate, 3);
+    let hash = CommitHash::of(b"commit");
 
     e.begin(at(0));
     e.start_freezing();
+    e.handle_candidate(
+        at(0),
+        hash,
+        StagedFacts {
+            sender: MemberId::from(es.as_slice()),
+            epoch: 0,
+            actions: vec![action],
+            proposal_count: 1,
+            self_removed: false,
+        },
+    )
+    .unwrap();
     e.start_selection();
-    let winner = e
-        .select_epoch_steward_candidate()
-        .unwrap()
-        .expect("the epoch steward's candidate wins");
-    assert_eq!(winner.hash, hash);
-    e.decide_winner(winner);
+    e.close_round().unwrap();
     let _ = e.finish();
+    assert!(e.pending_merge.is_some());
 
     let out = e
         .decision_failed(
@@ -564,9 +412,9 @@ fn a_failed_merge_closes_the_round_without_a_commit() {
     assert!(e.pending_merge.is_none());
     assert!(out.events.iter().any(|ev| matches!(
         ev,
-        Event::CommitMissing { steward, .. } if steward == &Some(id(&es))
+        Event::CommitMissing { steward, .. } if steward == &Some(MemberId::from(es.as_slice()))
     )));
-    assert_eq!(e.phase(), crate::engine::types::Phase::Working);
+    assert_eq!(e.phase(), Phase::Working);
     assert_eq!(
         e.queues.approved_proposals_count(),
         1,

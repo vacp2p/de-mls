@@ -56,6 +56,7 @@ pub struct WelcomeDraft {
 pub struct Built {
     pub hash: CommitHash,
     pub proposal_count: u32,
+    pub actions: Vec<Action>,
     pub commit: Vec<u8>,
     pub welcome: Option<WelcomeDraft>,
 }
@@ -329,10 +330,12 @@ impl FakeMls {
             snapshot: self.snapshot_after(&commit, hash),
         });
         let proposal_count = commit.actions.len() as u32;
+        let actions = commit.actions.clone();
         self.pending = Some((hash, commit));
         Built {
             hash,
             proposal_count,
+            actions,
             commit: bytes,
             welcome,
         }

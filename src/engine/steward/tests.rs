@@ -245,22 +245,23 @@ fn sync_request_drive_asks_once_per_window() {
     assert_eq!(engine.timing.unanswered_sync_rounds, 2);
 }
 
-/// The bootstrap round-trips: what a steward builds, a listless member
-/// adopts.
+/// The sync round-trips: what a steward builds, a listless member adopts
+/// off the wire like any other control message.
 #[test]
-fn bootstrap_round_trips_into_a_joiner() {
+fn conversation_sync_round_trips_into_a_joiner() {
     let mut steward = founder();
     steward.begin(Timestamp::ZERO);
     let bytes = steward
         .build_bootstrap()
-        .expect("build bootstrap")
+        .expect("build sync")
         .expect("a list is installed");
 
     let mut engine = joiner();
-    engine.begin(Timestamp::ZERO);
-    engine.apply_bootstrap(&bytes).expect("adopt bootstrap");
+    let out = engine
+        .handle_control(Timestamp::ZERO, id("alice"), 1, &bytes)
+        .expect("handle control");
     assert!(engine.is_synced());
-    assert!(engine.out.events.contains(&Event::SyncApplied));
+    assert!(out.events.contains(&Event::SyncApplied));
 }
 
 /// The honest list recomputes from the local members; one drawn off them
@@ -297,7 +298,6 @@ fn actionable_updates_skip_changes_that_already_landed() {
         id("alice"),
         1,
         &[id("alice"), id("bob")],
-        &[],
         EngineConfig::default(),
         InMemoryStore::default(),
     )

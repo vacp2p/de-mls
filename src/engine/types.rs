@@ -146,16 +146,6 @@ pub struct StagedFacts {
     pub self_removed: bool,
 }
 
-/// The engine's answer to a candidate envelope before any staging happens.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Admission {
-    /// Stage `commit` on the group, then report the facts under `hash`.
-    Stage { hash: CommitHash, commit: Vec<u8> },
-    /// Not worth staging: a duplicate, a past epoch, an over-cap sender, or a
-    /// malformed envelope.
-    Drop,
-}
-
 /// Something the router must execute against the group, in the order
 /// given.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,9 +158,11 @@ pub enum Decision {
         member: MemberId,
         key_package: Vec<u8>,
     },
-    /// This member is a steward for the round: build a commit carrying
-    /// exactly `actions`, keep it pending, then report
-    /// [`super::Engine::own_candidate_built`].
+    /// This member is the epoch steward for the round: build a commit
+    /// carrying exactly `actions`, keep it pending, broadcast the commit
+    /// bytes, then report it through
+    /// [`super::Engine::handle_candidate`] with the facts the build
+    /// returned.
     BuildCommit { actions: Vec<Action> },
     /// Merge the staged or own commit named by `hash`, then report
     /// [`super::Engine::commit_applied`]. A loser clears its own pending
@@ -185,16 +177,10 @@ pub enum Decision {
 /// Bytes the router puts on the wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outbound {
-    /// A `ControlMessage`; seal at the current epoch and broadcast.
+    /// A `ControlMessage`; seal at the current epoch and broadcast. The only
+    /// kind: a candidate is broadcast by the router as raw commit bytes, not
+    /// through this variant.
     Control(Vec<u8>),
-    /// A `CommitCandidate` envelope; broadcast in the clear.
-    Candidate(Vec<u8>),
-    /// The `ControlMessage` a joiner needs; seal at the epoch reached by
-    /// merging `for_commit` and deliver with that commit's welcome.
-    Bootstrap {
-        for_commit: CommitHash,
-        bytes: Vec<u8>,
-    },
 }
 
 /// The lifecycle phase of a conversation.
@@ -305,16 +291,6 @@ impl Output {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-    }
-
-    /// The bootstrap bytes minted for `commit`, if this output carries them.
-    pub fn bootstrap_for(&self, commit: &CommitHash) -> Option<&[u8]> {
-        self.outbound.iter().find_map(|o| match o {
-            Outbound::Bootstrap { for_commit, bytes } if for_commit == commit => {
-                Some(bytes.as_slice())
-            }
-            _ => None,
-        })
     }
 }
 

@@ -55,14 +55,18 @@ pub struct StagedFacts {
 pub struct Built {
     /// [`GroupOps::commit_hash`] of `commit`.
     pub hash: [u8; 32],
-    /// Proposals actually committed. Below the number of actions asked for
-    /// when removes of non-members were skipped.
+    /// The actions actually committed, in commit order: what the router
+    /// reports to the engine as this commit's facts. Shorter than the
+    /// actions asked for when removes of non-members were skipped.
+    pub actions: Vec<Action>,
+    /// Proposals the commit carries; equals `actions.len()`.
     pub proposal_count: u32,
-    /// The serialized commit, to be broadcast in the candidate envelope.
+    /// The serialized commit, broadcast as is: a candidate on the wire is
+    /// these bytes and nothing else.
     pub commit: Vec<u8>,
     /// The welcome for the members this commit adds, when it adds any. It is
-    /// delivered after the commit merges, carrying that commit's bootstrap
-    /// bytes sealed at the post-merge epoch.
+    /// delivered after the commit merges and carries nothing else; the
+    /// joiner's sync arrives as an ordinary control message.
     pub welcome: Option<Vec<u8>>,
 }
 

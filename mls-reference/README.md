@@ -40,7 +40,7 @@ application's builder last so they always win.
 | `open(ciphertext)` | `{sender, epoch, plaintext}` or drop | MUST return the sender from the MLS signature, never from the payload; MUST drop group-id mismatch, epochs newer than current, older than `current - past_window`, and older than own join; MUST NOT process commit or proposal content here |
 | `key_package_identity(bytes)` | member id (the leaf's signature key) | parse only; the same value the member has after seating |
 | `validate_key_package(bytes)` | ok / error | full MLS validation |
-| `build_commit(actions)` | `{hash, proposal_count, commit_bytes, welcome?}` | proposals MUST be inline, in the given order; MUST force a self-update; MUST validate every key package; MUST stay pending and MUST NOT merge; removes of non-members MUST be skipped and reported |
+| `build_commit(actions)` | `{hash, actions, proposal_count, commit_bytes, welcome?}` | proposals MUST be inline, in the given order; MUST force a self-update; MUST validate every key package; MUST stay pending and MUST NOT merge; removes of non-members MUST be skipped and reported |
 | `stage(commit_bytes)` | `{sender, epoch, actions, proposal_count, self_removed}` | MUST NOT apply; MUST hold several staged commits at once; MUST reject group-id mismatch and past epochs; `actions` lists adds and removes by member id in commit order |
 | `merge(hash)` | `{epoch, members}` | own pending commit MUST be cleared before merging a remote one; MUST persist before returning |
 | `discard(hash)`, `clear_pending()` | | |

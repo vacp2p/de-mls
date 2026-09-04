@@ -1,15 +1,13 @@
 //! Minting our own candidate: batching the approved queue into commit
-//! actions, asking the router to build the commit, opening the round when a
-//! peer's candidate arrives first, and replaying candidates stashed ahead of
-//! their proposal's approval.
+//! actions and asking the router to build the commit, and opening the round
+//! when a peer's candidate arrives first.
 
 use tracing::info;
 
 use crate::{
     ConversationError,
     engine::{
-        commit::buffer::BufferedCandidate,
-        handle::{Engine, PendingBuild},
+        handle::Engine,
         proposal_kind::ProposalKind,
         store::EngineStore,
         types::{Action, Decision, MemberId, Phase},
@@ -30,49 +28,16 @@ impl<St: EngineStore> Engine<St> {
         self.on_freeze_entered(event)
     }
 
-    /// Re-buffer candidates stashed before their proposal was approved.
-    pub(crate) fn replay_early_candidates(&mut self) -> Result<(), ConversationError> {
-        let epoch = self.epoch;
-        let stashed = self.queues.take_early_candidates(epoch);
-        if stashed.is_empty() {
-            return Ok(());
-        }
-        let max = self.members.len();
-        for candidate in stashed {
-            if self.queues.has_committed_hash(&candidate.hash) {
-                continue;
-            }
-            self.round.insert(
-                epoch,
-                BufferedCandidate {
-                    hash: candidate.hash,
-                    envelope: candidate.envelope,
-                    facts: Some(candidate.facts),
-                    is_local: false,
-                },
-                max,
-            );
-        }
-        Ok(())
-    }
-
-    /// `(received, expected)` candidates for the current round.
+    /// `(received, expected)` candidates for the current round: at most the
+    /// epoch steward's alone.
     pub(crate) fn commit_candidate_count(&self) -> (usize, usize) {
-        let received = self.round.candidates(self.epoch).len();
-        let expected = self
-            .steward_list
-            .current_list()
-            .map_or(0, |list| list.len());
-        (received, expected)
+        (usize::from(self.round_candidate.is_some()), 1)
     }
 
     /// Ask the router to build our candidate from the approved batch. Only
-    /// the epoch steward builds (design 11): `Ok(false)` when we aren't it,
-    /// there is nothing to commit, or a build is already outstanding.
+    /// the epoch steward builds (design 11): `Ok(false)` when we aren't it or
+    /// there is nothing to commit.
     pub(crate) fn request_own_candidate(&mut self) -> Result<bool, ConversationError> {
-        if self.pending_build.is_some() {
-            return Ok(false);
-        }
         if !self.is_epoch_steward() {
             return Ok(false);
         }
@@ -103,9 +68,6 @@ impl<St: EngineStore> Engine<St> {
             proposals = actions.len(),
             "commit candidate requested"
         );
-        self.pending_build = Some(PendingBuild {
-            actions: actions.clone(),
-        });
         self.decide(Decision::BuildCommit { actions });
         Ok(true)
     }

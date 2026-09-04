@@ -29,13 +29,16 @@
 //! group-operations contract an MLS service must meet, and gives a
 //! reference implementation.
 //!
-//! Every driving call — `handle_control`, `admit_candidate` +
-//! `handle_candidate`, the report calls (`own_candidate_built`,
-//! `commit_applied`, `decision_failed`, `key_package_checked`), the local
-//! actions, and `tick` — returns an [`Output`]: decisions to execute
+//! Every driving call — `handle_control`, `handle_candidate`, the report
+//! calls (`commit_applied`, `decision_failed`, `key_package_checked`), the
+//! local actions, and `tick` — returns an [`Output`]: decisions to execute
 //! against the group, bytes to seal and send, events to observe, and the
 //! next wakeup. Executing a decision leads to a report call that returns
-//! its own `Output`, so the router loops until one is empty.
+//! its own `Output`, so the router loops until one is empty. A candidate on
+//! the wire is the raw MLS commit bytes: the router stages it and hands the
+//! facts the group learned straight to `handle_candidate`, which keeps at
+//! most one per round — the epoch steward's — and discards the rest on
+//! sight.
 //!
 //! ```rust,ignore
 //! struct Router {
@@ -50,18 +53,19 @@
 //!                 let opened = self.mls.open(&bytes);
 //!                 self.engine.handle_control(now, opened.sender, opened.epoch, &opened.plaintext)
 //!             }
-//!             Frame::Candidate(bytes) => {
-//!                 let Admission::Stage { hash, commit } = self.engine.admit_candidate(now, &bytes)? else { return };
-//!                 let facts = self.mls.stage(&commit);     // authenticates the sender
-//!                 self.engine.handle_candidate(now, hash, facts)
+//!             Frame::Commit(bytes) => {
+//!                 let facts = self.mls.stage(&bytes);      // authenticates the sender
+//!                 self.engine.handle_candidate(now, CommitHash::of(&bytes), facts)
 //!             }
 //!         };
 //!         self.drive(now, out)
 //!     }
 //!
-//!     // Seals and sends `outbound`, executes `decisions` in order (a report
-//!     // call's Output feeds back in), then hands `events` to the
-//!     // application. Loops until nothing is left; arms `wakeup` for `tick`.
+//!     // Seals and sends `outbound`, executes `decisions` in order — a
+//!     // `BuildCommit` builds on the group, broadcasts the commit bytes, and
+//!     // reports it back through `handle_candidate`, whose own Output feeds
+//!     // back in the same way — then hands `events` to the application.
+//!     // Loops until nothing is left; arms `wakeup` for `tick`.
 //!     fn drive(&mut self, now: Timestamp, out: Output) { /* .. */ }
 //! }
 //! ```
