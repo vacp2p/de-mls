@@ -59,7 +59,7 @@ fn bounded_set_clamps_zero_capacity_so_dedup_still_works() {
 
 #[test]
 fn mark_consensus_outcome_persists_in_resolved_cache() {
-    let mut queues = EngineQueues::new(10);
+    let mut queues = EngineQueues::new();
     assert!(!queues.is_consensus_outcome_applied(42));
     queues.mark_consensus_outcome_applied(42);
     assert!(queues.is_consensus_outcome_applied(42));
@@ -72,7 +72,7 @@ fn insert_remove_member(queues: &mut EngineQueues, target: &[u8], proposal_id: P
 /// `approved_proposals` order is FIFO regardless of proposal-id ordering.
 #[test]
 fn test_approved_proposals_preserve_fifo_across_mutations() {
-    let mut queues = EngineQueues::new(10);
+    let mut queues = EngineQueues::new();
 
     insert_remove_member(&mut queues, &member(2), 500);
     insert_remove_member(&mut queues, &member(3), 100);
@@ -91,7 +91,7 @@ fn test_approved_proposals_preserve_fifo_across_mutations() {
 
 #[test]
 fn test_urgent_commit_target_set_take_clears() {
-    let mut queues = EngineQueues::new(10);
+    let mut queues = EngineQueues::new();
     assert!(queues.urgent_commit_target().is_none());
 
     let target = member(7);
@@ -105,7 +105,7 @@ fn test_urgent_commit_target_set_take_clears() {
 
 #[test]
 fn test_drop_approved_removals_for_target() {
-    let mut queues = EngineQueues::new(10);
+    let mut queues = EngineQueues::new();
     let victim = member(7);
     let bystander = member(9);
 
@@ -130,7 +130,7 @@ fn test_drop_approved_removals_for_target() {
 /// duplicate round.
 #[test]
 fn score_removal_target_stays_covered_through_its_lifecycle() {
-    let mut queues = EngineQueues::new(10);
+    let mut queues = EngineQueues::new();
     let creator = member(1);
     let target = member(7);
 
@@ -164,7 +164,7 @@ fn score_removal_target_stays_covered_through_its_lifecycle() {
 /// list never picks a member MLS forbids from committing its own removal.
 #[test]
 fn steward_eligibility_skips_non_members_and_queued_removals() {
-    let mut queues = EngineQueues::new(10);
+    let mut queues = EngineQueues::new();
     let victim = member(7);
     let bystander = member(9);
     let outsider = member(11);
@@ -182,7 +182,7 @@ fn steward_eligibility_skips_non_members_and_queued_removals() {
 /// A departure drops the entry, so a re-join is unsettled again.
 #[test]
 fn membership_bookkeeping_tracks_join_epochs_and_clears_departures() {
-    let mut queues = EngineQueues::new(10);
+    let mut queues = EngineQueues::new();
     let joiner = member(2);
     let leaver = member(3);
 
@@ -190,11 +190,11 @@ fn membership_bookkeeping_tracks_join_epochs_and_clears_departures() {
     insert_remove_member(&mut queues, &leaver, 100);
     queues.member_join_epoch.insert(leaver.clone(), 1);
 
-    queues.store_membership_delta(MembershipDelta {
+    let delta = MembershipDelta {
         added: vec![joiner.clone()],
         removed: vec![leaver.clone()],
-    });
-    queues.apply_membership_delta_bookkeeping(5);
+    };
+    queues.apply_membership_delta_bookkeeping(5, &delta);
 
     assert!(!queues.has_approved_removal(&leaver));
     assert!(queues.is_settled(&leaver, 5), "an untracked id is settled");
@@ -208,9 +208,4 @@ fn membership_bookkeeping_tracks_join_epochs_and_clears_departures() {
         queues.settled_members(std::slice::from_ref(&joiner), 6),
         vec![joiner]
     );
-
-    // The delta stays available for the reconcile step that consumes it.
-    let delta = queues.take_membership_delta();
-    assert_eq!(delta.added.len(), 1);
-    assert!(queues.take_membership_delta().is_empty());
 }

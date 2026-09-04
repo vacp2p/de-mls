@@ -235,7 +235,6 @@ fn the_own_commit_reported_through_handle_candidate_merges() {
         0,
         "the committed batch leaves the queue"
     );
-    assert!(e.queues.has_committed_hash(&hash));
 }
 
 /// A merge report for a commit the engine never decided still moves the

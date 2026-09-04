@@ -38,10 +38,6 @@ pub const DEFAULT_MAX_CONSENSUS_SESSIONS: usize = 128;
 /// runaway growth when a busy epoch accumulates approved work.
 pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
 
-/// Default number of recent commit / welcome hashes kept for duplicate
-/// detection (see [`EngineConfig::dedup_window`]).
-pub const DEFAULT_DEDUP_WINDOW: usize = 10;
-
 /// Default unanswered sync-request rounds before the conversation reports it:
 /// three tries across the answer latency. `0` never reports. See
 /// [`EngineConfig::unanswered_sync_rounds`].
@@ -82,10 +78,6 @@ pub struct EngineConfig {
     /// Max MLS proposals the steward packs into one commit batch. See
     /// [`DEFAULT_COMMIT_BATCH_MAX`].
     pub commit_batch_max: usize,
-    /// How many recent commit / welcome hashes each dedup window retains
-    /// (duplicate-candidate and duplicate-welcome-broadcast detection). See
-    /// [`DEFAULT_DEDUP_WINDOW`].
-    pub dedup_window: usize,
     /// How many sync requests may go unanswered before the conversation emits
     /// [`crate::engine::Event::SyncUnanswered`]. Rounds are one
     /// `backup_takeover_window` apart. `0` never emits it; requesting continues
@@ -110,7 +102,6 @@ impl Default for EngineConfig {
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
             max_consensus_sessions: DEFAULT_MAX_CONSENSUS_SESSIONS,
             commit_batch_max: DEFAULT_COMMIT_BATCH_MAX,
-            dedup_window: DEFAULT_DEDUP_WINDOW,
             unanswered_sync_rounds: DEFAULT_UNANSWERED_SYNC_ROUNDS,
             steward_list: StewardListConfig::default(),
             scoring: ScoringConfig::default(),

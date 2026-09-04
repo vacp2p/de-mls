@@ -120,9 +120,7 @@ impl<St: EngineStore> Engine<St> {
         let delta = MembershipDelta::between(&self.members, &adopted);
         self.members = adopted;
         self.epoch = epoch;
-        self.queues.insert_committed_hash(hash);
-        self.queues.store_membership_delta(delta.clone());
-        self.finalize_committed_batch(epoch);
+        self.finalize_committed_batch(epoch, &delta);
         self.reconcile_membership_after_commit(&delta)?;
 
         // A commit that unseats us ends the conversation here: no steward
@@ -163,8 +161,8 @@ impl<St: EngineStore> Engine<St> {
     /// Post-commit queue bookkeeping: stamp join epochs and clear the entries
     /// the commit resolved, before the steward-list reconcile reads settled
     /// membership.
-    fn finalize_committed_batch(&mut self, epoch: u64) {
-        self.queues.apply_membership_delta_bookkeeping(epoch);
+    fn finalize_committed_batch(&mut self, epoch: u64, delta: &MembershipDelta) {
+        self.queues.apply_membership_delta_bookkeeping(epoch, delta);
         if let Some(target) = self.queues.take_urgent_commit_target() {
             // Urgent commit: the rest of the queue waits for the next cycle.
             self.queues.drop_approved_removals_for(&target);
@@ -181,7 +179,6 @@ impl<St: EngineStore> Engine<St> {
         &mut self,
         delta: &MembershipDelta,
     ) -> Result<(), ConversationError> {
-        let _ = self.queues.take_membership_delta();
         for member in &delta.removed {
             self.scoring.remove_member(member);
         }
