@@ -63,7 +63,7 @@ impl<St: EngineStore> Engine<St> {
 
         // The epoch steward's commit opens the round for everyone; a
         // rejected one never does.
-        if self.current_state() == Phase::Working {
+        if self.phase == Phase::Working {
             self.open_round_on_peer_candidate()?;
         }
 

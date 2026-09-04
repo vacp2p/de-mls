@@ -52,7 +52,7 @@ impl<St: EngineStore> Engine<St> {
     /// arrive; the round closes only once the freeze window elapses, so the
     /// group has seen the epoch steward's commit before it merges.
     fn advance_freezing(&mut self) -> Result<(), ConversationError> {
-        if self.current_state() != Phase::Freezing {
+        if self.phase != Phase::Freezing {
             self.timing.last_commit_round_progress = None;
             return Ok(());
         }

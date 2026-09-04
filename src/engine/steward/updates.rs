@@ -32,7 +32,7 @@ impl<St: EngineStore> Engine<St> {
         if target_member_id_of(&request).is_none() {
             return Ok(());
         }
-        let state = self.current_state();
+        let state = self.phase;
         let inserted = self
             .queues
             .insert_pending_update(request.clone(), self.epoch);

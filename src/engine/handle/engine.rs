@@ -24,7 +24,6 @@ use crate::{
         outcome_bus::{OutcomeBus, OutcomeReceiver},
         phase_timer::PhaseTimer,
         queues::EngineQueues,
-        state_machine::ConversationStateMachine,
         store::EngineStore,
         types::{
             CommitHash, Decision, Event, MemberId, Outbound, Output, Phase, StagedFacts, Timestamp,
@@ -102,7 +101,8 @@ pub struct Engine<St: EngineStore> {
     /// The group's member set as last reported by the router, sorted.
     pub(crate) members: Vec<Vec<u8>>,
     pub(crate) queues: EngineQueues,
-    pub(crate) state_machine: ConversationStateMachine,
+    /// The lifecycle phase; moved only by the coordinators in `lifecycle.rs`.
+    pub(crate) phase: Phase,
     pub(crate) steward_list: StewardListService,
     pub(crate) scoring: PeerScoringService,
     pub(crate) consensus: EngineConsensus,
@@ -159,7 +159,7 @@ impl<St: EngineStore> Engine<St> {
             epoch,
             members: sorted,
             queues: EngineQueues::new(config.dedup_window),
-            state_machine: ConversationStateMachine::new_as_member(),
+            phase: Phase::Working,
             steward_list,
             scoring,
             consensus,
@@ -201,7 +201,7 @@ impl<St: EngineStore> Engine<St> {
 
     /// The lifecycle phase.
     pub fn phase(&self) -> Phase {
-        self.state_machine.current_state()
+        self.phase
     }
 
     /// Whether this member is on the current steward list.
@@ -234,10 +234,6 @@ impl<St: EngineStore> Engine<St> {
         &self.config
     }
 
-    pub(crate) fn current_state(&self) -> Phase {
-        self.state_machine.current_state()
-    }
-
     /// Whether `member` is in the group as last reported.
     pub(crate) fn is_member(&self, member: &[u8]) -> bool {
         self.members
@@ -266,7 +262,7 @@ impl<St: EngineStore> Engine<St> {
     /// clock the moment it lands, so the wakeup this call reports already
     /// covers the round that has to follow.
     fn anchor_inactivity_timer(&mut self) {
-        if self.current_state() == Phase::Working
+        if self.phase == Phase::Working
             && self.queues.approved_proposals_count() > 0
             && self.timing.phase_timer.started_at().is_none()
         {

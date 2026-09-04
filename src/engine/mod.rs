@@ -17,7 +17,6 @@ mod outcome_bus;
 mod phase_timer;
 mod proposal_kind;
 mod queues;
-mod state_machine;
 mod steward;
 mod store;
 #[cfg(test)]

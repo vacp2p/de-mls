@@ -435,7 +435,7 @@ impl<St: EngineStore> Engine<St> {
     /// expects. Nothing opens while a round is running; an active emergency
     /// also blocks lower-priority proposals.
     fn check_proposal_allowed(&self, kind: ProposalKind) -> Result<u32, ConversationError> {
-        let state = self.current_state();
+        let state = self.phase;
         if state != Phase::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }

@@ -18,7 +18,7 @@ impl<St: EngineStore> Engine<St> {
     /// `backup_takeover_window` first, so a silent epoch steward can't strand
     /// a buffered membership change.
     pub(crate) fn drive_buffered_proposals(&mut self) -> Result<(), ConversationError> {
-        let idle = self.current_state() != Phase::Working
+        let idle = self.phase != Phase::Working
             || self.queues.approved_proposals_count() > 0
             || self.actionable_buffered_updates().is_empty();
         if idle {
