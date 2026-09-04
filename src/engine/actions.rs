@@ -26,7 +26,7 @@ impl<St: EngineStore> Engine<St> {
         key_package: Vec<u8>,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
-        let state = self.current_state();
+        let state = self.phase;
         if state != Phase::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
@@ -64,7 +64,7 @@ impl<St: EngineStore> Engine<St> {
         member: MemberId,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
-        let state = self.current_state();
+        let state = self.phase;
         if state != Phase::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
@@ -119,7 +119,7 @@ impl<St: EngineStore> Engine<St> {
         approve: bool,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
-        let state = self.current_state();
+        let state = self.phase;
         if matches!(state, Phase::Freezing | Phase::Selection) {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }

@@ -19,7 +19,7 @@ impl<St: EngineStore> Engine<St> {
     /// A peer's candidate opens the round locally: from `Working` we enter
     /// `Freezing` and, if we are the epoch steward, mint our own.
     pub(crate) fn open_round_on_peer_candidate(&mut self) -> Result<(), ConversationError> {
-        if self.current_state() != Phase::Working {
+        if self.phase != Phase::Working {
             return Ok(());
         }
         let Some(event) = self.start_freezing() else {

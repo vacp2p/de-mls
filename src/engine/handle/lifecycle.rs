@@ -1,4 +1,4 @@
-//! State-machine transitions and their phase-timer bookkeeping: entering
+//! Phase transitions and their phase-timer bookkeeping: entering
 //! `Working`, `Freezing`, and `Selection`, and the steward-inactivity check
 //! that drives the `Working` → `Freezing` transition.
 
@@ -10,16 +10,17 @@ use crate::engine::{handle::Engine, store::EngineStore, types::Phase};
 
 impl<St: EngineStore> Engine<St> {
     pub(crate) fn start_working(&mut self) -> Phase {
-        self.state_machine.start_working();
+        self.phase = Phase::Working;
         self.timing.phase_timer.clear();
         info!(state = "Working", "state transition");
         Phase::Working
     }
 
-    /// Enter `Freezing` from `Working`, anchoring the
-    /// freeze timer. `None` from any other state.
+    /// Enter `Freezing` from `Working`, anchoring the freeze timer. `None`
+    /// from any other phase.
     pub(crate) fn start_freezing(&mut self) -> Option<Phase> {
-        if self.state_machine.start_freezing() {
+        if self.phase == Phase::Working {
+            self.phase = Phase::Freezing;
             self.timing.phase_timer.start(self.now);
             info!(state = "Freezing", "state transition");
             Some(Phase::Freezing)
@@ -29,14 +30,14 @@ impl<St: EngineStore> Engine<St> {
     }
 
     pub(crate) fn start_selection(&mut self) -> Phase {
-        self.state_machine.start_selection();
+        self.phase = Phase::Selection;
         info!(state = "Selection", "state transition");
         Phase::Selection
     }
 
     /// `true` once the freeze window elapsed while in `Freezing`.
     pub(crate) fn is_freeze_window_elapsed(&self) -> bool {
-        self.current_state() == Phase::Freezing
+        self.phase == Phase::Freezing
             && self
                 .timing
                 .phase_timer
@@ -51,7 +52,7 @@ impl<St: EngineStore> Engine<St> {
         approved_proposals_count: usize,
         inactivity_duration: Duration,
     ) -> Option<Phase> {
-        if self.current_state() != Phase::Working || approved_proposals_count == 0 {
+        if self.phase != Phase::Working || approved_proposals_count == 0 {
             return None;
         }
         if self.timing.phase_timer.started_at().is_none() {

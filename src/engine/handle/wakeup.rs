@@ -45,7 +45,7 @@ impl<St: EngineStore> Engine<St> {
 
     fn phase_deadline(&self) -> Option<Timestamp> {
         let anchor = self.timing.phase_timer.started_at()?;
-        match self.current_state() {
+        match self.phase {
             Phase::Freezing => Some(anchor + self.config.freeze_duration),
             Phase::Working if self.queues.approved_proposals_count() > 0 => {
                 Some(anchor + self.config.commit_batch_window)
