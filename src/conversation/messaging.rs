@@ -155,6 +155,7 @@ where
         self.queues.insert_pending_update(
             ConversationUpdateRequest::member_invite(MemberInvite {
                 key_package_bytes: key_package_bytes.to_vec(),
+                member_id: Vec::new(),
             }),
             epoch,
         );
@@ -195,6 +196,7 @@ where
             provider,
             ConversationUpdateRequest::member_invite(MemberInvite {
                 key_package_bytes: key_package_bytes.to_vec(),
+                member_id: Vec::new(),
             }),
             creator_vote,
             signer,

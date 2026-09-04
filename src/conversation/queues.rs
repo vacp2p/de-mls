@@ -731,7 +731,10 @@ mod tests {
 
         let mut conversation = ConversationQueues::new("invite-no-duplicate", 10);
         let request = ConversationUpdateRequest {
-            payload: Some(Payload::MemberInvite(MemberInvite { key_package_bytes })),
+            payload: Some(Payload::MemberInvite(MemberInvite {
+                key_package_bytes,
+                member_id: Vec::new(),
+            })),
         };
         let proposal_id = 400;
 

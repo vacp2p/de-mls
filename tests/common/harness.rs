@@ -763,6 +763,7 @@ impl Member {
 pub fn build_key_package_announcement(key_package_bytes: &[u8]) -> Vec<u8> {
     MemberInvite {
         key_package_bytes: key_package_bytes.to_vec(),
+        member_id: Vec::new(),
     }
     .encode_to_vec()
 }

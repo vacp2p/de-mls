@@ -997,7 +997,10 @@ mod tests {
         key_package_bytes: Vec<u8>,
     ) -> crate::protos::de_mls::messages::v1::ConversationUpdateRequest {
         use crate::protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberInvite};
-        ConversationUpdateRequest::member_invite(MemberInvite { key_package_bytes })
+        ConversationUpdateRequest::member_invite(MemberInvite {
+            key_package_bytes,
+            member_id: Vec::new(),
+        })
     }
 
     /// A conversation whose scoring carries the real RFC deltas, so a batch of

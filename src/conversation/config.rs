@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::DEFAULT_MAX_RETRIES;
 use crate::StewardListConfig;
 use crate::error::ConversationError;
+use crate::peer_scoring::ScoringConfig;
 use crate::protos::de_mls::messages::v1::TimingConfig;
 
 /// Window that batches approved proposals from the first one; at its end every
@@ -131,6 +132,8 @@ pub struct ConversationConfig {
     /// Steward-list size bounds (`sn_min` / `sn_max`). The list itself is
     /// library-owned; this is the only steward knob the integrator sets.
     pub steward_list: StewardListConfig,
+    /// Peer-scoring policy: the starting score and the removal threshold.
+    pub scoring: ScoringConfig,
 }
 
 impl Default for ConversationConfig {
@@ -153,6 +156,7 @@ impl Default for ConversationConfig {
             recovery_max_rounds: DEFAULT_RECOVERY_MAX_ROUNDS,
             unanswered_sync_rounds: DEFAULT_UNANSWERED_SYNC_ROUNDS,
             steward_list: StewardListConfig::default(),
+            scoring: ScoringConfig::default(),
         }
     }
 }
@@ -179,6 +183,7 @@ impl ConversationConfig {
     /// above Δ is the integrator's call; a window below it degrades (e.g. two
     /// stewards forking one add) rather than failing here.
     pub fn validate(&self) -> Result<(), ConversationError> {
+        self.scoring.validate()?;
         // The auto-vote fires at `voting_delay`; the session resolves at
         // `consensus_timeout`. If the delay isn't shorter, the auto-vote never
         // fires before the session closes.
