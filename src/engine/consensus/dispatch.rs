@@ -11,12 +11,12 @@ use prost::Message;
 use tracing::{debug, info, warn};
 
 use crate::{
-    ConversationError, ScoreOp,
+    ConversationError,
     engine::{
         consensus::apply::{ApplyOutcome, apply_outcome},
         handle::Engine,
         store::EngineStore,
-        types::{Event, MemberId},
+        types::{Event, MemberId, Verdict},
     },
     peer_scoring::emergency_score_ops,
     protos::de_mls::messages::v1::{ConversationUpdateRequest, StewardElectionProposal},
@@ -40,16 +40,21 @@ impl<St: EngineStore> Engine<St> {
         &mut self,
         event: ConsensusEvent,
     ) -> Result<(), ConversationError> {
-        let (proposal_id, approved, timestamp) = match &event {
+        let (proposal_id, verdict, timestamp) = match &event {
             ConsensusEvent::ConsensusReached {
                 proposal_id,
-                result,
+                result: true,
                 timestamp,
-            } => (*proposal_id, *result, *timestamp),
+            } => (*proposal_id, Verdict::Approved, *timestamp),
+            ConsensusEvent::ConsensusReached {
+                proposal_id,
+                result: false,
+                timestamp,
+            } => (*proposal_id, Verdict::Rejected, *timestamp),
             ConsensusEvent::ConsensusFailed {
                 proposal_id,
                 timestamp,
-            } => (*proposal_id, false, *timestamp),
+            } => (*proposal_id, Verdict::Failed, *timestamp),
         };
 
         // Any outcome moots both pending deadlines for this proposal.
@@ -68,7 +73,7 @@ impl<St: EngineStore> Engine<St> {
         // same output as the state changes it triggers.
         self.emit(Event::ConsensusReached {
             proposal_id,
-            approved,
+            verdict,
             timestamp,
         });
         let scope = self.conversation_id.clone();
@@ -79,10 +84,10 @@ impl<St: EngineStore> Engine<St> {
         // check self-starts it once it sees approved work.
         info!(
             conversation = %self.conversation_id,
-            proposal_id, approved, "consensus reached"
+            proposal_id, verdict = ?verdict, "consensus ended"
         );
         self.queues.mark_consensus_outcome_applied(proposal_id);
-        let outcome = apply_outcome(&mut self.queues, proposal_id, approved, &request);
+        let outcome = apply_outcome(&mut self.queues, proposal_id, verdict, &request);
 
         match outcome {
             ApplyOutcome::NoAction => {}
@@ -91,7 +96,7 @@ impl<St: EngineStore> Engine<St> {
             }
             // No retry ladder: the next request_recovery / propose_election
             // call is the application's move.
-            ApplyOutcome::ElectionRejected => {}
+            ApplyOutcome::ElectionDropped => {}
             ApplyOutcome::DeadlockAccepted => self.skip_silent_epoch_steward(),
             ApplyOutcome::UrgentRemoval { target } => {
                 // A steward-gated removal: enter freezing and mint it now.
@@ -106,9 +111,9 @@ impl<St: EngineStore> Engine<St> {
         }
 
         // Score changes are only triggered for emergency proposals.
-        let score_ops = emergency_score_ops(&request, approved);
+        let score_ops = emergency_score_ops(&request, verdict);
         if !score_ops.is_empty() {
-            self.handle_emergency_scored(proposal_id, &score_ops)?;
+            self.apply_score_ops(&score_ops);
         }
 
         // Free the resolved session so the store keeps only live ones; late
@@ -202,17 +207,5 @@ impl<St: EngineStore> Engine<St> {
         } else {
             Ok(())
         }
-    }
-
-    /// A finished emergency: apply its score ops and clear the partial
-    /// freeze.
-    fn handle_emergency_scored(
-        &mut self,
-        proposal_id: u32,
-        score_ops: &[ScoreOp],
-    ) -> Result<(), ConversationError> {
-        self.apply_score_ops(score_ops);
-        self.queues.remove_emergency(proposal_id);
-        Ok(())
     }
 }

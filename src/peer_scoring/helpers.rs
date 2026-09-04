@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use crate::{
+    Verdict,
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, ViolationEvidence, conversation_update_request::Payload,
     },
@@ -30,30 +31,34 @@ pub fn scoring_member_diff(scored: &[Vec<u8>], mls_members: &[Vec<u8>]) -> Scori
 
 /// Converts a finished emergency-proposal vote into the peer-score changes
 /// it implies. The proposal accuses a target of a violation; once the group
-/// has voted (`approved` is the result), the creator and the target gain or
+/// has voted (`verdict` is the outcome), the creator and the target gain or
 /// lose score depending on the outcome.
 ///
 /// Returns an empty vector when `request` isn't an emergency
 /// proposal or carries no evidence.
 ///
-/// - accepted, violation carries a target penalty → target penalty + creator reward.
-/// - accepted, no target penalty → creator reward only.
+/// - approved, violation carries a target penalty → target penalty + creator reward.
+/// - approved, no target penalty → creator reward only.
 /// - rejected (false accusation) → creator penalty.
-pub fn emergency_score_ops(request: &ConversationUpdateRequest, approved: bool) -> Vec<ScoreOp> {
+/// - failed (no decision) → nothing; nobody is blamed for a tie.
+pub fn emergency_score_ops(request: &ConversationUpdateRequest, verdict: Verdict) -> Vec<ScoreOp> {
     let Some(Payload::EmergencyCriteria(ec)) = &request.payload else {
         return Vec::new();
     };
     let Some(evidence) = &ec.evidence else {
         return Vec::new();
     };
-    if !approved {
-        return vec![creator_penalty(evidence)];
+    match verdict {
+        Verdict::Failed => Vec::new(),
+        Verdict::Rejected => vec![creator_penalty(evidence)],
+        Verdict::Approved => {
+            let mut ops = vec![creator_reward(evidence)];
+            if let Some(target_op) = evidence.target_score_op() {
+                ops.push(target_op);
+            }
+            ops
+        }
     }
-    let mut ops = vec![creator_reward(evidence)];
-    if let Some(target_op) = evidence.target_score_op() {
-        ops.push(target_op);
-    }
-    ops
 }
 
 fn creator_reward(ev: &ViolationEvidence) -> ScoreOp {
@@ -136,7 +141,7 @@ mod tests {
     // ── emergency_score_ops ────────────────────────────────────────
 
     /// Not every resolved proposal is an accusation. A membership change
-    /// carries no evidence and must score nobody.
+    /// carries no evidence and must score nobody, whatever the verdict.
     #[test]
     fn non_emergency_request_scores_nobody() {
         use crate::protos::de_mls::messages::v1::RemoveMember;
@@ -145,8 +150,9 @@ mod tests {
                 member_id: vec![0xAA],
             })),
         };
-        assert!(emergency_score_ops(&req, true).is_empty());
-        assert!(emergency_score_ops(&req, false).is_empty());
+        for verdict in [Verdict::Approved, Verdict::Rejected, Verdict::Failed] {
+            assert!(emergency_score_ops(&req, verdict).is_empty());
+        }
     }
 
     /// An ECP with no evidence names no creator to reward or penalize, so it
@@ -158,15 +164,16 @@ mod tests {
                 evidence: None,
             })),
         };
-        assert!(emergency_score_ops(&req, true).is_empty());
-        assert!(emergency_score_ops(&req, false).is_empty());
+        for verdict in [Verdict::Approved, Verdict::Rejected, Verdict::Failed] {
+            assert!(emergency_score_ops(&req, verdict).is_empty());
+        }
     }
 
     /// Approved + target-mappable violation → creator reward + target penalty.
     #[test]
     fn approved_broken_commit_emits_reward_and_target_penalty() {
         let req = ecp_request(ViolationType::BrokenCommit as i32, vec![0xAA], vec![0xBB]);
-        let ops = emergency_score_ops(&req, true);
+        let ops = emergency_score_ops(&req, Verdict::Approved);
         assert_eq!(ops.len(), 2);
         assert_eq!(ops[0].event, ScoreEvent::EmergencyYesCreator);
         assert_eq!(ops[0].member_id, vec![0xBB]);
@@ -178,7 +185,7 @@ mod tests {
     #[test]
     fn approved_deadlock_emits_reward_only() {
         let req = ecp_request(ViolationType::Deadlock as i32, Vec::new(), vec![0xBB]);
-        let ops = emergency_score_ops(&req, true);
+        let ops = emergency_score_ops(&req, Verdict::Approved);
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].event, ScoreEvent::EmergencyYesCreator);
     }
@@ -188,7 +195,7 @@ mod tests {
     #[test]
     fn approved_unspecified_emits_reward_only() {
         let req = ecp_request(0, vec![0xAA], vec![0xBB]);
-        let ops = emergency_score_ops(&req, true);
+        let ops = emergency_score_ops(&req, Verdict::Approved);
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].event, ScoreEvent::EmergencyYesCreator);
     }
@@ -202,10 +209,24 @@ mod tests {
             ViolationType::ScoreBelowThreshold,
         ] {
             let req = ecp_request(vt as i32, vec![0xAA], vec![0xBB]);
-            let ops = emergency_score_ops(&req, false);
+            let ops = emergency_score_ops(&req, Verdict::Rejected);
             assert_eq!(ops.len(), 1);
             assert_eq!(ops[0].event, ScoreEvent::EmergencyNoCreator);
             assert_eq!(ops[0].member_id, vec![0xBB]);
+        }
+    }
+
+    /// Failed (no decision at the timeout) → nobody is scored, whatever the
+    /// violation type. A tie blames neither the creator nor the target.
+    #[test]
+    fn failed_emergency_scores_nobody() {
+        for vt in [
+            ViolationType::BrokenCommit,
+            ViolationType::Deadlock,
+            ViolationType::ScoreBelowThreshold,
+        ] {
+            let req = ecp_request(vt as i32, vec![0xAA], vec![0xBB]);
+            assert!(emergency_score_ops(&req, Verdict::Failed).is_empty());
         }
     }
 }

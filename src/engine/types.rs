@@ -204,6 +204,20 @@ impl fmt::Display for Phase {
     }
 }
 
+/// How a consensus session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// The group said YES. Membership work is queued for the next
+    /// commit; an election or a deadlock skip takes effect at once.
+    Approved,
+    /// The group said NO. A decision: the same request is not filed
+    /// again this epoch.
+    Rejected,
+    /// The timeout passed with neither side at threshold, silent peers
+    /// counted. Not a decision: filing again is the router's call.
+    Failed,
+}
+
 /// Something the engine observed or did. Informational: dropping one loses
 /// nothing the engine needs, and each request-like variant names its
 /// fallback.
@@ -220,11 +234,11 @@ pub enum Event {
         proposal_id: u32,
         request: ConversationUpdateRequest,
     },
-    /// A consensus session finished. A vote, not a landing: watch
-    /// [`Self::MembersChanged`] for what the commit applied.
+    /// A consensus session ended; `verdict` says how. A vote, not a
+    /// landing: watch [`Self::MembersChanged`] for what the commit applied.
     ConsensusReached {
         proposal_id: u32,
-        approved: bool,
+        verdict: Verdict,
         timestamp: u64,
     },
     /// `received` of the `expected` stewards have sent a candidate this

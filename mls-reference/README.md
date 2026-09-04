@@ -95,6 +95,12 @@ MUST.
     announcement and no re-propose memory; any member may propose, and the
     engine dedups a proposal whose target a peer's proposal or an approval
     already covers.
+7c. `Event::ConsensusReached` carries a verdict. `Rejected` is the
+    group's decision: the router does not file the same request again
+    this epoch. `Failed` is no decision (the timeout passed with neither
+    side at threshold): filing again is the router's call, and the
+    engine treats the new filing like a first one. `Approved` work lands
+    in a later commit; `MembersChanged` reports what landed.
 
 **Commits**
 

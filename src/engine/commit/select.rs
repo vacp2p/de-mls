@@ -1,8 +1,8 @@
 //! Round selection: the eligibility-filtered epoch steward lookup and the
 //! close that ends one round.
 //!
-//! Only the epoch steward's candidate ever reaches [`Engine::round_candidate`]
-//! (design 12): [`Engine::handle_candidate`] discards and scores anyone
+//! Only the epoch steward's candidate ever reaches [`Engine::round_candidate`]:
+//! [`Engine::handle_candidate`] discards and scores anyone
 //! else's on sight. `close_round` validates that one candidate against the
 //! voted set, or reports the miss when none arrived.
 

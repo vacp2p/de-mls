@@ -5,7 +5,7 @@
 use tracing::info;
 
 use crate::{
-    engine::queues::EngineQueues,
+    engine::{queues::EngineQueues, types::Verdict},
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, ViolationEvidence, ViolationType,
         conversation_update_request,
@@ -22,8 +22,9 @@ pub(crate) enum ApplyOutcome {
     NoAction,
     /// The election passed. Validate the proposed list and install it.
     ElectionAccepted(StewardElectionProposal),
-    /// The election failed. Nothing automatic follows.
-    ElectionRejected,
+    /// The election did not pass — NO, or no decision at the timeout.
+    /// Nothing automatic follows.
+    ElectionDropped,
     /// A `Deadlock` proposal passed: skip the current epoch steward for this
     /// epoch so the next eligible steward on the list becomes ES.
     DeadlockAccepted,
@@ -42,7 +43,8 @@ pub(crate) enum ApplyOutcome {
 /// membership changes move to the approved queue for the next commit; an
 /// accepted below-threshold emergency becomes a `RemoveMember` with an urgent
 /// commit; an accepted Deadlock skips the current epoch steward; an accepted
-/// election is handed back to install; rejected proposals are dropped.
+/// election is handed back to install; a rejected or failed proposal is
+/// dropped; an emergency's partial freeze lifts whatever the verdict.
 ///
 /// One rule that isn't obvious from the branches: **removal dedup** — the same
 /// member can be removed by several paths (self-leave, ban, below-threshold)
@@ -52,7 +54,7 @@ pub(crate) enum ApplyOutcome {
 pub(crate) fn apply_outcome(
     queues: &mut EngineQueues,
     proposal_id: u32,
-    approved: bool,
+    verdict: Verdict,
     request: &ConversationUpdateRequest,
 ) -> ApplyOutcome {
     // The outcome resolved this proposal, so it leaves the in-flight queue.
@@ -60,13 +62,21 @@ pub(crate) fn apply_outcome(
     queues.remove_voting_proposal(proposal_id);
 
     if let Some(election) = extract_election_proposal(request).cloned() {
-        return apply_election_result(approved, election);
+        return apply_election_result(verdict, election);
     }
 
     // ── Emergency and regular proposals ──
 
     let evidence = extract_emergency_evidence(request).cloned();
     let is_emergency = evidence.is_some();
+
+    // The partial freeze lifts with the session, whatever the verdict.
+    if is_emergency {
+        queues.remove_emergency(proposal_id);
+    }
+
+    // Queue effects follow from approval alone.
+    let approved = verdict == Verdict::Approved;
 
     // Should the approved ECP transform into a RemoveMember?
     let transforms_to_removal =
@@ -125,7 +135,8 @@ pub(crate) fn apply_outcome(
             info!(
                 proposal_id,
                 creator = ?ev.creator_member_id,
-                "emergency criteria proposal rejected"
+                verdict = ?verdict,
+                "emergency criteria proposal dropped"
             );
         }
     }
@@ -157,9 +168,10 @@ pub(crate) fn apply_outcome(
 }
 
 /// The election branch of [`apply_outcome`]. YES hands the proposed steward
-/// list back for validation and install; NO just reports the rejection.
-fn apply_election_result(approved: bool, election: StewardElectionProposal) -> ApplyOutcome {
-    if approved {
+/// list back for validation and install; NO or a failed session just reports
+/// the drop.
+fn apply_election_result(verdict: Verdict, election: StewardElectionProposal) -> ApplyOutcome {
+    if verdict == Verdict::Approved {
         info!(
             epoch = election.election_epoch,
             stewards = election.proposed_stewards.len(),
@@ -167,8 +179,8 @@ fn apply_election_result(approved: bool, election: StewardElectionProposal) -> A
         );
         ApplyOutcome::ElectionAccepted(election)
     } else {
-        info!("steward election proposal rejected");
-        ApplyOutcome::ElectionRejected
+        info!(?verdict, "steward election proposal dropped");
+        ApplyOutcome::ElectionDropped
     }
 }
 
