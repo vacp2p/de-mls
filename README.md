@@ -59,7 +59,7 @@ de-mls turns observed protocol events into score deltas and keeps the
 per-member table. What a score *means* is the application's policy: a member
 whose score moves surfaces as a `MemberScoreChanged { member, previous,
 score }` event and keeps every protocol right it had. Compare either end
-against the removal threshold, or watch the trend. Act on it by calling
+against your own removal threshold, or watch the trend. Act on it by calling
 `propose_remove`, or `propose_score_removal` to raise the emergency the group
 votes on — any member may raise one, and on YES it commits immediately
 instead of waiting out the inactivity timer.

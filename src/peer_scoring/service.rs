@@ -133,16 +133,6 @@ impl PeerScoringService {
         self.scores.iter().map(|(k, v)| (k.clone(), *v)).collect()
     }
 
-    /// The current score threshold for removing members. Used by the coordinator and shown to joiners.
-    pub(crate) fn threshold(&self) -> i64 {
-        self.config.threshold
-    }
-
-    /// Sets a new score removal threshold (from ConversationSync).
-    pub(crate) fn set_threshold(&mut self, threshold: i64) {
-        self.config.threshold = threshold;
-    }
-
     /// Starting score for a newly tracked member.
     pub(crate) fn default_score(&self) -> i64 {
         self.config.default_score
@@ -192,13 +182,7 @@ mod tests {
             (ScoreEvent::SuccessfulCommit, 10),
             (ScoreEvent::MisbehavingCommit, -30),
         ]);
-        PeerScoringService::new(
-            deltas,
-            ScoringConfig {
-                default_score: 100,
-                threshold: 0,
-            },
-        )
+        PeerScoringService::new(deltas, ScoringConfig { default_score: 100 })
     }
 
     fn op(member: &[u8], event: ScoreEvent) -> ScoreOp {
@@ -330,7 +314,6 @@ mod tests {
         let mut svc = make_service();
         svc.add_member(b"alice");
         assert_eq!(svc.score_for(b"alice"), Some(100));
-        assert!(svc.score_for(b"alice").unwrap() > svc.threshold());
     }
 
     #[test]
@@ -461,10 +444,7 @@ mod tests {
         // Sender runs a default of 80.
         let mut sender = PeerScoringService::new(
             crate::default_score_deltas(),
-            ScoringConfig {
-                default_score: 80,
-                threshold: 0,
-            },
+            ScoringConfig { default_score: 80 },
         );
         sender.add_member(b"alice");
         sender.add_member(b"bob");
@@ -493,13 +473,8 @@ mod tests {
 
     #[test]
     fn validate_config_rejects_a_non_positive_default() {
-        let svc = PeerScoringService::new(
-            default_score_deltas(),
-            ScoringConfig {
-                default_score: 0,
-                threshold: 0,
-            },
-        );
+        let svc =
+            PeerScoringService::new(default_score_deltas(), ScoringConfig { default_score: 0 });
         assert!(svc.validate_config().is_err());
     }
 
@@ -567,7 +542,6 @@ mod tests {
             HashMap::from([(ScoreEvent::SuccessfulCommit, i64::MAX)]),
             ScoringConfig {
                 default_score: i64::MAX,
-                threshold: 0,
             },
         );
         svc.add_member(b"alice");

@@ -7,8 +7,8 @@ use crate::error::ConversationError;
 use crate::peer_scoring::ScoringConfig;
 use crate::protos::de_mls::messages::v1::TimingConfig;
 
-/// Window that batches approved proposals from the first one; at its end every
-/// steward mints a commit candidate (RFC §Inactivity Timer #1).
+/// Inactivity window: approved work waits this long from its first entry
+/// before the epoch steward builds the commit (RFC §Inactivity Timer #1).
 pub const DEFAULT_COMMIT_BATCH_WINDOW: Duration = Duration::from_secs(60);
 
 /// Lifetime of a voting proposal before it expires unvoted
@@ -19,8 +19,8 @@ pub const DEFAULT_PROPOSAL_EXPIRATION: Duration = Duration::from_secs(600);
 /// vote can stay open. MUST be `> voting_delay`.
 pub const DEFAULT_CONSENSUS_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long a backup steward waits for a silent epoch steward before covering
-/// its sync-resend (RFC §Inactivity Timer #3).
+/// How long a backup steward waits for a silent epoch steward to answer a
+/// sync request before answering it (RFC §Inactivity Timer #3).
 pub const DEFAULT_BACKUP_TAKEOVER_WINDOW: Duration = Duration::from_secs(20);
 
 /// Per-member window to cast a manual vote before the app auto-votes
@@ -31,12 +31,8 @@ pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 
 /// Max consensus sessions kept per conversation before the library evicts the
 /// oldest. Resolved sessions are freed on outcome, so this bounds concurrent
-/// in-flight proposals; kept below the resolved-proposal cache capacity.
+/// in-flight proposals.
 pub const DEFAULT_MAX_CONSENSUS_SESSIONS: usize = 128;
-
-/// Cap on MLS proposals the steward packs into one commit batch — bounds
-/// runaway growth when a busy epoch accumulates approved work.
-pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
 
 /// Default unanswered sync-request rounds before the conversation reports it:
 /// three tries across the answer latency. `0` never reports. See
@@ -44,13 +40,13 @@ pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
 pub const DEFAULT_UNANSWERED_SYNC_ROUNDS: u32 = 3;
 
 /// Per-conversation timing and policy config, fixed at conversation creation.
-/// Peer scoring keeps its own config on the [`PeerScoringService`](crate::PeerScoringService)
-/// the integrator builds; the steward-list bounds live here (the list is
-/// library-owned) as the nested [`steward_list`](Self::steward_list).
+/// The group-wide fields travel in `ConversationSync`, so a joiner runs the
+/// creator's values; `voting_delay`, `max_consensus_sessions` and
+/// `unanswered_sync_rounds` are this node's own.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// How long approved proposals are batched before every steward mints a
-    /// commit candidate (RFC §Inactivity Timer #1).
+    /// How long approved work is batched before the epoch steward builds the
+    /// commit (RFC §Inactivity Timer #1).
     pub commit_batch_window: Duration,
     /// How long the freeze collects commit candidates before one is
     /// deterministically selected (RFC §Freezing).
@@ -75,9 +71,6 @@ pub struct EngineConfig {
     /// Max consensus sessions retained per conversation before the oldest is
     /// evicted. See [`DEFAULT_MAX_CONSENSUS_SESSIONS`].
     pub max_consensus_sessions: usize,
-    /// Max MLS proposals the steward packs into one commit batch. See
-    /// [`DEFAULT_COMMIT_BATCH_MAX`].
-    pub commit_batch_max: usize,
     /// How many sync requests may go unanswered before the conversation emits
     /// [`crate::engine::Event::SyncUnanswered`]. Rounds are one
     /// `backup_takeover_window` apart. `0` never emits it; requesting continues
@@ -86,7 +79,7 @@ pub struct EngineConfig {
     /// Steward-list size bounds (`sn_min` / `sn_max`). The list itself is
     /// library-owned; this is the only steward knob the integrator sets.
     pub steward_list: StewardListConfig,
-    /// Peer-scoring policy: the starting score and the removal threshold.
+    /// Peer-scoring policy: the starting score.
     pub scoring: ScoringConfig,
 }
 
@@ -101,7 +94,6 @@ impl Default for EngineConfig {
             voting_delay: DEFAULT_VOTING_DELAY,
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
             max_consensus_sessions: DEFAULT_MAX_CONSENSUS_SESSIONS,
-            commit_batch_max: DEFAULT_COMMIT_BATCH_MAX,
             unanswered_sync_rounds: DEFAULT_UNANSWERED_SYNC_ROUNDS,
             steward_list: StewardListConfig::default(),
             scoring: ScoringConfig::default(),

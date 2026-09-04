@@ -61,8 +61,7 @@ impl StewardListService {
         }
     }
 
-    /// The size bounds this conversation runs under (`sn_min`/`sn_max` and
-    /// `allow_subset_candidates`).
+    /// The size bounds this conversation runs under (`sn_min`/`sn_max`).
     pub fn config(&self) -> &StewardListConfig {
         &self.config
     }

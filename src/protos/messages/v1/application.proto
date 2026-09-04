@@ -74,24 +74,21 @@ message ConversationSync {
   uint64 election_epoch = 2;
   uint32 sn_min = 3;
   uint32 sn_max = 4;
-  bool allow_subset_candidates = 5;
-  repeated PeerScore peer_scores = 6;
-  TimingConfig timing = 7;
+  repeated PeerScore peer_scores = 5;
+  TimingConfig timing = 6;
   // Seed for the deterministic steward-list sort; joiners reproduce the
   // ordering when validating.
-  uint32 retry_round = 8;
+  uint32 retry_round = 7;
   // Auto-vote default and consensus tie-break rule
   // (RFC §Creating Voting Proposal).
-  bool liveness_criteria_yes = 10;
-  // At or below this score, a member can count as malicious
-  int64 threshold_peer_score = 11;
+  bool liveness_criteria_yes = 8;
   // Candidate-basis delta: the members excluded from the steward computation at
   // `election_epoch` (not yet settled then). A joiner reconstructs the pool as
   // `MLS members \ unsettled_members` and re-derives the deterministic list to
   // verify `steward_members` instead of trusting it.
-  repeated bytes unsettled_members = 12;
+  repeated bytes unsettled_members = 9;
   // Score a new member starts at (RFC §Peer Scoring `default_peer_score`).
-  int64 default_peer_score = 13;
+  int64 default_peer_score = 10;
 }
 
 // A member that joined without a bootstrap asks a steward to re-send the
@@ -109,5 +106,5 @@ message TimingConfig {
   uint64 freeze_duration_ms = 2;
   uint64 proposal_expiration_ms = 3;
   uint64 consensus_timeout_ms = 4;
-  uint64 backup_takeover_window_ms = 6;   // RFC §Inactivity Timer #3 (backup covers a silent steward)
+  uint64 backup_takeover_window_ms = 5; // RFC §Inactivity Timer #3 (backup answers a sync request)
 }

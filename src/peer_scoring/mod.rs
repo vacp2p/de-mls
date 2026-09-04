@@ -15,8 +15,5 @@ mod types;
 
 pub(crate) use helpers::{emergency_score_ops, scoring_member_diff};
 pub use service::PeerScoringService;
-pub use types::{
-    DEFAULT_PEER_SCORE, DEFAULT_THRESHOLD_PEER_SCORE, ScoreEvent, ScoringConfig,
-    default_score_deltas,
-};
+pub use types::{DEFAULT_PEER_SCORE, ScoreEvent, ScoringConfig, default_score_deltas};
 pub(crate) use types::{ScoreChange, ScoreOp, ScoreSnapshot, ScoringMemberDiff};

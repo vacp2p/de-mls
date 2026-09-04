@@ -14,18 +14,16 @@ fn nonzero_timing() -> TimingConfig {
     }
 }
 
-fn valid_sync_with(threshold: i64) -> ConversationSync {
+fn valid_sync() -> ConversationSync {
     ConversationSync {
         steward_members: vec![b"alice".to_vec()],
         election_epoch: 0,
         sn_min: 1,
         sn_max: 5,
-        allow_subset_candidates: false,
         peer_scores: vec![],
         timing: Some(nonzero_timing()),
         retry_round: 0,
         liveness_criteria_yes: true,
-        threshold_peer_score: threshold,
         unsettled_members: vec![],
         default_peer_score: 100,
     }
@@ -36,27 +34,12 @@ fn nonzero_timing_passes() {
     assert!(first_zero_timing_field(&nonzero_timing()).is_none());
 }
 
-/// The synced pair goes through the same `ScoringConfig::validate` a local
-/// config passes at construction: a positive starting score, above the
-/// removal threshold.
+/// The synced default goes through the same `ScoringConfig::validate` a
+/// local config passes at construction: a positive starting score.
 #[test]
-fn validate_accepts_a_sound_peer_score_pair() {
-    let sync = valid_sync_with(0);
+fn validate_accepts_a_positive_default_score() {
+    let sync = valid_sync();
     assert!(validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()]).unwrap());
-}
-
-/// A starting score at or below the threshold would admit members already
-/// countable as malicious.
-#[test]
-fn validate_rejects_a_default_not_above_the_threshold() {
-    let mut sync = valid_sync_with(0);
-    for threshold in [100, 500] {
-        sync.threshold_peer_score = threshold;
-        assert!(
-            !validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()]).unwrap(),
-            "default 100 against threshold {threshold} must be rejected"
-        );
-    }
 }
 
 /// An unset `default_peer_score` — proto3 gives zero, with no way to tell
@@ -64,7 +47,7 @@ fn validate_rejects_a_default_not_above_the_threshold() {
 /// predates the field stays joinable.
 #[test]
 fn validate_reads_an_absent_default_as_the_program_default() {
-    let mut sync = valid_sync_with(0);
+    let mut sync = valid_sync();
     sync.default_peer_score = 0;
     assert!(validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()]).unwrap());
     assert_eq!(synced_default_peer_score(&sync), DEFAULT_PEER_SCORE);
@@ -74,7 +57,7 @@ fn validate_reads_an_absent_default_as_the_program_default() {
 /// from.
 #[test]
 fn validate_rejects_a_negative_default() {
-    let mut sync = valid_sync_with(0);
+    let mut sync = valid_sync();
     for default in [-1, i64::MIN] {
         sync.default_peer_score = default;
         assert!(
@@ -89,7 +72,7 @@ fn validate_rejects_a_negative_default() {
 #[test]
 fn validate_verifies_list_against_reconstructed_pool() {
     let members = vec![b"alice".to_vec(), b"bob".to_vec()];
-    let mut sync = valid_sync_with(0);
+    let mut sync = valid_sync();
     sync.sn_max = 1;
     // bob is unsettled → excluded → pool = [alice].
     sync.unsettled_members = vec![b"bob".to_vec()];
@@ -109,7 +92,7 @@ fn validate_verifies_list_against_reconstructed_pool() {
 #[test]
 fn validate_rejects_unsettled_not_in_members() {
     let members = vec![b"alice".to_vec(), b"bob".to_vec()];
-    let mut sync = valid_sync_with(0);
+    let mut sync = valid_sync();
     sync.sn_max = 1;
     sync.steward_members = vec![b"alice".to_vec()];
     sync.unsettled_members = vec![b"ghost".to_vec()];
@@ -147,6 +130,13 @@ fn each_zero_field_is_detected() {
                 ..nonzero_timing()
             },
         ),
+        (
+            "backup_takeover_window_ms",
+            TimingConfig {
+                backup_takeover_window_ms: 0,
+                ..nonzero_timing()
+            },
+        ),
     ];
     for (name, timing) in cases {
         assert_eq!(
@@ -157,8 +147,10 @@ fn each_zero_field_is_detected() {
     }
 }
 
+use std::time::Duration;
+
 use crate::{
-    Event,
+    Engine, EngineConfig, Event, InMemoryStore,
     engine::{
         test_support::{creator, founder, id, joiner, member},
         types::{Outbound, Timestamp},
@@ -255,6 +247,53 @@ fn conversation_sync_round_trips_into_a_joiner() {
         .expect("handle control");
     assert!(engine.is_synced());
     assert!(out.events.contains(&Event::SyncApplied));
+}
+
+/// Adopting a sync whose `consensus_timeout` sits below this node's own
+/// `voting_delay` clamps `voting_delay` to half the new timeout, so the
+/// auto-vote still fires before the session closes.
+#[test]
+fn adopting_a_sync_clamps_voting_delay_below_its_timeout() {
+    let founder_config = EngineConfig {
+        consensus_timeout: Duration::from_secs(5),
+        voting_delay: Duration::from_secs(1),
+        ..EngineConfig::default()
+    };
+    let mut steward = Engine::create(
+        "conv",
+        id("alice"),
+        1,
+        &[id("alice"), id("bob")],
+        founder_config,
+        InMemoryStore::default(),
+    )
+    .expect("create")
+    .0;
+    steward.begin(Timestamp::ZERO);
+    let bytes = steward
+        .build_bootstrap()
+        .expect("build sync")
+        .expect("a list is installed");
+
+    let joiner_config = EngineConfig {
+        voting_delay: Duration::from_secs(10),
+        ..EngineConfig::default()
+    };
+    let mut engine = Engine::join(
+        "conv",
+        id("bob"),
+        1,
+        &[id("alice"), id("bob")],
+        joiner_config,
+        InMemoryStore::default(),
+    )
+    .expect("join")
+    .0;
+    engine
+        .handle_control(Timestamp::ZERO, id("alice"), 1, &bytes)
+        .expect("handle control");
+
+    assert_eq!(engine.config.voting_delay, Duration::from_millis(2_500));
 }
 
 /// The honest list recomputes from the local members; one drawn off them

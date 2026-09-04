@@ -23,9 +23,6 @@ pub struct StewardListConfig {
     /// Largest list size. Past this, the list is a genuine subset and members
     /// must vote on who serves.
     pub sn_max: usize,
-    /// Whether an election may draw candidates from a subset of members rather
-    /// than the full member set. Read by the coordinator; not used in generation.
-    pub allow_subset_candidates: bool,
 }
 
 impl Default for StewardListConfig {
@@ -33,7 +30,6 @@ impl Default for StewardListConfig {
         Self {
             sn_min: 1,
             sn_max: 2,
-            allow_subset_candidates: false,
         }
     }
 }
@@ -44,11 +40,7 @@ impl StewardListConfig {
         if sn_min < 1 || sn_min > sn_max {
             return Err(ConversationError::InvalidConfigSize);
         }
-        Ok(Self {
-            sn_min,
-            sn_max,
-            allow_subset_candidates: false,
-        })
+        Ok(Self { sn_min, sn_max })
     }
 
     /// List size to elect for `total_members` — the largest legal size.
