@@ -8,10 +8,10 @@
 use crate::{
     ConversationError,
     engine::{
+        consensus::CreatorVote,
         handle::Engine,
         store::EngineStore,
         types::{MemberId, Output, Phase, Timestamp},
-        voting::CreatorVote,
     },
     protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberInvite},
 };

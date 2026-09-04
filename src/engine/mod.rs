@@ -8,12 +8,10 @@
 mod actions;
 mod commit;
 mod config;
-mod consensus_signer;
+mod consensus;
 mod construct;
 mod handle;
 mod inbound;
-mod outcome;
-mod outcome_bus;
 mod phase_timer;
 mod proposal_kind;
 mod queues;
@@ -25,7 +23,6 @@ mod tick;
 mod timestamp;
 mod types;
 mod util;
-mod voting;
 
 pub use config::{
     DEFAULT_BACKUP_TAKEOVER_WINDOW, DEFAULT_COMMIT_BATCH_MAX, DEFAULT_COMMIT_BATCH_WINDOW,

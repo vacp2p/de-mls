@@ -7,11 +7,11 @@ use tracing::info;
 use crate::{
     ConversationError,
     engine::{
+        consensus::CreatorVote,
         handle::Engine,
         store::EngineStore,
         types::Phase,
         util::{member_set, target_member_id_of},
-        voting::CreatorVote,
     },
     protos::de_mls::messages::v1::{ConversationUpdateRequest, conversation_update_request},
 };

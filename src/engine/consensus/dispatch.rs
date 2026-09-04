@@ -4,7 +4,7 @@
 //! urgent removal, or applies emergency scores. The pure half — given the
 //! decision and the request it carried, reshaping `EngineQueues` and naming
 //! the follow-up this file still owes — lives in
-//! [`crate::engine::outcome::apply`].
+//! [`crate::engine::consensus::apply`].
 
 use hashgraph_like_consensus::{storage::ConsensusStorage, types::ConsensusEvent};
 use prost::Message;
@@ -13,8 +13,8 @@ use tracing::{debug, info, warn};
 use crate::{
     ConversationError, ScoreOp,
     engine::{
+        consensus::apply::{ApplyOutcome, apply_outcome},
         handle::Engine,
-        outcome::apply::{ApplyOutcome, apply_outcome},
         store::EngineStore,
         types::{Event, MemberId},
     },

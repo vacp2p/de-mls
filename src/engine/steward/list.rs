@@ -9,7 +9,7 @@ use tracing::info;
 
 use crate::{
     ConversationError, ElectionDecision, ElectionSkip,
-    engine::{handle::Engine, store::EngineStore, voting::CreatorVote},
+    engine::{consensus::CreatorVote, handle::Engine, store::EngineStore},
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, ViolationEvidence,
     },
