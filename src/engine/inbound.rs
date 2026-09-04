@@ -160,10 +160,7 @@ impl<St: EngineStore> Engine<St> {
 mod tests {
     use super::*;
     use crate::{
-        engine::{
-            steward::{control_bytes, test_support::*},
-            types::Event,
-        },
+        engine::{steward::control_bytes, test_support::*, types::Event},
         protos::de_mls::messages::v1::{
             ConversationSync, EventMembershipChange, MemberInvite, TimingConfig,
         },
