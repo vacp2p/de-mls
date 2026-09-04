@@ -94,35 +94,22 @@ pub fn default_score_deltas() -> HashMap<ScoreEvent, i64> {
 /// RFC §Peer Scoring `default_peer_score`: starting score for a new member.
 pub const DEFAULT_PEER_SCORE: i64 = 100;
 
-/// RFC §Peer Scoring `threshold_peer_score`: default removal threshold.
-pub const DEFAULT_THRESHOLD_PEER_SCORE: i64 = 0;
-
 #[derive(Debug, Clone)]
 pub struct ScoringConfig {
     /// The score every new member starts with. This is shared across the group—
     /// joiners use the group's value from [`ConversationSync`](crate::protos::de_mls::messages::v1::ConversationSync).
     pub default_score: i64,
-    /// Members at or below this score can be count as malicious.
-    /// The application may specify concrete action when they got event.
-    pub threshold: i64,
 }
 
 impl ScoringConfig {
-    /// Checks that the starting score setup makes sense:
-    /// - default_score must be above zero
-    /// - default_score must be bigger than threshold
-    ///   Use this for local configs or when joining from a ConversationSync.
+    /// Checks that the starting score is positive. Use this for local
+    /// configs or when joining from a ConversationSync.
     pub fn validate(&self) -> Result<(), ConversationError> {
         if self.default_score <= 0 {
             return Err(ConversationError::InvalidConfig(format!(
                 "default_peer_score must be positive, got {}",
                 self.default_score
             )));
-        }
-        if self.default_score <= self.threshold {
-            return Err(ConversationError::InvalidConfig(
-                "default_peer_score must be greater than threshold".to_string(),
-            ));
         }
         Ok(())
     }
@@ -133,7 +120,6 @@ impl Default for ScoringConfig {
     fn default() -> Self {
         Self {
             default_score: DEFAULT_PEER_SCORE,
-            threshold: DEFAULT_THRESHOLD_PEER_SCORE,
         }
     }
 }
@@ -172,19 +158,14 @@ pub struct ScoringMemberDiff {
 mod tests {
     use super::*;
 
-    /// A starting score is a positive quantity, whatever it is measured
-    /// against — the same rule an incoming `ConversationSync` is held to.
+    /// A starting score is a positive quantity — the same rule an incoming
+    /// `ConversationSync` is held to.
     #[test]
     fn validate_accepts_any_positive_default() {
-        for (default_score, threshold) in [(100, 0), (1, 0), (i64::MAX, -50)] {
+        for default_score in [100, 1, i64::MAX] {
             assert!(
-                ScoringConfig {
-                    default_score,
-                    threshold,
-                }
-                .validate()
-                .is_ok(),
-                "default {default_score} against threshold {threshold} is the group's call"
+                ScoringConfig { default_score }.validate().is_ok(),
+                "default {default_score} is a valid starting score"
             );
         }
     }
@@ -195,30 +176,8 @@ mod tests {
     fn validate_rejects_a_non_positive_default() {
         for default_score in [0, -1, i64::MIN] {
             assert!(
-                ScoringConfig {
-                    default_score,
-                    threshold: 0,
-                }
-                .validate()
-                .is_err(),
+                ScoringConfig { default_score }.validate().is_err(),
                 "default {default_score} must be rejected"
-            );
-        }
-    }
-
-    /// Rejects config where default_score is not greater than threshold.
-    #[test]
-    fn validate_rejects_default_not_greater_than_threshold() {
-        let cases = [(1, 1), (5, 10), (0, 0)];
-        for (default_score, threshold) in cases {
-            assert!(
-                ScoringConfig {
-                    default_score,
-                    threshold,
-                }
-                .validate()
-                .is_err(),
-                "default {default_score} <= threshold {threshold} must be rejected"
             );
         }
     }

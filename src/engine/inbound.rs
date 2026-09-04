@@ -99,12 +99,10 @@ mod tests {
             election_epoch: 1,
             sn_min: 1,
             sn_max: 5,
-            allow_subset_candidates: false,
             peer_scores: vec![],
             timing: Some(TimingConfig::from(engine.config())),
             retry_round: 0,
             liveness_criteria_yes: true,
-            threshold_peer_score: 0,
             unsettled_members: vec![],
             default_peer_score: 100,
         };

@@ -2,7 +2,7 @@
 //! less joiner or a degraded member adopts, its validation ladder, and the
 //! `ConversationSyncRequest` re-send.
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     ConversationError, DEFAULT_PEER_SCORE, ScoreSnapshot, ScoringConfig, StewardList,
@@ -57,13 +57,11 @@ impl<St: EngineStore> Engine<St> {
             election_epoch,
             sn_min,
             sn_max,
-            allow_subset_candidates: self.steward_list.config().allow_subset_candidates,
             peer_scores,
             default_peer_score: self.scoring.default_score(),
             timing: Some(TimingConfig::from(&self.config)),
             retry_round,
             liveness_criteria_yes: self.config.liveness_criteria_yes,
-            threshold_peer_score: self.scoring.threshold(),
             unsettled_members,
         };
         Ok(Some(control_bytes(
@@ -161,8 +159,7 @@ impl<St: EngineStore> Engine<St> {
         &mut self,
         sync: &ConversationSync,
     ) -> Result<(), ConversationError> {
-        let mut list_config = StewardListConfig::new(sync.sn_min as usize, sync.sn_max as usize)?;
-        list_config.allow_subset_candidates = sync.allow_subset_candidates;
+        let list_config = StewardListConfig::new(sync.sn_min as usize, sync.sn_max as usize)?;
 
         let sn = sync.steward_members.len();
         self.steward_list.set_config(list_config);
@@ -173,7 +170,6 @@ impl<St: EngineStore> Engine<St> {
             sync.retry_round,
         )?;
         // store: steward_list (WP3g)
-        self.scoring.set_threshold(sync.threshold_peer_score);
         // Before the snapshot: it rebases members off our assumed default onto
         // the group's, which is exactly the set the sparse `peer_scores` omits.
         self.scoring
@@ -192,6 +188,19 @@ impl<St: EngineStore> Engine<St> {
         self.config.liveness_criteria_yes = sync.liveness_criteria_yes;
         if let Some(timing) = &sync.timing {
             self.config.apply_timing(timing);
+        }
+        // `voting_delay` is this node's own; the adopted timeout may sit below
+        // it, and an auto-vote after the session closes counts as silence.
+        if self.config.voting_delay >= self.config.consensus_timeout {
+            let clamped = self.config.consensus_timeout / 2;
+            warn!(
+                conversation = %self.conversation_id,
+                voting_delay = ?self.config.voting_delay,
+                consensus_timeout = ?self.config.consensus_timeout,
+                clamped = ?clamped,
+                "voting_delay clamped below the adopted consensus_timeout"
+            );
+            self.config.voting_delay = clamped;
         }
         // store: meta (WP3g)
         Ok(())
@@ -212,12 +221,10 @@ pub(crate) fn control_bytes(payload: control_message::Payload) -> Vec<u8> {
 /// (removed since the list was elected) are tolerated as long as at least one
 /// listed steward is still present.
 ///
-/// The peer-score parameters are adopted, not judged: where the group puts its
-/// starting score, and where it puts the removal line, are the integrator's
-/// choices and the library acts on neither. They go through
-/// [`ScoringConfig::validate`] — the same rule a locally built config passes at
-/// construction — which asks only that the starting score be positive and above
-/// the threshold.
+/// The starting score is adopted, not judged: where the group puts it is the
+/// integrator's choice. It goes through [`ScoringConfig::validate`] — the
+/// same rule a locally built config passes at construction — which asks only
+/// that it be positive.
 pub(crate) fn validate_conversation_sync(
     conversation_id: &str,
     sync: &ConversationSync,
@@ -294,7 +301,6 @@ pub(crate) fn validate_conversation_sync(
     // default, so a sender that never set the field is still joinable.
     if let Err(e) = (ScoringConfig {
         default_score: synced_default_peer_score(sync),
-        threshold: sync.threshold_peer_score,
     })
     .validate()
     {
@@ -333,6 +339,8 @@ pub(crate) fn first_zero_timing_field(timing: &TimingConfig) -> Option<&'static 
         Some("proposal_expiration_ms")
     } else if timing.consensus_timeout_ms == 0 {
         Some("consensus_timeout_ms")
+    } else if timing.backup_takeover_window_ms == 0 {
+        Some("backup_takeover_window_ms")
     } else {
         None
     }

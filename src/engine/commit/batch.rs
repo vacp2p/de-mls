@@ -72,15 +72,14 @@ impl<St: EngineStore> Engine<St> {
         Ok(true)
     }
 
-    /// The approved queue projected to commit actions, in FIFO order and
-    /// capped at `commit_batch_max`. An urgent (emergency-driven) freeze
-    /// narrows the batch to the target's removal alone.
+    /// The approved queue projected to commit actions, in FIFO order. An
+    /// urgent (emergency-driven) freeze narrows the batch to the target's
+    /// removal alone.
     fn batch_actions(&self) -> Result<Vec<Action>, ConversationError> {
         let urgent = self.queues.urgent_commit_target();
-        let k_max = self.config.commit_batch_max;
         let approved = self.queues.approved_proposals();
-        let mut actions = Vec::with_capacity(approved.len().min(k_max));
-        for (_id, proposal) in approved.iter().take(k_max) {
+        let mut actions = Vec::with_capacity(approved.len());
+        for (_id, proposal) in approved.iter() {
             match proposal.payload.as_ref() {
                 Some(Payload::MemberInvite(invite)) => {
                     if urgent.is_some() || self.is_member(&invite.member_id) {
