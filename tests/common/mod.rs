@@ -6,7 +6,10 @@
 //! service itself from the provider + credential; tests supply those.
 #![allow(dead_code)]
 
+pub mod fake_mls;
+pub mod fake_router;
 pub mod harness;
+pub mod net;
 pub mod wallet;
 
 use de_mls::defaults::{DefaultPeerScoring, InMemoryPeerScoreStorage};
