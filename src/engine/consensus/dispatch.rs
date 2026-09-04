@@ -103,9 +103,6 @@ impl<St: EngineStore> Engine<St> {
             ApplyOutcome::QueuedRemoval { target } => {
                 self.refresh_stewards_after_removal(&target)?;
             }
-            ApplyOutcome::RejectedMembership { target } => {
-                self.queues.remove_pending_update(&target);
-            }
         }
 
         // Score changes are only triggered for emergency proposals.
@@ -170,8 +167,7 @@ impl<St: EngineStore> Engine<St> {
         Ok(())
     }
 
-    /// Validate and install an accepted steward list, then drain buffered
-    /// updates so the fresh epoch steward proposes them.
+    /// Validate and install an accepted steward list.
     fn handle_election_accepted(
         &mut self,
         election: StewardElectionProposal,
@@ -200,15 +196,12 @@ impl<St: EngineStore> Engine<St> {
         // store: steward list (WP3g)
 
         // Broadcast the elected list so a member that missed the vote learns
-        // it and authorizes the next steward's commit. Drain buffered updates
-        // regardless, then surface a share failure.
-        let shared = if self.is_epoch_steward() {
+        // it and authorizes the next steward's commit.
+        if self.is_epoch_steward() {
             self.share_conversation_sync()
         } else {
             Ok(())
-        };
-        self.process_buffered_updates()?;
-        shared
+        }
     }
 
     /// A finished emergency: apply its score ops and clear the partial

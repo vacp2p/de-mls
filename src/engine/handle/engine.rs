@@ -14,7 +14,7 @@ use hashgraph_like_consensus::{
     events::ConsensusEventBus, scope::ScopeID, service::ConsensusService,
     storage::InMemoryConsensusStorage,
 };
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::{
     ConversationError, ScoreChange, ScoreOp, ScoreSnapshot, StewardListService,
@@ -56,8 +56,6 @@ pub(crate) struct Timing {
     pub(crate) pending_consensus_timeouts: HashMap<u32, Timestamp>,
     /// Last `CommitRoundProgress` emitted; reset outside `Freezing`.
     pub(crate) last_commit_round_progress: Option<(usize, usize)>,
-    /// Backup-steward proposal takeover anchor.
-    pub(crate) buffered_propose_anchor: Option<Timestamp>,
     /// Backup-steward sync re-send anchor.
     pub(crate) sync_resend_anchor: Option<Timestamp>,
     /// Pull-side sync request anchor.
@@ -73,7 +71,6 @@ impl Timing {
             pending_auto_votes: HashMap::new(),
             pending_consensus_timeouts: HashMap::new(),
             last_commit_round_progress: None,
-            buffered_propose_anchor: None,
             sync_resend_anchor: None,
             sync_request_anchor: None,
             unanswered_sync_rounds: 0,
@@ -300,19 +297,6 @@ impl<St: EngineStore> Engine<St> {
             operation: operation.to_owned(),
             message: error.to_string(),
         });
-    }
-
-    /// A proposal the engine raised for itself can be turned away while the
-    /// group is mid-rotation; the buffer retries it. Anything else failed.
-    pub(crate) fn report_deferred_proposal(&mut self, operation: &str, error: ConversationError) {
-        if matches!(
-            error,
-            ConversationError::ConversationBlocked(_) | ConversationError::PartialFreeze
-        ) {
-            info!(conversation = %self.conversation_id, error = %error, "proposal deferred");
-            return;
-        }
-        self.report_failure(operation, &error);
     }
 
     // ── scoring ────────────────────────────────────────────────────────

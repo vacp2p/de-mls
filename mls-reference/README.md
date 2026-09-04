@@ -84,6 +84,17 @@ MUST.
     (full validation plus identity equals the claimed id) and reports
     `key_package_checked` before its vote proceeds; the engine never parses
     a key package.
+7b. A key-package announcement is the router's. It arrives outside the
+    group (a discovery topic, a contact exchange) and never reaches the
+    engine as bytes: the router validates the key package, reads the
+    joiner's id from it, decides whether it wants the member, and calls
+    `propose_add(now, member, key_package)`. A `ConversationBlocked`
+    refusal means a commit round is open; the router keeps the
+    announcement and proposes it again after it drains
+    `Event::PhaseChange(Phase::Working)`. The engine keeps no
+    announcement and no re-propose memory; any member may propose, and the
+    engine dedups a proposal whose target a peer's proposal or an approval
+    already covers.
 
 **Commits**
 
@@ -123,6 +134,7 @@ struct Router {
     mls: MlsService,                       // application-owned group
     engine: Engine<KvStore>,
     staged: HashMap<CommitHash, StagedCommit>,
+    announced: Vec<(MemberId, Vec<u8>)>,   // wanted joiners, not yet proposed
 }
 
 impl Router {
@@ -151,6 +163,33 @@ impl Router {
         self.drive(now, out);
     }
 
+    // Rule 7b. The announcement arrived outside the group; the router owns
+    // it until the engine has accepted the proposal.
+    fn on_announcement(&mut self, now: Timestamp, key_package: Vec<u8>) {
+        if self.mls.validate_key_package(&key_package).is_err() { return }
+        let Ok(member) = MlsService::key_package_identity(&key_package) else { return };
+        if !self.app.wants(&member) { return }
+        self.announced.push((member, key_package));
+        let out = self.propose_announced(now);
+        self.drive(now, out);
+    }
+
+    // Proposes every held announcement; one refused because a round is
+    // open stays held for the next `Working` phase, any other refusal
+    // (already a member, ..) drops it.
+    fn propose_announced(&mut self, now: Timestamp) -> Output {
+        let mut out = Output::default();
+        let held = std::mem::take(&mut self.announced);
+        for (member, kp) in held {
+            match self.engine.propose_add(now, member.clone(), kp.clone()) {
+                Ok(o) => out.merge(o),
+                Err(ConversationError::ConversationBlocked(_)) => self.announced.push((member, kp)),
+                Err(_) => {}
+            }
+        }
+        out
+    }
+
     fn drive(&mut self, now: Timestamp, mut out: Output) {
         loop {
             for o in out.outbound.drain(..) { self.send(o); }       // sealed at current epoch
@@ -158,7 +197,12 @@ impl Router {
             for d in out.decisions.drain(..) {
                 next.merge(self.execute(now, d));                    // report calls return Output
             }
-            for e in out.events.drain(..) { self.app.notify(e); }
+            for e in out.events.drain(..) {
+                if matches!(e, Event::PhaseChange(Phase::Working)) {
+                    next.merge(self.propose_announced(now));         // rule 7b retry
+                }
+                self.app.notify(e);
+            }
             if let Some(d) = out.wakeup { self.timer.arm(d); }
             if next.is_empty() { break }
             out = next;

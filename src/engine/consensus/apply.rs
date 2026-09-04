@@ -5,7 +5,7 @@
 use tracing::info;
 
 use crate::{
-    engine::{queues::EngineQueues, util::target_member_id_of},
+    engine::queues::EngineQueues,
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, ViolationEvidence, ViolationType,
         conversation_update_request,
@@ -24,9 +24,6 @@ pub(crate) enum ApplyOutcome {
     ElectionAccepted(StewardElectionProposal),
     /// The election failed. Nothing automatic follows.
     ElectionRejected,
-    /// An Add/Remove was voted down. Drop the buffered pending update for
-    /// `target`.
-    RejectedMembership { target: Vec<u8> },
     /// A `Deadlock` proposal passed: skip the current epoch steward for this
     /// epoch so the next eligible steward on the list becomes ES.
     DeadlockAccepted,
@@ -155,10 +152,6 @@ pub(crate) fn apply_outcome(
     }
     if let Some(target) = removal_target {
         return ApplyOutcome::QueuedRemoval { target };
-    }
-    // Rejected membership: the caller drops the buffered pending update.
-    if !approved && let Some(target) = target_member_id_of(request) {
-        return ApplyOutcome::RejectedMembership { target };
     }
     ApplyOutcome::NoAction
 }

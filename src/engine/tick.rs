@@ -26,9 +26,6 @@ impl<St: EngineStore> Engine<St> {
         let result = self.advance_freezing();
         self.report_step("advance_freezing", result);
 
-        let result = self.drive_buffered_proposals();
-        self.report_step("drive_buffered_proposals", result);
-
         let result = self.drive_sync_resend();
         self.report_step("drive_sync_resend", result);
 
