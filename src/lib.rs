@@ -100,6 +100,10 @@ pub mod wall_clock;
 /// Library error types.
 pub mod error;
 
+/// The policy engine that replaces [`Conversation`]: facts in, `Output`
+/// out, no MLS inside. Namespaced, not re-exported, until the cut.
+pub mod engine;
+
 // Crate-root re-exports so flat-name imports resolve without the owning
 // module path.
 pub use conversation::*;
