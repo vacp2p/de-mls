@@ -84,13 +84,6 @@ impl<St: EngineStore> Engine<St> {
         self.queues.mark_consensus_outcome_applied(proposal_id);
         let outcome = apply_outcome(&mut self.queues, proposal_id, approved, &request);
 
-        // A peer steward can reach consensus and broadcast its commit
-        // candidate before our own outcome lands. Now that the approved queue
-        // is populated, replay any stashed candidate so the commit round
-        // starts with it instead of empty (which would otherwise close with
-        // no commit and cost a full round).
-        self.replay_early_candidates()?;
-
         match outcome {
             ApplyOutcome::NoAction => {}
             ApplyOutcome::ElectionAccepted(election) => {

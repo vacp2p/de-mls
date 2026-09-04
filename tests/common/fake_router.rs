@@ -5,8 +5,8 @@ use std::{collections::HashMap, time::Duration};
 
 use de_mls::EngineConfig;
 use de_mls::engine::{
-    Admission, CommitHash, Decision, DecisionFailure, Engine, Event, InMemoryStore, MemberId,
-    Outbound, Output, Timestamp,
+    CommitHash, Decision, DecisionFailure, Engine, Event, InMemoryStore, MemberId, Outbound,
+    Output, StagedFacts, Timestamp,
 };
 
 use crate::common::{
@@ -55,21 +55,15 @@ impl FakeRouter {
         router
     }
 
-    /// Joiner side: adopt the welcome, open its bootstrap, start the engine.
+    /// Joiner side: adopt the welcome and start the engine unsynced. It
+    /// adopts the first `ConversationSync` a steward broadcasts.
     pub fn join(now: Timestamp, own: MemberId, welcome: &Welcome, config: EngineConfig) -> Self {
         let mls = FakeMls::from_welcome(own.clone(), &welcome.snapshot);
-        let bootstrap = welcome
-            .bootstrap
-            .as_ref()
-            .and_then(|sealed| mls.open(sealed))
-            .map(|opened| opened.plaintext)
-            .unwrap_or_default();
         let (engine, out) = Engine::join(
             mls.conversation_id(),
             own,
             mls.epoch(),
             &mls.members(),
-            &bootstrap,
             config,
             InMemoryStore::default(),
         )
@@ -147,13 +141,11 @@ impl FakeRouter {
                     ),
                 }
             }
-            Frame::Candidate(envelope) => match self.engine.admit_candidate(now, &envelope) {
-                Ok(Admission::Stage { hash, commit }) => match self.mls.stage(&commit) {
-                    Ok(facts) => self.engine.handle_candidate(now, hash, facts),
-                    Err(_) => return,
-                },
-                Ok(Admission::Drop) => return,
-                Err(e) => Err(e),
+            Frame::Commit(bytes) => match self.mls.stage(&bytes) {
+                Ok(facts) => self
+                    .engine
+                    .handle_candidate(now, CommitHash::of(&bytes), facts),
+                Err(_) => return,
             },
             Frame::Welcome(_) => return,
         };
@@ -209,15 +201,9 @@ impl FakeRouter {
     }
 
     fn send(&mut self, outbound: Outbound) {
-        match outbound {
-            Outbound::Control(bytes) => {
-                let sealed = self.mls.seal(Kind::Control, &bytes);
-                self.outbox.push(Frame::Sealed(sealed));
-            }
-            Outbound::Candidate(envelope) => self.outbox.push(Frame::Candidate(envelope)),
-            // Sealed and delivered with the welcome inside `execute`.
-            Outbound::Bootstrap { .. } => {}
-        }
+        let Outbound::Control(bytes) = outbound;
+        let sealed = self.mls.seal(Kind::Control, &bytes);
+        self.outbox.push(Frame::Sealed(sealed));
     }
 
     fn execute(&mut self, now: Timestamp, decision: Decision) -> Output {
@@ -235,16 +221,26 @@ impl FakeRouter {
                 if let Some(draft) = built.welcome {
                     self.welcomes.insert(built.hash, draft);
                 }
-                self.engine
-                    .own_candidate_built(now, built.hash, built.proposal_count, built.commit)
+                self.outbox.push(Frame::Commit(built.commit));
+                self.engine.handle_candidate(
+                    now,
+                    built.hash,
+                    StagedFacts {
+                        sender: self.mls.own_id().clone(),
+                        epoch: self.mls.epoch(),
+                        actions: built.actions,
+                        proposal_count: built.proposal_count,
+                        self_removed: false,
+                    },
+                )
             }
             Decision::Merge { hash } => match self.merge(hash) {
                 Ok(applied) => {
                     let out =
                         self.engine
                             .commit_applied(now, hash, applied.epoch, &applied.members);
-                    if let Ok(out) = &out {
-                        self.deliver_welcome(hash, out);
+                    if out.is_ok() {
+                        self.deliver_welcome(hash);
                     }
                     out
                 }
@@ -289,20 +285,17 @@ impl FakeRouter {
             .map_err(de_mls::ConversationError::InvalidConfig)
     }
 
-    /// Seed the welcome for `hash` with the bootstrap `out` carries, sealed
-    /// at the post-merge epoch, and queue it for the joiners.
-    pub fn deliver_welcome(&mut self, hash: CommitHash, out: &Output) {
+    /// Queue the welcome minted for `hash` for its joiners. It carries only
+    /// the group snapshot: the joiners' sync arrives as an ordinary control
+    /// message once the epoch steward broadcasts it.
+    pub fn deliver_welcome(&mut self, hash: CommitHash) {
         let Some(draft) = self.welcomes.remove(&hash) else {
             return;
         };
-        let bootstrap = out
-            .bootstrap_for(&hash)
-            .map(|bytes| self.mls.seal(Kind::Control, bytes));
         self.outbox.push(Frame::Welcome(Welcome {
             joiners: draft.joiners,
             for_commit: hash,
             snapshot: draft.snapshot,
-            bootstrap,
         }));
     }
 }
@@ -401,7 +394,7 @@ impl Bed {
             .engine
             .commit_applied(now, hash, applied.epoch, &applied.members)
             .expect("seed commit_applied");
-        creator.deliver_welcome(hash, &out);
+        creator.deliver_welcome(hash);
         creator.drive(now, out);
         self.flush();
     }

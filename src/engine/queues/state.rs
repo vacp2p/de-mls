@@ -1,7 +1,7 @@
-//! The `EngineQueues` struct, its settled-membership bookkeeping, the
-//! committed-hash dedup window, and the early-candidate stash. The bounded
-//! dedup set and the in-flight-proposal metadata type live here too, shared
-//! with the sibling modules that extend `EngineQueues`.
+//! The `EngineQueues` struct, its settled-membership bookkeeping, and the
+//! committed-hash dedup window. The bounded dedup set and the in-flight-
+//! proposal metadata type live here too, shared with the sibling modules
+//! that extend `EngineQueues`.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -11,10 +11,10 @@ use indexmap::{IndexMap, IndexSet};
 use crate::{
     engine::{
         proposal_kind::ProposalKind,
-        types::{CommitHash, MembershipDelta, StagedFacts},
+        types::{CommitHash, MembershipDelta},
         util::member_set,
     },
-    protos::de_mls::messages::v1::{CommitCandidate, ConversationUpdateRequest},
+    protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
 /// Consensus proposal identifier (assigned by the consensus service).
@@ -39,16 +39,6 @@ pub struct PendingUpdate {
     pub request: ConversationUpdateRequest,
     /// Epoch at which this update was first observed locally.
     pub first_seen_epoch: u64,
-}
-
-/// A candidate that arrived and staged cleanly before the local node approved
-/// the proposals it carries: the envelope as it came off the wire, the hash it
-/// was admitted under, and the facts the router learned by staging it.
-#[derive(Clone, Debug)]
-pub struct EarlyCandidate {
-    pub hash: CommitHash,
-    pub envelope: CommitCandidate,
-    pub facts: StagedFacts,
 }
 
 /// A capacity-bounded, insertion-ordered set: dedups by value and evicts the
@@ -121,10 +111,6 @@ pub struct EngineQueues {
     /// `RemoveMember(target)` entry; other approvals wait so they don't
     /// dilute the fast-removal intent.
     pub(crate) urgent_commit_target: Option<Vec<u8>>,
-    /// Candidates that staged before the local node approved their proposals;
-    /// replayed once approval lands so the proposer doesn't fall an epoch
-    /// behind. Epoch-tagged; stale entries dropped on the next stash/take.
-    early_candidates: Vec<(u64, EarlyCandidate)>,
     /// Join epoch per member, keyed by member id, recorded from each merged
     /// commit's delta and pruned when a member departs (so a member that
     /// re-joins later records a fresh join epoch rather than inheriting its
@@ -152,7 +138,6 @@ impl EngineQueues {
             pending_updates: HashMap::new(),
             resolved_proposals: BoundedSet::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
-            early_candidates: Vec::new(),
             member_join_epoch: HashMap::new(),
             skipped_stewards: HashSet::new(),
             pending_membership_delta: None,
@@ -252,9 +237,7 @@ impl EngineQueues {
     // ─────────────────────────── Committed-Hash Dedup ───────────────────────────
 
     /// Check if a commit hash has already been committed (in committed history).
-    ///
-    /// This is the committed-history window only; dedup of candidates still in
-    /// the round is the commit-round buffer's own.
+    #[cfg(test)]
     pub(crate) fn has_committed_hash(&self, commit_hash: &CommitHash) -> bool {
         self.committed_batch_hashes.contains(commit_hash)
     }
@@ -262,33 +245,6 @@ impl EngineQueues {
     /// Record a committed batch's hash for future dedup.
     pub(crate) fn insert_committed_hash(&mut self, commit_hash: CommitHash) {
         self.committed_batch_hashes.insert(commit_hash);
-    }
-
-    // ──────────────────────── Early (pre-approval) Candidates ────────────────────────
-
-    /// Stash a candidate that staged before its proposals were locally
-    /// approved. Deduped by commit hash and capped at `max`. Entries tagged
-    /// with a different epoch are dropped — the node has moved on.
-    pub fn stash_early_candidate(&mut self, epoch: u64, candidate: EarlyCandidate, max: usize) {
-        self.early_candidates.retain(|(e, _)| *e == epoch);
-        let duplicate = self
-            .early_candidates
-            .iter()
-            .any(|(_, c)| c.hash == candidate.hash);
-        if duplicate || self.early_candidates.len() >= max {
-            return;
-        }
-        self.early_candidates.push((epoch, candidate));
-    }
-
-    /// Remove and return stashed candidates for `epoch`, discarding any tagged
-    /// with a different (stale) epoch. Clears the stash.
-    pub fn take_early_candidates(&mut self, epoch: u64) -> Vec<EarlyCandidate> {
-        std::mem::take(&mut self.early_candidates)
-            .into_iter()
-            .filter(|(e, _)| *e == epoch)
-            .map(|(_, c)| c)
-            .collect()
     }
 
     // ─────────────────────────── Resolved-Outcome Cache ───────────────────────────

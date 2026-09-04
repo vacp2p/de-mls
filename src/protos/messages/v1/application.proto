@@ -29,17 +29,6 @@ enum TypeMembershipChange{
   Remove = 1;
 }
 
-// Broadcast in the clear: the commit must be readable before it is merged.
-// Encoded standalone by the engine, never inside a sealed message.
-message CommitCandidate {
-  bytes conversation_id = 1;
-  bytes commit_message = 2;
-  bytes steward_member_id = 3;
-  // Proposals the commit carries inline: a pre-stage ranking input, verified
-  // against the staged commit during validation.
-  uint32 proposal_count = 4;
-}
-
 message ConversationUpdateRequest {
   oneof payload {
     MemberInvite member_invite = 1;

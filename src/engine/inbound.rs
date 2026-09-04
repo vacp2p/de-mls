@@ -77,16 +77,6 @@ impl<St: EngineStore> Engine<St> {
         Ok(self.finish())
     }
 
-    /// Adopt the `ConversationSync` a welcome carried.
-    pub(crate) fn apply_bootstrap(&mut self, bootstrap: &[u8]) -> Result<(), ConversationError> {
-        match ControlMessage::decode(bootstrap)?.payload {
-            Some(control_message::Payload::ConversationSync(sync)) => {
-                self.on_conversation_sync(sync)
-            }
-            _ => Err(ConversationError::InvalidConversationUpdateRequest),
-        }
-    }
-
     /// A membership change a peer put on the wire.
     ///
     /// `Remove` is a removal request against a current member: it is buffered
@@ -269,16 +259,5 @@ mod tests {
             .expect("handle control");
         assert!(out.events.is_empty());
         assert!(!engine.is_synced());
-    }
-
-    /// A bootstrap that isn't a `ConversationSync` is refused.
-    #[test]
-    fn a_non_sync_bootstrap_is_refused() {
-        let mut engine = joiner();
-        let payload = membership_change(&member("alice"), TypeMembershipChange::Add);
-        assert!(matches!(
-            engine.apply_bootstrap(&payload),
-            Err(ConversationError::InvalidConversationUpdateRequest)
-        ));
     }
 }

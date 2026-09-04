@@ -38,6 +38,6 @@ pub use handle::Engine;
 pub use store::{EngineStore, InMemoryStore, keys};
 pub use timestamp::Timestamp;
 pub use types::{
-    Action, Admission, CommitHash, Decision, DecisionFailure, Event, MemberId, MembershipDelta,
-    Outbound, Output, Phase, StagedFacts,
+    Action, CommitHash, Decision, DecisionFailure, Event, MemberId, MembershipDelta, Outbound,
+    Output, Phase, StagedFacts,
 };

@@ -70,24 +70,9 @@ impl<St: EngineStore> Engine<St> {
         let selection = self.start_selection();
         self.emit_phase(Some(selection));
 
-        match self.select_epoch_steward_candidate() {
-            // The round completes in `commit_applied`, once the router
-            // reports what the merge did to the group.
-            Ok(Some(winner)) => {
-                self.decide_winner(winner);
-                Ok(())
-            }
-            Ok(None) => self.close_round_without_commit(),
-            Err(e) => {
-                // Our own local failure, not the steward failing to commit —
-                // penalising would be wrong. No commit landed and no one is
-                // at fault; the conversation just resumes.
-                self.report_failure("commit_round_finalize", &e);
-                let resumed = self.start_working();
-                self.emit_phase(Some(resumed));
-                Ok(())
-            }
-        }
+        // The round completes in `commit_applied`, once the router reports
+        // what the merge did to the group.
+        self.close_round()
     }
 
     /// Steward-inactivity freeze entry: once the inactivity window passes with
@@ -120,7 +105,7 @@ mod tests {
         engine::{
             config::EngineConfig,
             store::InMemoryStore,
-            types::{CommitHash, Decision, MemberId, Phase},
+            types::{Action, CommitHash, Decision, MemberId, Phase, StagedFacts},
         },
         protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberInvite},
     };
@@ -166,8 +151,22 @@ mod tests {
         let event = e.start_freezing().expect("enters freezing");
         e.on_freeze_entered(event).unwrap();
         let hash = CommitHash::of(b"commit");
-        e.own_candidate_built(at(0), hash, 1, b"commit".to_vec())
-            .unwrap();
+        let own = e.own.clone();
+        e.handle_candidate(
+            at(0),
+            hash,
+            StagedFacts {
+                sender: MemberId::from(own.as_slice()),
+                epoch: e.epoch,
+                actions: vec![Action::Add {
+                    member: id("bob"),
+                    key_package: b"kp:bob".to_vec(),
+                }],
+                proposal_count: 1,
+                self_removed: false,
+            },
+        )
+        .unwrap();
 
         let before_window = e.tick(at(0)).unwrap();
         assert!(

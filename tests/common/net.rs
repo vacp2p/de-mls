@@ -7,14 +7,15 @@ use de_mls::engine::{CommitHash, MemberId, Timestamp};
 
 use crate::common::fake_mls::{Sealed, Snapshot};
 
-/// A welcome as the application delivers it: the group snapshot the joiners
-/// adopt plus the sealed bootstrap the engine minted for that commit.
+/// A welcome as the application delivers it: the group snapshot its joiners
+/// adopt. It carries nothing else — a joiner starts unsynced and adopts the
+/// first `ConversationSync` a steward broadcasts after the commit that seated
+/// it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Welcome {
     pub joiners: Vec<MemberId>,
     pub for_commit: CommitHash,
     pub snapshot: Snapshot,
-    pub bootstrap: Option<Sealed>,
 }
 
 /// One payload on the wire.
@@ -22,8 +23,8 @@ pub struct Welcome {
 pub enum Frame {
     /// Sealed chat or control.
     Sealed(Sealed),
-    /// A `CommitCandidate` envelope in the clear.
-    Candidate(Vec<u8>),
+    /// Raw MLS commit bytes, broadcast in the clear.
+    Commit(Vec<u8>),
     /// A welcome, delivered to its joiners only.
     Welcome(Welcome),
 }

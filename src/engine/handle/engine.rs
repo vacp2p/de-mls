@@ -19,7 +19,6 @@ use tracing::{info, warn};
 use crate::{
     ConversationError, ScoreChange, ScoreOp, ScoreSnapshot, StewardListService,
     engine::{
-        commit::CommitRoundBuffer,
         config::EngineConfig,
         consensus_signer::MemberSigner,
         outcome_bus::{OutcomeBus, OutcomeReceiver},
@@ -28,8 +27,7 @@ use crate::{
         state_machine::ConversationStateMachine,
         store::EngineStore,
         types::{
-            Action, CommitHash, Decision, Event, MemberId, Outbound, Output, Phase, StagedFacts,
-            Timestamp,
+            CommitHash, Decision, Event, MemberId, Outbound, Output, Phase, StagedFacts, Timestamp,
         },
     },
     peer_scoring::PeerScoringService,
@@ -84,13 +82,6 @@ impl Timing {
     }
 }
 
-/// A `BuildCommit` decision the router has not reported back on yet: the
-/// batch it was asked to commit.
-#[derive(Debug, Clone)]
-pub(crate) struct PendingBuild {
-    pub(crate) actions: Vec<Action>,
-}
-
 /// A `Merge` decision the router has not reported back on yet.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingMerge {
@@ -123,11 +114,11 @@ pub struct Engine<St: EngineStore> {
     pub(crate) now: Timestamp,
     /// What the current driving call has produced so far.
     pub(crate) out: Output,
-    pub(crate) pending_build: Option<PendingBuild>,
     pub(crate) pending_merge: Option<PendingMerge>,
-    /// The candidates collected for the epoch's commit round. Ephemeral: a
+    /// The one candidate collected for the epoch's commit round — the epoch
+    /// steward's, once [`Engine::handle_candidate`] accepts it. Ephemeral: a
     /// restart rejoins the next round rather than resuming this one.
-    pub(crate) round: CommitRoundBuffer,
+    pub(crate) round_candidate: Option<(CommitHash, StagedFacts)>,
 }
 
 impl<St: EngineStore> Engine<St> {
@@ -178,9 +169,8 @@ impl<St: EngineStore> Engine<St> {
             store,
             now: Timestamp::ZERO,
             out: Output::default(),
-            pending_build: None,
             pending_merge: None,
-            round: CommitRoundBuffer::default(),
+            round_candidate: None,
         })
     }
 
@@ -300,11 +290,6 @@ impl<St: EngineStore> Engine<St> {
     /// Queue a control message for the router to seal and broadcast.
     pub(crate) fn send_control(&mut self, bytes: Vec<u8>) {
         self.out.outbound.push(Outbound::Control(bytes));
-    }
-
-    /// Queue a candidate envelope for the router to broadcast in the clear.
-    pub(crate) fn send_candidate(&mut self, envelope: Vec<u8>) {
-        self.out.outbound.push(Outbound::Candidate(envelope));
     }
 
     /// Ask the router to do something against the group.

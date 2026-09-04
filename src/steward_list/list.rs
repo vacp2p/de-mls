@@ -207,6 +207,7 @@ impl StewardList {
     }
 
     /// Number of stewards on the list.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.members.len()
     }

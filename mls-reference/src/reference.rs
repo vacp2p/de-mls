@@ -380,6 +380,7 @@ where
     fn build_commit(&mut self, actions: &[Action]) -> Result<Built, Error> {
         let mut adds: Vec<KeyPackage> = Vec::new();
         let mut removals: Vec<LeafNodeIndex> = Vec::new();
+        let mut kept: Vec<Action> = Vec::new();
 
         for action in actions {
             match action {
@@ -396,6 +397,7 @@ where
                         });
                     }
                     adds.push(validated);
+                    kept.push(action.clone());
                 }
                 // A remove of somebody who already left is skipped, not an
                 // error: two stewards can propose the same removal, and the
@@ -403,6 +405,7 @@ where
                 Action::Remove { member } => {
                     if let Some(leaf) = self.leaf_of(member) {
                         removals.push(leaf);
+                        kept.push(action.clone());
                     }
                 }
             }
@@ -441,6 +444,7 @@ where
 
         Ok(Built {
             hash,
+            actions: kept,
             proposal_count,
             commit,
             welcome,

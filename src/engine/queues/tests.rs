@@ -1,8 +1,6 @@
 use super::*;
-use crate::engine::types::{CommitHash, MemberId, MembershipDelta, StagedFacts};
-use crate::protos::de_mls::messages::v1::{
-    CommitCandidate, ConversationUpdateRequest, ViolationEvidence,
-};
+use crate::engine::types::MembershipDelta;
+use crate::protos::de_mls::messages::v1::{ConversationUpdateRequest, ViolationEvidence};
 
 fn member(id: u8) -> Vec<u8> {
     vec![id; 20]
@@ -10,26 +8,6 @@ fn member(id: u8) -> Vec<u8> {
 
 fn remove_request(target: &[u8]) -> ConversationUpdateRequest {
     ConversationUpdateRequest::remove_member(target.to_vec())
-}
-
-fn candidate(tag: u8, sender: &[u8], epoch: u64) -> EarlyCandidate {
-    let commit = vec![tag; 8];
-    EarlyCandidate {
-        hash: CommitHash::of(&commit),
-        envelope: CommitCandidate {
-            conversation_id: b"g".to_vec(),
-            commit_message: commit,
-            steward_member_id: sender.to_vec(),
-            proposal_count: 1,
-        },
-        facts: StagedFacts {
-            sender: MemberId::from(sender),
-            epoch,
-            actions: Vec::new(),
-            proposal_count: 1,
-            self_removed: false,
-        },
-    }
 }
 
 #[test]
@@ -299,29 +277,4 @@ fn membership_bookkeeping_drops_the_buffered_update_for_a_seated_joiner() {
     queues.apply_membership_delta_bookkeeping(5);
 
     assert!(!queues.has_pending_update(&joiner));
-}
-
-/// The stash keeps one entry per commit hash, holds only the current
-/// epoch's candidates, and stops at `max`.
-#[test]
-fn early_candidates_dedupe_by_hash_and_drop_stale_epochs() {
-    let mut queues = EngineQueues::new(10);
-    let steward = member(2);
-
-    queues.stash_early_candidate(5, candidate(1, &steward, 5), 2);
-    queues.stash_early_candidate(5, candidate(1, &steward, 5), 2);
-    assert_eq!(queues.take_early_candidates(5).len(), 1, "deduped by hash");
-
-    queues.stash_early_candidate(5, candidate(1, &steward, 5), 2);
-    queues.stash_early_candidate(5, candidate(2, &steward, 5), 2);
-    queues.stash_early_candidate(5, candidate(3, &steward, 5), 2);
-    assert_eq!(queues.take_early_candidates(5).len(), 2, "capped at max");
-
-    // A candidate tagged with an older epoch is dropped by the next stash.
-    queues.stash_early_candidate(5, candidate(1, &steward, 5), 2);
-    queues.stash_early_candidate(6, candidate(2, &steward, 6), 2);
-    let taken = queues.take_early_candidates(6);
-    assert_eq!(taken.len(), 1);
-    assert_eq!(taken[0].facts.epoch, 6);
-    assert!(queues.take_early_candidates(6).is_empty(), "stash cleared");
 }

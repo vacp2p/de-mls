@@ -42,15 +42,14 @@ pub(crate) fn founder() -> Engine<InMemoryStore> {
     .0
 }
 
-/// A member seated by a welcome that carried no bootstrap: no steward
-/// list, so it is neither steward nor epoch steward.
+/// A member seated by a welcome: no steward list until a sync is adopted,
+/// so it is neither steward nor epoch steward.
 pub(crate) fn joiner() -> Engine<InMemoryStore> {
     Engine::join(
         "conv",
         id("bob"),
         1,
         &[id("alice"), id("bob")],
-        &[],
         EngineConfig::default(),
         InMemoryStore::default(),
     )

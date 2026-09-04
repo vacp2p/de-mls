@@ -9,4 +9,4 @@ mod lifecycle;
 mod wakeup;
 
 pub use engine::Engine;
-pub(crate) use engine::{AutoVoteEntry, PendingBuild, PendingMerge};
+pub(crate) use engine::{AutoVoteEntry, PendingMerge};
