@@ -20,8 +20,8 @@ use crate::{
     ConversationError, ScoreChange, ScoreOp, ScoreSnapshot, StewardListService,
     engine::{
         config::EngineConfig,
-        consensus_signer::MemberSigner,
-        outcome_bus::{OutcomeBus, OutcomeReceiver},
+        consensus::MemberSigner,
+        consensus::{OutcomeBus, OutcomeReceiver},
         phase_timer::PhaseTimer,
         queues::EngineQueues,
         store::EngineStore,

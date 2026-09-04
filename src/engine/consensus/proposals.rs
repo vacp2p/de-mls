@@ -4,9 +4,9 @@
 //! Everything runs inline on the driving call: opening a proposal starts the
 //! consensus session right away, while the time-based follow-ups (auto-votes,
 //! consensus timeouts) wait as deadlines that `tick_deadlines` fires on a
-//! later tick — see [`crate::engine::voting::deadlines`]. Wire-level
+//! later tick — see [`crate::engine::consensus::deadlines`]. Wire-level
 //! construction (control-message encoding, session opening) lives in
-//! [`crate::engine::voting::wire`]. Wire messages leave as
+//! [`crate::engine::consensus::wire`]. Wire messages leave as
 //! `Outbound::Control` bytes the router seals; nothing here touches a group.
 
 use std::time::Duration;
@@ -22,14 +22,14 @@ use tracing::{debug, info, warn};
 use crate::{
     ConversationError,
     engine::{
+        consensus::wire::{
+            ProposalParams, authorize_fast_path_proposal, control_proposal, control_vote,
+        },
         handle::Engine,
         proposal_kind::ProposalKind,
         store::EngineStore,
         types::{Decision, Event, MemberId, Output, Phase, Timestamp},
         util::in_flight_target,
-        voting::wire::{
-            ProposalParams, authorize_fast_path_proposal, control_proposal, control_vote,
-        },
     },
     protos::de_mls::messages::v1::{ConversationUpdateRequest, conversation_update_request},
 };

@@ -1,5 +1,5 @@
 //! The next-wakeup computation and the auto-vote / consensus-timeout
-//! deadline registry `tick_deadlines` (in [`crate::engine::voting`]) fires
+//! deadline registry `tick_deadlines` (in [`crate::engine::consensus`]) fires
 //! against.
 
 use std::time::Duration;
