@@ -35,5 +35,5 @@ pub use store::{EngineStore, InMemoryStore, keys};
 pub use timestamp::Timestamp;
 pub use types::{
     Action, CommitHash, Decision, DecisionFailure, Event, MemberId, MembershipDelta, Outbound,
-    Output, Phase, StagedFacts,
+    Output, Phase, StagedFacts, Verdict,
 };

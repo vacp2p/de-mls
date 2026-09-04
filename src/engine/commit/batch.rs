@@ -34,9 +34,9 @@ impl<St: EngineStore> Engine<St> {
         (usize::from(self.round_candidate.is_some()), 1)
     }
 
-    /// Ask the router to build our candidate from the approved batch. Only
-    /// the epoch steward builds (design 11): `Ok(false)` when we aren't it or
-    /// there is nothing to commit.
+    /// Ask the router to build our candidate from the approved batch.
+    /// Only the epoch steward builds:
+    /// `Ok(false)` when we aren't it or there is nothing to commit.
     pub(crate) fn request_own_candidate(&mut self) -> Result<bool, ConversationError> {
         if !self.is_epoch_steward() {
             return Ok(false);

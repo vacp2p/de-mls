@@ -49,7 +49,9 @@ that orchestration end to end: opening a proposal, collecting votes, the
 auto-vote and timeout deadlines, and turning a resolved decision into the
 next steward commit or election. The engine runs the
 `hashgraph-like-consensus` library over in-memory sessions; the conversation
-id serves as the consensus scope.
+id serves as the consensus scope. A session ends with a verdict: approved,
+rejected, or failed when the timeout passes with no decision — a rejection
+is final for the epoch, a failure may be filed again.
 
 ## Peer scoring
 

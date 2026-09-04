@@ -1,6 +1,7 @@
 use hashgraph_like_consensus::{
     protos::consensus::v1::{Proposal, Vote},
     storage::ConsensusStorage,
+    types::ConsensusEvent,
 };
 use prost::Message;
 
@@ -9,10 +10,10 @@ use crate::{
         config::EngineConfig,
         handle::Engine,
         store::InMemoryStore,
-        types::{Decision, Event, MemberId, Outbound, Output, Timestamp},
+        types::{Decision, Event, MemberId, Outbound, Output, Timestamp, Verdict},
     },
     protos::de_mls::messages::v1::{
-        ConversationUpdateRequest, MemberInvite, conversation_update_request,
+        ConversationUpdateRequest, MemberInvite, ViolationEvidence, conversation_update_request,
     },
 };
 
@@ -221,6 +222,55 @@ fn partial_freeze_drops_lower_priority_proposals() {
     assert!(engine.out.events.is_empty());
 }
 
+/// A failed emergency session (the timeout passed with neither side at
+/// threshold) scores nobody and lifts the partial freeze it held — the same
+/// clearing a rejection gets, but with nobody to blame for the tie.
+#[test]
+fn failed_emergency_scores_nobody_and_lifts_the_freeze() {
+    let mut engine = engine();
+    let request = ViolationEvidence::deadlock(0)
+        .with_creator(member(1))
+        .into_update_request()
+        .unwrap();
+    let proposal_id = 17;
+    let proposal = peer_proposal(&member(2), proposal_id, &request, 4);
+    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    assert!(engine.queues.has_active_emergency());
+    engine.out = Output::default();
+
+    engine
+        .handle_consensus_outcome(ConsensusEvent::ConsensusFailed {
+            proposal_id,
+            timestamp: 0,
+        })
+        .unwrap();
+
+    assert_eq!(
+        engine
+            .out
+            .events
+            .iter()
+            .filter(|e| matches!(
+                e,
+                Event::ConsensusReached {
+                    verdict: Verdict::Failed,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    assert!(
+        !engine
+            .out
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::MemberScoreChanged { .. }))
+    );
+    assert!(!engine.queues.is_voting(proposal_id));
+    assert!(!engine.queues.has_active_emergency());
+}
+
 /// The auto-vote timer fires once its deadline passes and puts one Vote
 /// control message on the wire.
 #[test]
@@ -248,7 +298,7 @@ mod outcome_application {
         engine::{
             consensus::apply::{ApplyOutcome, apply_outcome},
             queues::EngineQueues,
-            types::Event,
+            types::{Event, Verdict},
         },
         peer_scoring::emergency_score_ops,
         protos::de_mls::messages::v1::{
@@ -309,7 +359,7 @@ mod outcome_application {
         let proposal_id = 42;
         queues.track_voting_proposal(proposal_id, &request);
 
-        let result = apply_outcome(&mut queues, proposal_id, true, &request);
+        let result = apply_outcome(&mut queues, proposal_id, Verdict::Approved, &request);
 
         let ApplyOutcome::ElectionAccepted(outcome) = result else {
             panic!("expected ElectionAccepted, got {result:?}");
@@ -321,19 +371,24 @@ mod outcome_application {
         assert!(!queues.is_voting(proposal_id));
     }
 
-    /// NO on an election reports the rejection and stages nothing.
+    /// NO or a failed session reports the drop and stages nothing.
     #[test]
-    fn election_no_returns_election_rejected() {
-        let mut queues = EngineQueues::new(10);
-        let request = election_request(vec![member(1), member(2)], 10);
+    fn election_no_or_failed_returns_election_dropped() {
+        for verdict in [Verdict::Rejected, Verdict::Failed] {
+            let mut queues = EngineQueues::new(10);
+            let request = election_request(vec![member(1), member(2)], 10);
 
-        let proposal_id = 43;
-        queues.track_voting_proposal(proposal_id, &request);
+            let proposal_id = 43;
+            queues.track_voting_proposal(proposal_id, &request);
 
-        let result = apply_outcome(&mut queues, proposal_id, false, &request);
+            let result = apply_outcome(&mut queues, proposal_id, verdict, &request);
 
-        assert!(matches!(result, ApplyOutcome::ElectionRejected));
-        assert_eq!(queues.approved_proposals_count(), 0);
+            assert!(
+                matches!(result, ApplyOutcome::ElectionDropped),
+                "{verdict:?}"
+            );
+            assert_eq!(queues.approved_proposals_count(), 0, "{verdict:?}");
+        }
     }
 
     /// A second `RemoveMember(target)` is dropped when an entry for the same
@@ -345,13 +400,13 @@ mod outcome_application {
 
         let first_id = 10;
         let request = remove_request(target.clone());
-        let first_result = apply_outcome(&mut queues, first_id, true, &request);
+        let first_result = apply_outcome(&mut queues, first_id, Verdict::Approved, &request);
         assert!(matches!(first_result, ApplyOutcome::QueuedRemoval { .. }));
         assert_eq!(queues.approved_proposals_count(), 1);
 
         let second_id = 11;
         let request = remove_request(target.clone());
-        let result = apply_outcome(&mut queues, second_id, true, &request);
+        let result = apply_outcome(&mut queues, second_id, Verdict::Approved, &request);
 
         assert!(matches!(result, ApplyOutcome::NoAction));
         assert_eq!(
@@ -377,7 +432,7 @@ mod outcome_application {
         let dup_request = remove_request(target.clone());
         queues.track_voting_proposal(dup_id, &dup_request);
 
-        let result = apply_outcome(&mut queues, dup_id, true, &dup_request);
+        let result = apply_outcome(&mut queues, dup_id, Verdict::Approved, &dup_request);
 
         assert!(matches!(result, ApplyOutcome::NoAction));
         assert_eq!(queues.approved_proposals_count(), 1);
@@ -395,7 +450,7 @@ mod outcome_application {
 
         let request = score_below_threshold_request(target.clone(), member(1));
 
-        let result = apply_outcome(&mut queues, 100, true, &request);
+        let result = apply_outcome(&mut queues, 100, Verdict::Approved, &request);
 
         let ApplyOutcome::UrgentRemoval { target: out_target } = result else {
             panic!("expected UrgentRemoval, got {result:?}");
@@ -414,7 +469,7 @@ mod outcome_application {
         let mut queues = EngineQueues::new(10);
 
         let request = deadlock_request(member(1));
-        let result = apply_outcome(&mut queues, 200, true, &request);
+        let result = apply_outcome(&mut queues, 200, Verdict::Approved, &request);
 
         assert!(matches!(result, ApplyOutcome::DeadlockAccepted));
         assert_eq!(
@@ -425,26 +480,54 @@ mod outcome_application {
         assert!(queues.urgent_commit_target().is_none());
     }
 
-    /// A rejected emergency does nothing at all, whatever it proposed. Every
-    /// branch that acts is gated on `approved`, so this holds for the whole
-    /// family — and it is what keeps a below-threshold removal a group
-    /// decision: any member can raise one, but a NO leaves no trace.
+    /// A rejected or failed emergency does nothing at all, whatever it
+    /// proposed. Every branch that acts is gated on approval, so this holds
+    /// for the whole family — and it is what keeps a below-threshold removal
+    /// a group decision: any member can raise one, but a NO or a tie leaves
+    /// no trace, and either lifts the partial freeze it held.
     #[test]
-    fn rejected_emergency_leaves_no_trace() {
+    fn rejected_or_failed_emergency_leaves_no_trace() {
         for (name, request) in [
-            ("deadlock-no", deadlock_request(member(1))),
+            ("deadlock", deadlock_request(member(1))),
             (
-                "score-below-threshold-no",
+                "score-below-threshold",
                 score_below_threshold_request(member(7), member(1)),
             ),
         ] {
-            let mut queues = EngineQueues::new(10);
-            let result = apply_outcome(&mut queues, 201, false, &request);
+            for verdict in [Verdict::Rejected, Verdict::Failed] {
+                let mut queues = EngineQueues::new(10);
+                queues.insert_emergency(201);
+                let result = apply_outcome(&mut queues, 201, verdict, &request);
 
-            assert!(matches!(result, ApplyOutcome::NoAction), "{name}");
-            assert!(queues.urgent_commit_target().is_none(), "{name}");
-            assert_eq!(queues.approved_proposals_count(), 0, "{name}");
+                assert!(
+                    matches!(result, ApplyOutcome::NoAction),
+                    "{name} {verdict:?}"
+                );
+                assert!(
+                    queues.urgent_commit_target().is_none(),
+                    "{name} {verdict:?}"
+                );
+                assert_eq!(queues.approved_proposals_count(), 0, "{name} {verdict:?}");
+                assert!(
+                    !queues.has_active_emergency(),
+                    "{name} {verdict:?}: partial freeze must lift"
+                );
+            }
         }
+    }
+
+    /// An approved emergency lifts its own partial freeze — the freeze
+    /// exists to hold the field until the session ends, not to survive it.
+    #[test]
+    fn approved_emergency_lifts_partial_freeze() {
+        let mut queues = EngineQueues::new(10);
+        queues.insert_emergency(202);
+        let request = deadlock_request(member(1));
+
+        let result = apply_outcome(&mut queues, 202, Verdict::Approved, &request);
+
+        assert!(matches!(result, ApplyOutcome::DeadlockAccepted));
+        assert!(!queues.has_active_emergency());
     }
 
     /// A regular `RemoveMember` reached by YES enqueues and produces no score
@@ -457,9 +540,9 @@ mod outcome_application {
         let proposal_id = 70;
         queues.track_voting_proposal(proposal_id, &request);
 
-        apply_outcome(&mut queues, proposal_id, true, &request);
+        apply_outcome(&mut queues, proposal_id, Verdict::Approved, &request);
 
-        assert!(emergency_score_ops(&request, true).is_empty());
+        assert!(emergency_score_ops(&request, Verdict::Approved).is_empty());
         assert_eq!(queues.approved_proposals_count(), 1);
     }
 
@@ -478,7 +561,7 @@ mod outcome_application {
         let proposal_id = 300;
         queues.track_voting_proposal(proposal_id, &request);
 
-        apply_outcome(&mut queues, proposal_id, true, &request);
+        apply_outcome(&mut queues, proposal_id, Verdict::Approved, &request);
 
         assert_eq!(
             queues.approved_proposals_count(),
@@ -504,10 +587,10 @@ mod outcome_application {
         };
 
         let mut queues = EngineQueues::new(10);
-        apply_outcome(&mut queues, 1, true, &invite(b"kp-a"));
+        apply_outcome(&mut queues, 1, Verdict::Approved, &invite(b"kp-a"));
         assert_eq!(queues.approved_proposals_count(), 1);
 
-        let result = apply_outcome(&mut queues, 2, true, &invite(b"kp-b"));
+        let result = apply_outcome(&mut queues, 2, Verdict::Approved, &invite(b"kp-b"));
         assert!(matches!(result, ApplyOutcome::NoAction));
         assert_eq!(queues.approved_proposals_count(), 1);
     }
