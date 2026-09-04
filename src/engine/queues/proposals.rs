@@ -26,8 +26,8 @@ impl EngineQueues {
     }
 
     /// Member ids targeted by an in-flight proposal — either still voting or
-    /// already approved. A buffered update whose target is in this set is
-    /// already covered by a live proposal and must not be re-proposed.
+    /// already approved. `initiate_proposal` no-ops rather than opening a
+    /// second session for a target already covered by a live proposal.
     pub fn active_proposal_targets(&self) -> HashSet<Vec<u8>> {
         let voting = self
             .voting_proposals

@@ -122,50 +122,6 @@ fn test_drop_approved_removals_for_target() {
     assert!(!queues.approved_proposals().contains_key(&101));
 }
 
-fn buffer_remove_at(queues: &mut EngineQueues, target: &[u8], epoch: u64) {
-    assert!(queues.insert_pending_update(remove_request(target), epoch));
-}
-
-/// Reducing `pending_update_max_epochs` (e.g. via a tightened
-/// `ConversationSync`) must expire entries whose age now exceeds the new max.
-/// Cutoff math: `current_epoch - max_age`; entries with
-/// `first_seen_epoch < cutoff` are dropped.
-#[test]
-fn test_expire_pending_updates_drops_entries_older_than_max_age() {
-    let mut queues = EngineQueues::new(10);
-    let stale = member(7);
-    let fresh = member(9);
-
-    buffer_remove_at(&mut queues, &stale, 0);
-    buffer_remove_at(&mut queues, &fresh, 4);
-    assert_eq!(queues.pending_update_count(), 2);
-
-    let expired = queues.expire_pending_updates(5, 1);
-
-    assert_eq!(expired, vec![stale.clone()]);
-    assert_eq!(queues.pending_update_count(), 1);
-    assert!(queues.has_pending_update(&fresh));
-    assert!(!queues.has_pending_update(&stale));
-}
-
-/// `max_age = 0` keeps only entries from the current epoch — the
-/// boundary case a tightened sync hits when shrinking the window.
-#[test]
-fn test_expire_pending_updates_max_age_zero_keeps_only_current_epoch() {
-    let mut queues = EngineQueues::new(10);
-    let prior = member(7);
-    let current = member(9);
-
-    buffer_remove_at(&mut queues, &prior, 4);
-    buffer_remove_at(&mut queues, &current, 5);
-
-    let expired = queues.expire_pending_updates(5, 0);
-
-    assert_eq!(expired, vec![prior.clone()]);
-    assert!(queues.has_pending_update(&current));
-    assert!(!queues.has_pending_update(&prior));
-}
-
 /// A score-below-threshold removal is a live change for its target across
 /// its whole lifecycle: while the ECP is still voting (via the in-flight
 /// index) and after it resolves into a queued `RemoveMember` (via the
@@ -230,8 +186,7 @@ fn membership_bookkeeping_tracks_join_epochs_and_clears_departures() {
     let joiner = member(2);
     let leaver = member(3);
 
-    // The leaver is buffered and queued for removal before the commit lands.
-    buffer_remove_at(&mut queues, &leaver, 4);
+    // The leaver is queued for removal before the commit lands.
     insert_remove_member(&mut queues, &leaver, 100);
     queues.member_join_epoch.insert(leaver.clone(), 1);
 
@@ -241,7 +196,6 @@ fn membership_bookkeeping_tracks_join_epochs_and_clears_departures() {
     });
     queues.apply_membership_delta_bookkeeping(5);
 
-    assert!(!queues.has_pending_update(&leaver));
     assert!(!queues.has_approved_removal(&leaver));
     assert!(queues.is_settled(&leaver, 5), "an untracked id is settled");
 
@@ -259,22 +213,4 @@ fn membership_bookkeeping_tracks_join_epochs_and_clears_departures() {
     let delta = queues.take_membership_delta();
     assert_eq!(delta.added.len(), 1);
     assert!(queues.take_membership_delta().is_empty());
-}
-
-/// A buffered invite is keyed by the joiner's id, which is unchanged by
-/// seating — so the commit that seats them drops the buffer entry.
-#[test]
-fn membership_bookkeeping_drops_the_buffered_update_for_a_seated_joiner() {
-    let mut queues = EngineQueues::new(10);
-    let joiner = member(2);
-
-    // A removal request stands in for any buffered update keyed by target.
-    buffer_remove_at(&mut queues, &joiner, 4);
-    queues.store_membership_delta(MembershipDelta {
-        added: vec![joiner.clone()],
-        removed: Vec::new(),
-    });
-    queues.apply_membership_delta_bookkeeping(5);
-
-    assert!(!queues.has_pending_update(&joiner));
 }

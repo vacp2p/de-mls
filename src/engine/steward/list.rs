@@ -9,7 +9,7 @@ use tracing::info;
 
 use crate::{
     ConversationError, ElectionDecision, ElectionSkip,
-    engine::{consensus::CreatorVote, handle::Engine, store::EngineStore},
+    engine::{handle::Engine, store::EngineStore},
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, ViolationEvidence,
     },
@@ -182,7 +182,7 @@ impl<St: EngineStore> Engine<St> {
             stewards,
             "initiating steward election"
         );
-        self.initiate_proposal(request, CreatorVote::Yes)
+        self.initiate_proposal(request)
     }
 
     // ── unstick and score-removal proposals ─────────────────────────────
@@ -202,7 +202,7 @@ impl<St: EngineStore> Engine<St> {
         info!(conversation = %self.conversation_id, epoch = self.epoch, "initiating Deadlock ECP");
         // Bundled YES: filing it is this member's own vote that the deadlock
         // is real.
-        self.initiate_proposal(request, CreatorVote::Yes)
+        self.initiate_proposal(request)
     }
 
     /// File the emergency proposal that removes `target` on the grounds of
@@ -225,6 +225,6 @@ impl<St: EngineStore> Engine<St> {
             "initiating SCORE_BELOW_THRESHOLD ECP"
         );
         // Bundled YES: proposing it is this member's own vote for the removal.
-        self.initiate_proposal(request, CreatorVote::Yes)
+        self.initiate_proposal(request)
     }
 }

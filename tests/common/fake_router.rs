@@ -6,7 +6,7 @@ use std::{collections::HashMap, time::Duration};
 use de_mls::EngineConfig;
 use de_mls::engine::{
     CommitHash, Decision, DecisionFailure, Engine, Event, InMemoryStore, MemberId, Outbound,
-    Output, StagedFacts, Timestamp,
+    Output, Phase, StagedFacts, Timestamp,
 };
 
 use crate::common::{
@@ -30,6 +30,10 @@ pub struct FakeRouter {
     next_wakeup: Option<Timestamp>,
     /// Set once `Decision::Leave` ran.
     pub left: bool,
+    /// Announcements the router holds because `propose_add` refused with
+    /// `ConversationBlocked` — retried once an `Event::PhaseChange(Phase::Working)`
+    /// is drained. The engine keeps no memory of these; the router does.
+    pending_announcements: Vec<(MemberId, Vec<u8>)>,
 }
 
 impl FakeRouter {
@@ -84,11 +88,41 @@ impl FakeRouter {
             chats: Vec::new(),
             next_wakeup: None,
             left: false,
+            pending_announcements: Vec::new(),
         }
     }
 
     pub fn own_id(&self) -> &MemberId {
         self.mls.own_id()
+    }
+
+    /// Announce a key package for `member` (router contract rule 7b): hold
+    /// it and propose it right away. A `ConversationBlocked` refusal (a
+    /// commit round is open) keeps it parked until this router drains
+    /// `Event::PhaseChange(Phase::Working)`.
+    pub fn announce(&mut self, now: Timestamp, member: MemberId, key_package: Vec<u8>) {
+        self.pending_announcements.push((member, key_package));
+        let out = self.propose_announced(now);
+        self.drive(now, out);
+    }
+
+    /// `propose_add` for every held announcement; one refused because a
+    /// round is open stays held.
+    fn propose_announced(&mut self, now: Timestamp) -> Output {
+        let mut out = Output::default();
+        for (member, key_package) in std::mem::take(&mut self.pending_announcements) {
+            match self
+                .engine
+                .propose_add(now, member.clone(), key_package.clone())
+            {
+                Ok(o) => out.merge(o),
+                Err(de_mls::ConversationError::ConversationBlocked(_)) => {
+                    self.pending_announcements.push((member, key_package));
+                }
+                Err(e) => panic!("announce: propose_add failed: {e}"),
+            }
+        }
+        out
     }
 
     /// Frames produced since the last call, in order.
@@ -186,7 +220,14 @@ impl FakeRouter {
                 self.decisions.push(decision.clone());
                 next.merge(self.execute(now, decision));
             }
+            let round_closed = out
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::PhaseChange(Phase::Working)));
             self.events.append(&mut out.events);
+            if round_closed {
+                next.merge(self.propose_announced(now));
+            }
             if let Some(d) = out.wakeup {
                 self.next_wakeup = Some(now + d);
             }

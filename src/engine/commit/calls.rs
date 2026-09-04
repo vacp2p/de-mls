@@ -123,7 +123,7 @@ impl<St: EngineStore> Engine<St> {
         self.queues.insert_committed_hash(hash);
         self.queues.store_membership_delta(delta.clone());
         self.finalize_committed_batch(epoch);
-        self.reconcile_membership_after_commit(&delta, epoch)?;
+        self.reconcile_membership_after_commit(&delta)?;
 
         // A commit that unseats us ends the conversation here: no steward
         // work applies to a group we are no longer in.
@@ -180,7 +180,6 @@ impl<St: EngineStore> Engine<St> {
     fn reconcile_membership_after_commit(
         &mut self,
         delta: &MembershipDelta,
-        epoch: u64,
     ) -> Result<(), ConversationError> {
         let _ = self.queues.take_membership_delta();
         for member in &delta.removed {
@@ -189,8 +188,6 @@ impl<St: EngineStore> Engine<St> {
         for member in &delta.added {
             self.scoring.add_member(member);
         }
-        let max_epochs = self.config.pending_update_max_epochs;
-        let _ = self.queues.expire_pending_updates(epoch, max_epochs);
         // store: proposals (WP3g)
         if !delta.is_empty() {
             self.emit(Event::MembersChanged {

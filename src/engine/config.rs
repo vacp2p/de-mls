@@ -20,7 +20,7 @@ pub const DEFAULT_PROPOSAL_EXPIRATION: Duration = Duration::from_secs(600);
 pub const DEFAULT_CONSENSUS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a backup steward waits for a silent epoch steward before covering
-/// its propose / sync-resend (RFC §Inactivity Timer #3).
+/// its sync-resend (RFC §Inactivity Timer #3).
 pub const DEFAULT_BACKUP_TAKEOVER_WINDOW: Duration = Duration::from_secs(20);
 
 /// Per-member window to cast a manual vote before the app auto-votes
@@ -28,8 +28,6 @@ pub const DEFAULT_BACKUP_TAKEOVER_WINDOW: Duration = Duration::from_secs(20);
 pub const DEFAULT_VOTING_DELAY: Duration = Duration::from_secs(10);
 
 pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
-
-pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
 /// Max consensus sessions kept per conversation before the library evicts the
 /// oldest. Resolved sessions are freed on outcome, so this bounds concurrent
@@ -61,9 +59,8 @@ pub struct EngineConfig {
     /// How long the freeze collects commit candidates before one is
     /// deterministically selected (RFC §Freezing).
     pub freeze_duration: Duration,
-    /// How long a backup steward waits for a silent epoch steward (to propose a
-    /// buffered update, or answer a sync-resend) before covering it
-    /// (RFC §Inactivity Timer #3).
+    /// How long a backup steward waits for a silent epoch steward to answer a
+    /// sync-resend before covering it (RFC §Inactivity Timer #3).
     pub backup_takeover_window: Duration,
     /// How long a proposal stays open before it expires unvoted
     /// (RFC §Creating Voting Proposal).
@@ -75,10 +72,6 @@ pub struct EngineConfig {
     /// Must be `< consensus_timeout`, or the auto-vote never fires before the
     /// session closes (enforced by [`validate`](Self::validate)).
     pub voting_delay: Duration,
-    /// Max age (in epochs) of a buffered membership update. An entry first
-    /// seen at epoch `E` is dropped once `current_epoch - E` exceeds this
-    /// value (so it survives epochs `E..=E + max_age` inclusive).
-    pub pending_update_max_epochs: u32,
     /// Whether silent voters count as YES at `consensus_timeout` (RFC
     /// §Creating Voting Proposal). See [`DEFAULT_LIVENESS_CRITERIA_YES`].
     /// Also used by the auto-vote timer as the cast value.
@@ -113,7 +106,6 @@ impl Default for EngineConfig {
             backup_takeover_window: DEFAULT_BACKUP_TAKEOVER_WINDOW,
             proposal_expiration: DEFAULT_PROPOSAL_EXPIRATION,
             consensus_timeout: DEFAULT_CONSENSUS_TIMEOUT,
-            pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
             voting_delay: DEFAULT_VOTING_DELAY,
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
             max_consensus_sessions: DEFAULT_MAX_CONSENSUS_SESSIONS,
@@ -129,7 +121,7 @@ impl Default for EngineConfig {
 impl EngineConfig {
     /// Overwrite the duration fields from a wire [`TimingConfig`]. Used on
     /// the joiner side when applying `ConversationSync`. Non-timing fields
-    /// (`liveness_criteria_yes`, `pending_update_max_epochs`) stay untouched.
+    /// (`liveness_criteria_yes`) stay untouched.
     pub fn apply_timing(&mut self, timing: &TimingConfig) {
         apply_nonzero_ms(&mut self.commit_batch_window, timing.commit_batch_window_ms);
         apply_nonzero_ms(&mut self.freeze_duration, timing.freeze_duration_ms);

@@ -1,10 +1,7 @@
 use super::sync::{first_zero_timing_field, synced_default_peer_score, validate_conversation_sync};
 use crate::{
     DEFAULT_PEER_SCORE,
-    engine::handle::Engine,
-    protos::de_mls::messages::v1::{
-        ConversationSync, ConversationUpdateRequest, StewardElectionProposal, TimingConfig,
-    },
+    protos::de_mls::messages::v1::{ConversationSync, StewardElectionProposal, TimingConfig},
 };
 
 fn nonzero_timing() -> TimingConfig {
@@ -29,7 +26,6 @@ fn valid_sync_with(threshold: i64) -> ConversationSync {
         retry_round: 0,
         liveness_criteria_yes: true,
         threshold_peer_score: threshold,
-        pending_update_max_epochs: 3,
         unsettled_members: vec![],
         default_peer_score: 100,
     }
@@ -164,12 +160,9 @@ fn each_zero_field_is_detected() {
 use crate::{
     Event,
     engine::{
-        config::EngineConfig,
-        store::InMemoryStore,
         test_support::{creator, founder, id, joiner, member},
         types::{Outbound, Timestamp},
     },
-    protos::de_mls::messages::v1::MemberInvite,
 };
 
 /// The creator is its own steward list, so it answers a sync request by
@@ -287,42 +280,4 @@ fn validate_election_list_recomputes_from_local_members() {
         !engine.validate_election_list(&forged).unwrap(),
         "a list off the local members is rejected"
     );
-}
-
-/// A buffered invite for a seated member and a buffered removal for a
-/// stranger are both inert; a removal for a live member is actionable.
-#[test]
-fn actionable_updates_skip_changes_that_already_landed() {
-    let (mut engine, _) = Engine::join(
-        "conv",
-        id("alice"),
-        1,
-        &[id("alice"), id("bob")],
-        EngineConfig::default(),
-        InMemoryStore::default(),
-    )
-    .expect("join");
-    engine.begin(Timestamp::ZERO);
-
-    engine.queues.insert_pending_update(
-        ConversationUpdateRequest::member_invite(MemberInvite {
-            key_package_bytes: b"kp".to_vec(),
-            member_id: member("bob"),
-        }),
-        engine.epoch,
-    );
-    engine.queues.insert_pending_update(
-        ConversationUpdateRequest::remove_member(member("ghost")),
-        engine.epoch,
-    );
-    assert!(
-        engine.actionable_buffered_updates().is_empty(),
-        "an invite for a seated member and a removal for a stranger do nothing"
-    );
-
-    engine.queues.insert_pending_update(
-        ConversationUpdateRequest::remove_member(member("alice")),
-        engine.epoch,
-    );
-    assert_eq!(engine.actionable_buffered_updates().len(), 1);
 }

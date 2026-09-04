@@ -29,18 +29,6 @@ pub(crate) struct VotingMeta {
     pub(crate) kind: ProposalKind,
 }
 
-/// Represents a pending membership update that may not yet be committed.
-///
-/// Buffered by each member. If the epoch steward doesn't commit the change,
-/// the next steward can handle it. Removed once applied or after a set number
-/// of epochs since first seen.
-#[derive(Clone, Debug)]
-pub struct PendingUpdate {
-    pub request: ConversationUpdateRequest,
-    /// Epoch at which this update was first observed locally.
-    pub first_seen_epoch: u64,
-}
-
 /// A capacity-bounded, insertion-ordered set: dedups by value and evicts the
 /// oldest entry once full. Backs the commit / welcome dedup windows and the
 /// consensus-outcome cache.
@@ -88,20 +76,15 @@ pub struct EngineQueues {
     /// sort-by-id is not temporal.
     pub(crate) approved_proposals: IndexMap<ProposalId, ConversationUpdateRequest>,
     /// Index of proposals in flight through consensus — ours and peers',
-    /// treated identically. The record that a change is already being voted on,
-    /// so the epoch steward doesn't re-propose it out of `pending_updates` (RFC
-    /// §Consensus Types: the steward collects and commits YES-voted proposals;
-    /// it does not re-create them). Holds only what the queues query; the full
-    /// request lives in consensus storage.
+    /// treated identically (RFC §Consensus Types: the steward collects and
+    /// commits YES-voted proposals; it does not re-create them). Holds only
+    /// what the queues query; the full request lives in consensus storage.
     pub(crate) voting_proposals: HashMap<ProposalId, VotingMeta>,
     /// Active emergency criteria proposals not yet finalized by consensus.
     /// While non-empty, lower-priority proposals MUST be blocked (RFC §Partial Freeze).
     pub(crate) active_emergency_ids: HashSet<ProposalId>,
     /// Recent commit hashes for dedup.
     committed_batch_hashes: BoundedSet<CommitHash>,
-    /// Buffer of membership updates (Add/Remove) that every member records so a
-    /// future epoch steward can retry them if the current one fails to commit.
-    pub(crate) pending_updates: HashMap<Vec<u8>, PendingUpdate>,
     /// Bounded FIFO of proposal IDs with a locally-observed consensus outcome.
     /// Used by the outcome handler to drop library re-emissions and by the
     /// vote-forwarding path to distinguish benign late peer votes (session was
@@ -123,8 +106,8 @@ pub struct EngineQueues {
     /// a commit lands. Excluded from steward eligibility.
     skipped_stewards: HashSet<Vec<u8>>,
     /// Membership change from the just-merged commit, stashed when the router
-    /// reports the merge for the post-commit reconcile (scoring, join epochs,
-    /// pending-update pruning) to consume.
+    /// reports the merge for the post-commit reconcile (scoring, join epochs)
+    /// to consume.
     pending_membership_delta: Option<MembershipDelta>,
 }
 
@@ -135,7 +118,6 @@ impl EngineQueues {
             voting_proposals: HashMap::new(),
             active_emergency_ids: HashSet::new(),
             committed_batch_hashes: BoundedSet::new(dedup_window),
-            pending_updates: HashMap::new(),
             resolved_proposals: BoundedSet::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
             member_join_epoch: HashMap::new(),
@@ -189,26 +171,22 @@ impl EngineQueues {
         self.pending_membership_delta.take().unwrap_or_default()
     }
 
-    /// Updates queue state from the saved membership delta:
-    /// adds join epochs for new members, removes data for members who left,
-    /// and clears resolved pending or approved entries.
-    /// This happens during commit finalization, before steward-list reconciliation,
-    /// so just-joined members are marked as unsettled for this epoch.
+    /// Updates queue state from the saved membership delta: adds join epochs
+    /// for new members and drops the departed member's approved-removal and
+    /// join-epoch entries. This happens during commit finalization, before
+    /// steward-list reconciliation, so just-joined members are marked as
+    /// unsettled for this epoch.
     pub fn apply_membership_delta_bookkeeping(&mut self, epoch: u64) {
         let Some(delta) = self.pending_membership_delta.clone() else {
             return;
         };
         for member in &delta.removed {
-            self.pending_updates.remove(member);
             self.drop_approved_removals_for(member);
             // Drop the departed member so a later re-join records a fresh join
             // epoch rather than inheriting its earlier one.
             self.member_join_epoch.remove(member);
         }
         for member in &delta.added {
-            // A buffered invite is keyed by the joiner's id, the same id the
-            // seated member now has.
-            self.pending_updates.remove(member);
             // Record this epoch as the member's join epoch — unsettled until the
             // next epoch, and answerable for any epoch a later sync recomputes.
             self.member_join_epoch.insert(member.clone(), epoch);
@@ -232,6 +210,21 @@ impl EngineQueues {
             .filter(|m| self.is_settled(m, current_epoch))
             .cloned()
             .collect()
+    }
+
+    // ─────────────────────────── Urgent (ECP-driven) Commit Target ───────────────────────────
+
+    pub fn urgent_commit_target(&self) -> Option<&[u8]> {
+        self.urgent_commit_target.as_deref()
+    }
+
+    /// Mark the next freeze cycle as urgent and committed-only-for `target`.
+    pub(crate) fn set_urgent_commit_target(&mut self, target: Vec<u8>) {
+        self.urgent_commit_target = Some(target);
+    }
+
+    pub(crate) fn take_urgent_commit_target(&mut self) -> Option<Vec<u8>> {
+        self.urgent_commit_target.take()
     }
 
     // ─────────────────────────── Committed-Hash Dedup ───────────────────────────

@@ -15,7 +15,6 @@ mod signer;
 mod wire;
 
 pub(crate) use outcome_bus::{OutcomeBus, OutcomeReceiver};
-pub(crate) use proposals::CreatorVote;
 pub(crate) use signer::MemberSigner;
 
 #[cfg(test)]

@@ -34,28 +34,14 @@ use crate::{
     protos::de_mls::messages::v1::{ConversationUpdateRequest, conversation_update_request},
 };
 
-/// The creator's intent at proposal submit time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CreatorVote {
-    /// Bundle a YES vote with the proposal in one atomic wire message; no vote
-    /// request reaches the router, since the vote is already cast. For actions
-    /// where submitting already expresses the vote (member add, remove,
-    /// self-executing protocol moves).
-    Yes,
-    /// Broadcast the proposal unbundled and treat the creator like any
-    /// other voter: `VoteRequested` plus the auto-vote timer. For steward
-    /// auto-propose paths, where the steward forwards peer intent without
-    /// endorsing it.
-    Deferred,
-}
-
 impl<St: EngineStore> Engine<St> {
     // ── opening a round ──────────────────────────────────────────────
 
-    /// Open a consensus vote for `request`; [`CreatorVote`] picks the wire
-    /// shape and whether the engine asks for a vote of its own.
+    /// Open a consensus vote for `request`, bundling this member's own YES
+    /// with the proposal in one atomic wire message — no vote request
+    /// reaches the router, since the vote is already cast.
     ///
-    /// Errors when the state machine forbids new proposals (freeze phases,
+    /// Errors when the phase forbids new proposals (freeze phases,
     /// partial freeze during an active emergency). No-ops when a change for
     /// the request's target member is already in flight locally. On success
     /// the proposal is queued as `Outbound::Control` and a consensus-timeout
@@ -66,7 +52,6 @@ impl<St: EngineStore> Engine<St> {
     pub(crate) fn initiate_proposal(
         &mut self,
         request: ConversationUpdateRequest,
-        creator_vote: CreatorVote,
     ) -> Result<(), ConversationError> {
         // One in-flight change per member (local dedup): don't open a second
         // session for a target already being voted on or approved here. A
@@ -88,9 +73,8 @@ impl<St: EngineStore> Engine<St> {
 
         let liveness_criteria_yes = self.config.liveness_criteria_yes;
         let consensus_timeout = self.config.consensus_timeout;
-        let voting_delay = self.config.voting_delay;
 
-        let (proposal_id, unbundled) = self.submit_proposal(
+        let (proposal_id, _) = self.submit_proposal(
             &request,
             ProposalParams {
                 expected_voters,
@@ -108,33 +92,21 @@ impl<St: EngineStore> Engine<St> {
         // before the deadline fires.
         self.register_consensus_timeout(proposal_id, consensus_timeout);
 
-        match creator_vote {
-            CreatorVote::Yes => {
-                // Owner-bundling API, not the vote helper: peers don't have
-                // the proposal yet, so a Vote-only message would be
-                // undeliverable.
-                let scope = self.conversation_id.clone();
-                let now = self.now.as_secs();
-                let proposal =
-                    self.consensus
-                        .cast_vote_and_get_proposal(&scope, proposal_id, true, now)?;
-                info!(
-                    conversation = %self.conversation_id,
-                    proposal_id,
-                    actor = "owner",
-                    "YES vote cast (bundled at submit)"
-                );
-                self.send_control(control_proposal(proposal));
-            }
-            CreatorVote::Deferred => {
-                self.send_control(control_proposal(unbundled));
-                self.emit(Event::VoteRequested {
-                    proposal_id,
-                    request,
-                });
-                self.register_auto_vote(proposal_id, voting_delay, liveness_criteria_yes);
-            }
-        }
+        // The proposal goes out with the filer's YES inside it: whoever files
+        // a change wants it. Peers have no session for it yet, so a separate
+        // Vote message would be dropped on arrival.
+        let scope = self.conversation_id.clone();
+        let now = self.now.as_secs();
+        let proposal = self
+            .consensus
+            .cast_vote_and_get_proposal(&scope, proposal_id, true, now)?;
+        info!(
+            conversation = %self.conversation_id,
+            proposal_id,
+            actor = "owner",
+            "YES vote cast (bundled at submit)"
+        );
+        self.send_control(control_proposal(proposal));
         // store: consensus sessions (WP3g)
 
         Ok(())
@@ -227,9 +199,8 @@ impl<St: EngineStore> Engine<St> {
 
     /// A peer's proposal arrived from the MLS-authenticated `sender`.
     ///
-    /// Before forwarding to consensus, intent is mirrored into local
-    /// buffers: emergency proposals set the partial-freeze flag, membership
-    /// changes are buffered so a future epoch steward can retry them.
+    /// Before forwarding to consensus, intent is mirrored into local state:
+    /// an emergency proposal sets the partial-freeze flag.
     ///
     /// RFC §"Partial Freeze Semantics": while an emergency proposal is
     /// unfinalized, lower-priority proposals from peers MUST be dropped —
@@ -298,8 +269,7 @@ impl<St: EngineStore> Engine<St> {
 
         // Consensus validation runs before any queue mirroring, so a proposal
         // that fails it (expired or otherwise mis-stamped) leaves no local
-        // trace — a crafted timestamp can't arm the partial freeze or park a
-        // pending update.
+        // trace — a crafted timestamp can't arm the partial freeze.
         let scope = self.conversation_id.clone();
         let local_now = self.now.as_secs();
         if let Err(e) = self
@@ -321,23 +291,9 @@ impl<St: EngineStore> Engine<St> {
         // store: consensus sessions (WP3g)
 
         if let Some(req) = decoded.as_ref() {
-            let current_epoch = self.epoch;
-            // In flight the moment it arrives, so the steward's drain won't
-            // re-propose it.
             self.queues.track_voting_proposal(proposal_id, req);
-            match &req.payload {
-                Some(conversation_update_request::Payload::EmergencyCriteria(_)) => {
-                    self.queues.insert_emergency(proposal_id);
-                }
-                Some(conversation_update_request::Payload::MemberInvite(_))
-                | Some(conversation_update_request::Payload::RemoveMember(_)) => {
-                    // RFC §Buffering KeyPackages: hold the change until a
-                    // commit applies it, so a later steward can retry it if
-                    // this round never lands.
-                    self.queues
-                        .insert_pending_update(req.clone(), current_epoch);
-                }
-                _ => {}
+            if let Some(conversation_update_request::Payload::EmergencyCriteria(_)) = &req.payload {
+                self.queues.insert_emergency(proposal_id);
             }
         }
 

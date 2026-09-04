@@ -8,7 +8,6 @@
 use crate::{
     ConversationError,
     engine::{
-        consensus::CreatorVote,
         handle::Engine,
         store::EngineStore,
         types::{MemberId, Output, Phase, Timestamp},
@@ -19,6 +18,10 @@ use crate::{
 impl<St: EngineStore> Engine<St> {
     /// Propose adding `member`, whose key package the router validated.
     /// Proposing is this member's own YES, so no vote request comes back.
+    ///
+    /// A `ConversationBlocked` refusal means a commit round is open; the
+    /// engine keeps no memory of the attempt, so it is the caller's to retry
+    /// once it drains an `Event::PhaseChange(Phase::Working)`.
     pub fn propose_add(
         &mut self,
         now: Timestamp,
@@ -33,26 +36,7 @@ impl<St: EngineStore> Engine<St> {
         if self.is_member(member.as_bytes()) {
             return Err(ConversationError::AlreadyMember);
         }
-        self.initiate_proposal(invite(&member, key_package), CreatorVote::Yes)?;
-        Ok(self.finish())
-    }
-
-    /// A node announced `key_package`: buffer the invite and let the
-    /// responsible steward propose it. Relaying someone else's request, so a
-    /// key package for a member already in the group is dropped rather than
-    /// reported.
-    pub fn sponsor_add(
-        &mut self,
-        now: Timestamp,
-        member: MemberId,
-        key_package: Vec<u8>,
-    ) -> Result<Output, ConversationError> {
-        self.begin(now);
-        if self.is_member(member.as_bytes()) {
-            return Ok(self.finish());
-        }
-        let own = self.own.clone();
-        self.handle_incoming_update_request(&own, invite(&member, key_package))?;
+        self.initiate_proposal(invite(&member, key_package))?;
         Ok(self.finish())
     }
 
@@ -71,10 +55,9 @@ impl<St: EngineStore> Engine<St> {
         if !self.is_member(member.as_bytes()) {
             return Err(ConversationError::MemberGone);
         }
-        self.initiate_proposal(
-            ConversationUpdateRequest::remove_member(member.as_bytes().to_vec()),
-            CreatorVote::Yes,
-        )?;
+        self.initiate_proposal(ConversationUpdateRequest::remove_member(
+            member.as_bytes().to_vec(),
+        ))?;
         Ok(self.finish())
     }
 
@@ -171,7 +154,7 @@ fn invite(member: &MemberId, key_package: Vec<u8>) -> ConversationUpdateRequest 
 mod tests {
     use super::*;
     use crate::engine::{
-        test_support::{creator, id, joiner, member},
+        test_support::{creator, id, joiner},
         types::Outbound,
     };
 
@@ -179,12 +162,27 @@ mod tests {
     #[test]
     fn propose_add_refuses_an_existing_member() {
         let mut engine = joiner();
-        let before = engine.queues.pending_update_count();
         assert!(matches!(
             engine.propose_add(Timestamp::ZERO, id("alice"), b"kp".to_vec()),
             Err(ConversationError::AlreadyMember)
         ));
-        assert_eq!(engine.queues.pending_update_count(), before);
+        assert!(engine.out.outbound.is_empty());
+    }
+
+    /// A round in progress blocks a fresh add: refused, and nothing about
+    /// the engine moves. The engine keeps no memory of the attempt — it is
+    /// the caller's to retry once the round closes.
+    #[test]
+    fn propose_add_refuses_while_freezing() {
+        let mut engine = creator();
+        engine.begin(Timestamp::ZERO);
+        engine.start_freezing();
+        assert!(matches!(
+            engine.propose_add(Timestamp::ZERO, id("dave"), b"kp".to_vec()),
+            Err(ConversationError::ConversationBlocked(_))
+        ));
+        assert_eq!(engine.phase(), Phase::Freezing);
+        assert_eq!(engine.queues.approved_proposals_count(), 0);
         assert!(engine.out.outbound.is_empty());
     }
 
@@ -196,27 +194,6 @@ mod tests {
             engine.propose_remove(Timestamp::ZERO, id("ghost")),
             Err(ConversationError::MemberGone)
         ));
-    }
-
-    /// A sponsored invite lands in the pending-update buffer, where the
-    /// responsible steward picks it up.
-    #[test]
-    fn sponsor_add_buffers_the_invite() {
-        let mut engine = joiner();
-        engine
-            .sponsor_add(Timestamp::ZERO, id("carol"), b"kp".to_vec())
-            .expect("sponsor");
-        assert!(engine.queues.has_pending_update(&member("carol")));
-    }
-
-    /// Sponsoring a seated member is dropped, not reported.
-    #[test]
-    fn sponsor_add_drops_a_seated_member() {
-        let mut engine = joiner();
-        engine
-            .sponsor_add(Timestamp::ZERO, id("alice"), b"kp".to_vec())
-            .expect("sponsor");
-        assert!(!engine.queues.has_pending_update(&member("alice")));
     }
 
     /// A sync request goes out as one control message.

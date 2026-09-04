@@ -1,60 +1,14 @@
-//! Time-driven steward takeovers: the backup drains for the pending-update
-//! buffer and the sync re-send, and the pull side of sync recovery.
+//! Time-driven steward takeovers: the backup drain for the sync re-send, and
+//! the pull side of sync recovery.
 
 use tracing::info;
 
 use crate::{
     ConversationError,
-    engine::{
-        handle::Engine,
-        store::EngineStore,
-        types::{Event, Phase},
-    },
+    engine::{handle::Engine, store::EngineStore, types::Event},
 };
 
 impl<St: EngineStore> Engine<St> {
-    /// Backup-steward takeover for the pending-update buffer: the epoch
-    /// steward drains it as soon as it is responsible; a backup waits out
-    /// `backup_takeover_window` first, so a silent epoch steward can't strand
-    /// a buffered membership change.
-    pub(crate) fn drive_buffered_proposals(&mut self) -> Result<(), ConversationError> {
-        let idle = self.phase != Phase::Working
-            || self.queues.approved_proposals_count() > 0
-            || self.actionable_buffered_updates().is_empty();
-        if idle {
-            self.timing.buffered_propose_anchor = None;
-            return Ok(());
-        }
-
-        // The epoch steward is responsible now — propose without waiting.
-        if self.is_epoch_steward() {
-            self.timing.buffered_propose_anchor = None;
-            return self.drain_buffered_updates();
-        }
-        // Only a steward can take over; a plain member keeps its backup copy.
-        if !self.is_steward() {
-            return Ok(());
-        }
-
-        // Backup steward: give the epoch steward `backup_takeover_window`.
-        let anchor = match self.timing.buffered_propose_anchor {
-            Some(anchor) => anchor,
-            None => {
-                self.timing.buffered_propose_anchor = Some(self.now);
-                return Ok(());
-            }
-        };
-        if self.now < anchor + self.config.backup_takeover_window {
-            return Ok(());
-        }
-        self.timing.buffered_propose_anchor = None;
-        info!(
-            conversation = %self.conversation_id,
-            "backup steward proposing buffered updates: epoch steward silent past backup_takeover_window"
-        );
-        self.drain_buffered_updates()
-    }
-
     /// Backup-steward sync re-send takeover. The epoch steward answers a
     /// `ConversationSyncRequest` reactively; a backup arms `sync_resend_anchor`
     /// and re-sends here only if no `ConversationSync` was observed within

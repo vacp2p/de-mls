@@ -32,15 +32,12 @@ impl<St: EngineStore> Engine<St> {
             .map(|anchor| anchor + self.config.backup_takeover_window)
     }
 
-    /// The backup-takeover anchors, so a backup's turn wakes the router.
+    /// The backup-takeover anchor, so a backup's turn wakes the router.
     fn takeover_deadlines(&self) -> impl Iterator<Item = Timestamp> {
         let window = self.config.backup_takeover_window;
-        [
-            self.timing.buffered_propose_anchor.map(|a| a + window),
-            self.timing.sync_resend_anchor.map(|a| a + window),
-        ]
-        .into_iter()
-        .flatten()
+        [self.timing.sync_resend_anchor.map(|a| a + window)]
+            .into_iter()
+            .flatten()
     }
 
     fn phase_deadline(&self) -> Option<Timestamp> {

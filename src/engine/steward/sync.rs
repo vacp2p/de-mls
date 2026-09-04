@@ -64,7 +64,6 @@ impl<St: EngineStore> Engine<St> {
             retry_round,
             liveness_criteria_yes: self.config.liveness_criteria_yes,
             threshold_peer_score: self.scoring.threshold(),
-            pending_update_max_epochs: self.config.pending_update_max_epochs,
             unsettled_members,
         };
         Ok(Some(control_bytes(
@@ -191,7 +190,6 @@ impl<St: EngineStore> Engine<St> {
         self.apply_score_snapshot(&snapshot);
         // store: scores (WP3g)
         self.config.liveness_criteria_yes = sync.liveness_criteria_yes;
-        self.config.pending_update_max_epochs = sync.pending_update_max_epochs;
         if let Some(timing) = &sync.timing {
             self.config.apply_timing(timing);
         }
