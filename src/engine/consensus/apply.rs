@@ -57,8 +57,10 @@ pub(crate) fn apply_outcome(
     verdict: Verdict,
     request: &ConversationUpdateRequest,
 ) -> ApplyOutcome {
-    // The outcome resolved this proposal, so it leaves the in-flight queue.
-    // On YES the approved queue becomes its record (below).
+    // The session is over, so the proposal leaves the voting index. That
+    // also ends the partial freeze an emergency held, since the freeze is
+    // "an emergency is in the index". On YES the proposal re-enters below
+    // as an approved entry.
     queues.remove_voting_proposal(proposal_id);
 
     if let Some(election) = extract_election_proposal(request).cloned() {
@@ -69,11 +71,6 @@ pub(crate) fn apply_outcome(
 
     let evidence = extract_emergency_evidence(request).cloned();
     let is_emergency = evidence.is_some();
-
-    // The partial freeze lifts with the session, whatever the verdict.
-    if is_emergency {
-        queues.remove_emergency(proposal_id);
-    }
 
     // Queue effects follow from approval alone.
     let approved = verdict == Verdict::Approved;

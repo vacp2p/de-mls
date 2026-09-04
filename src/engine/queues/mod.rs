@@ -1,8 +1,7 @@
 //! Per-conversation protocol-queue state: the `EngineQueues` struct, its
-//! settled-membership bookkeeping, the committed-hash dedup window, and the
-//! urgent-commit target live in [`state`]. The approved/voting proposal
-//! queues and the emergency set live in [`proposals`], extending
-//! `EngineQueues` with their own `impl` block.
+//! settled-membership bookkeeping, and the urgent-commit target live in
+//! [`state`]. The approved/voting proposal queues live in [`proposals`],
+//! extending `EngineQueues` with their own `impl` block.
 
 mod proposals;
 mod state;

@@ -1,5 +1,6 @@
-//! The approved and in-flight (voting) proposal queues, and the active
-//! emergency criteria set that drives RFC §Partial Freeze.
+//! The approved and in-flight (voting) proposal queues, and the partial
+//! freeze that an in-flight emergency criteria proposal drives (RFC §Partial
+//! Freeze).
 
 use std::collections::HashSet;
 
@@ -136,19 +137,11 @@ impl EngineQueues {
 
     // ─────────────────────────── Emergency (RFC §Partial Freeze) ───────────────────────────
 
-    /// Record an active emergency criteria proposal.
-    pub fn insert_emergency(&mut self, proposal_id: ProposalId) {
-        self.active_emergency_ids.insert(proposal_id);
-    }
-
-    /// Mark an emergency criteria proposal as finalized.
-    pub fn remove_emergency(&mut self, proposal_id: ProposalId) {
-        self.active_emergency_ids.remove(&proposal_id);
-    }
-
-    /// Check if any emergency criteria proposal is active (partial freeze).
+    /// An emergency criteria proposal is in flight (partial freeze).
     pub fn has_active_emergency(&self) -> bool {
-        !self.active_emergency_ids.is_empty()
+        self.voting_proposals
+            .values()
+            .any(|m| m.kind.is_emergency())
     }
 
     /// RFC §Partial Freeze: while an emergency is active, proposals of

@@ -1,7 +1,6 @@
-//! The `EngineQueues` struct, its settled-membership bookkeeping, and the
-//! committed-hash dedup window. The bounded dedup set and the in-flight-
-//! proposal metadata type live here too, shared with the sibling modules
-//! that extend `EngineQueues`.
+//! The `EngineQueues` struct and its settled-membership bookkeeping. The
+//! bounded dedup set and the in-flight-proposal metadata type live here too,
+//! shared with the sibling module that extends `EngineQueues`.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -9,11 +8,7 @@ use std::hash::Hash;
 use indexmap::{IndexMap, IndexSet};
 
 use crate::{
-    engine::{
-        proposal_kind::ProposalKind,
-        types::{CommitHash, MembershipDelta},
-        util::member_set,
-    },
+    engine::{proposal_kind::ProposalKind, types::MembershipDelta, util::member_set},
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
@@ -30,8 +25,7 @@ pub(crate) struct VotingMeta {
 }
 
 /// A capacity-bounded, insertion-ordered set: dedups by value and evicts the
-/// oldest entry once full. Backs the commit / welcome dedup windows and the
-/// consensus-outcome cache.
+/// oldest entry once full. Backs the consensus-outcome cache.
 #[derive(Clone, Debug)]
 pub(crate) struct BoundedSet<T: Hash + Eq> {
     items: IndexSet<T>,
@@ -80,11 +74,6 @@ pub struct EngineQueues {
     /// commits YES-voted proposals; it does not re-create them). Holds only
     /// what the queues query; the full request lives in consensus storage.
     pub(crate) voting_proposals: HashMap<ProposalId, VotingMeta>,
-    /// Active emergency criteria proposals not yet finalized by consensus.
-    /// While non-empty, lower-priority proposals MUST be blocked (RFC §Partial Freeze).
-    pub(crate) active_emergency_ids: HashSet<ProposalId>,
-    /// Recent commit hashes for dedup.
-    committed_batch_hashes: BoundedSet<CommitHash>,
     /// Bounded FIFO of proposal IDs with a locally-observed consensus outcome.
     /// Used by the outcome handler to drop library re-emissions and by the
     /// vote-forwarding path to distinguish benign late peer votes (session was
@@ -105,24 +94,23 @@ pub struct EngineQueues {
     /// Stewards a deadlock vote skipped for the current epoch; cleared when
     /// a commit lands. Excluded from steward eligibility.
     skipped_stewards: HashSet<Vec<u8>>,
-    /// Membership change from the just-merged commit, stashed when the router
-    /// reports the merge for the post-commit reconcile (scoring, join epochs)
-    /// to consume.
-    pending_membership_delta: Option<MembershipDelta>,
+}
+
+impl Default for EngineQueues {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EngineQueues {
-    pub fn new(dedup_window: usize) -> Self {
+    pub fn new() -> Self {
         Self {
             approved_proposals: IndexMap::new(),
             voting_proposals: HashMap::new(),
-            active_emergency_ids: HashSet::new(),
-            committed_batch_hashes: BoundedSet::new(dedup_window),
             resolved_proposals: BoundedSet::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
             member_join_epoch: HashMap::new(),
             skipped_stewards: HashSet::new(),
-            pending_membership_delta: None,
         }
     }
 
@@ -159,27 +147,12 @@ impl EngineQueues {
 
     // ─────────────────────────── Settled membership ───────────────────────────
 
-    /// Store the membership change a merged commit made,
-    /// to be processed by the post-commit reconcile step.
-    pub fn store_membership_delta(&mut self, delta: MembershipDelta) {
-        self.pending_membership_delta = Some(delta);
-    }
-
-    /// Take the stashed membership delta, or an empty one when no commit merged
-    /// this cycle.
-    pub fn take_membership_delta(&mut self) -> MembershipDelta {
-        self.pending_membership_delta.take().unwrap_or_default()
-    }
-
-    /// Updates queue state from the saved membership delta: adds join epochs
+    /// Updates queue state from the merged commit's delta: adds join epochs
     /// for new members and drops the departed member's approved-removal and
     /// join-epoch entries. This happens during commit finalization, before
     /// steward-list reconciliation, so just-joined members are marked as
     /// unsettled for this epoch.
-    pub fn apply_membership_delta_bookkeeping(&mut self, epoch: u64) {
-        let Some(delta) = self.pending_membership_delta.clone() else {
-            return;
-        };
+    pub fn apply_membership_delta_bookkeeping(&mut self, epoch: u64, delta: &MembershipDelta) {
         for member in &delta.removed {
             self.drop_approved_removals_for(member);
             // Drop the departed member so a later re-join records a fresh join
@@ -225,19 +198,6 @@ impl EngineQueues {
 
     pub(crate) fn take_urgent_commit_target(&mut self) -> Option<Vec<u8>> {
         self.urgent_commit_target.take()
-    }
-
-    // ─────────────────────────── Committed-Hash Dedup ───────────────────────────
-
-    /// Check if a commit hash has already been committed (in committed history).
-    #[cfg(test)]
-    pub(crate) fn has_committed_hash(&self, commit_hash: &CommitHash) -> bool {
-        self.committed_batch_hashes.contains(commit_hash)
-    }
-
-    /// Record a committed batch's hash for future dedup.
-    pub(crate) fn insert_committed_hash(&mut self, commit_hash: CommitHash) {
-        self.committed_batch_hashes.insert(commit_hash);
     }
 
     // ─────────────────────────── Resolved-Outcome Cache ───────────────────────────

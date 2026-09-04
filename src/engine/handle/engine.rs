@@ -155,7 +155,7 @@ impl<St: EngineStore> Engine<St> {
             own: own.as_bytes().to_vec(),
             epoch,
             members: sorted,
-            queues: EngineQueues::new(config.dedup_window),
+            queues: EngineQueues::new(),
             phase: Phase::Working,
             steward_list,
             scoring,

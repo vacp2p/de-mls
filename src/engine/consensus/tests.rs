@@ -212,7 +212,11 @@ fn vote_from_a_different_sender_is_dropped() {
 #[test]
 fn partial_freeze_drops_lower_priority_proposals() {
     let mut engine = engine();
-    engine.queues.insert_emergency(1);
+    let deadlock_request = ViolationEvidence::deadlock(0)
+        .with_creator(member(1))
+        .into_update_request()
+        .unwrap();
+    engine.queues.track_voting_proposal(1, &deadlock_request);
     let request = ConversationUpdateRequest::remove_member(member(4));
     let proposal = peer_proposal(&member(2), 15, &request, 4);
 
@@ -350,7 +354,7 @@ mod outcome_application {
     #[test]
     fn election_yes_returns_outcome_and_clears_voting() {
         let config = StewardListConfig::new(2, 5).unwrap();
-        let mut queues = EngineQueues::new(10);
+        let mut queues = EngineQueues::new();
         let mems = members(&[1, 2, 3, 4, 5]);
         let sn = mems.len().min(config.sn_max);
         let list = StewardList::generate(10, b"test-conversation", &mems, sn, config, 0).unwrap();
@@ -375,7 +379,7 @@ mod outcome_application {
     #[test]
     fn election_no_or_failed_returns_election_dropped() {
         for verdict in [Verdict::Rejected, Verdict::Failed] {
-            let mut queues = EngineQueues::new(10);
+            let mut queues = EngineQueues::new();
             let request = election_request(vec![member(1), member(2)], 10);
 
             let proposal_id = 43;
@@ -395,7 +399,7 @@ mod outcome_application {
     /// target is already approved.
     #[test]
     fn removal_deduped_when_target_already_pending() {
-        let mut queues = EngineQueues::new(10);
+        let mut queues = EngineQueues::new();
         let target = member(7);
 
         let first_id = 10;
@@ -422,7 +426,7 @@ mod outcome_application {
     /// not retain an outcome we deliberately discarded.
     #[test]
     fn removal_dedup_clears_voting_entry() {
-        let mut queues = EngineQueues::new(10);
+        let mut queues = EngineQueues::new();
         let target = member(7);
 
         let pending_id = 20;
@@ -445,7 +449,7 @@ mod outcome_application {
 
     #[test]
     fn ecp_score_below_threshold_yes_returns_urgent_removal() {
-        let mut queues = EngineQueues::new(10);
+        let mut queues = EngineQueues::new();
         let target = member(7);
 
         let request = score_below_threshold_request(target.clone(), member(1));
@@ -466,7 +470,7 @@ mod outcome_application {
 
     #[test]
     fn ecp_deadlock_yes_returns_deadlock_accepted() {
-        let mut queues = EngineQueues::new(10);
+        let mut queues = EngineQueues::new();
 
         let request = deadlock_request(member(1));
         let result = apply_outcome(&mut queues, 200, Verdict::Approved, &request);
@@ -495,8 +499,8 @@ mod outcome_application {
             ),
         ] {
             for verdict in [Verdict::Rejected, Verdict::Failed] {
-                let mut queues = EngineQueues::new(10);
-                queues.insert_emergency(201);
+                let mut queues = EngineQueues::new();
+                queues.track_voting_proposal(201, &request);
                 let result = apply_outcome(&mut queues, 201, verdict, &request);
 
                 assert!(
@@ -520,9 +524,9 @@ mod outcome_application {
     /// exists to hold the field until the session ends, not to survive it.
     #[test]
     fn approved_emergency_lifts_partial_freeze() {
-        let mut queues = EngineQueues::new(10);
-        queues.insert_emergency(202);
+        let mut queues = EngineQueues::new();
         let request = deadlock_request(member(1));
+        queues.track_voting_proposal(202, &request);
 
         let result = apply_outcome(&mut queues, 202, Verdict::Approved, &request);
 
@@ -534,7 +538,7 @@ mod outcome_application {
     /// ops.
     #[test]
     fn regular_remove_member_enqueues_without_score_ops() {
-        let mut queues = EngineQueues::new(10);
+        let mut queues = EngineQueues::new();
         let request = remove_request(member(7));
 
         let proposal_id = 70;
@@ -551,7 +555,7 @@ mod outcome_application {
     /// into one.
     #[test]
     fn regular_emergency_yes_does_not_queue_remove_member() {
-        let mut queues = EngineQueues::new(10);
+        let mut queues = EngineQueues::new();
 
         let request = ViolationEvidence::broken_commit(member(7), 0, Vec::<u8>::new())
             .with_creator(member(1))
@@ -586,7 +590,7 @@ mod outcome_application {
             )),
         };
 
-        let mut queues = EngineQueues::new(10);
+        let mut queues = EngineQueues::new();
         apply_outcome(&mut queues, 1, Verdict::Approved, &invite(b"kp-a"));
         assert_eq!(queues.approved_proposals_count(), 1);
 

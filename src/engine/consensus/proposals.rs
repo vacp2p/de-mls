@@ -85,9 +85,6 @@ impl<St: EngineStore> Engine<St> {
         )?;
 
         self.queues.track_voting_proposal(proposal_id, &request);
-        if kind.is_emergency() {
-            self.queues.insert_emergency(proposal_id);
-        }
         // Removed again by `handle_consensus_outcome` if an outcome lands
         // before the deadline fires.
         self.register_consensus_timeout(proposal_id, consensus_timeout);
@@ -292,9 +289,6 @@ impl<St: EngineStore> Engine<St> {
 
         if let Some(req) = decoded.as_ref() {
             self.queues.track_voting_proposal(proposal_id, req);
-            if let Some(conversation_update_request::Payload::EmergencyCriteria(_)) = &req.payload {
-                self.queues.insert_emergency(proposal_id);
-            }
         }
 
         if expected_voters > 1 {
