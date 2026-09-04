@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "mls-reference"]
+resolver = "3"
+
 [package]
 name = "de-mls"
 version = "4.0.0"
