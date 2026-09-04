@@ -107,7 +107,7 @@ impl<St: EngineStore> Engine<St> {
         };
 
         self.send_control(control_proposal(proposal));
-        // store: consensus sessions (WP3g)
+        self.dirty.consensus = true;
         Ok(())
     }
 

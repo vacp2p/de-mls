@@ -37,7 +37,7 @@ impl<St: EngineStore> Engine<St> {
             return Err(ConversationError::AlreadyMember);
         }
         self.initiate_proposal(invite(&member, key_package))?;
-        Ok(self.finish())
+        self.finish()
     }
 
     /// Propose removing `member`. The requester's intent is the removal, so
@@ -58,7 +58,7 @@ impl<St: EngineStore> Engine<St> {
         self.initiate_proposal(ConversationUpdateRequest::remove_member(
             member.as_bytes().to_vec(),
         ))?;
-        Ok(self.finish())
+        self.finish()
     }
 
     /// Ask the group to remove `member` because its peer score is too low.
@@ -80,7 +80,7 @@ impl<St: EngineStore> Engine<St> {
     ) -> Result<Output, ConversationError> {
         self.begin(now);
         self.file_score_removal_ecp(member.as_bytes())?;
-        Ok(self.finish())
+        self.finish()
     }
 
     /// Leave the conversation. The engine stays live until a commit merges
@@ -89,7 +89,7 @@ impl<St: EngineStore> Engine<St> {
     pub fn leave(&mut self, now: Timestamp) -> Result<Output, ConversationError> {
         self.begin(now);
         self.initiate_self_leave()?;
-        Ok(self.finish())
+        self.finish()
     }
 
     /// Cast this member's vote on `proposal_id`, replacing the auto-vote that
@@ -108,7 +108,7 @@ impl<St: EngineStore> Engine<St> {
         }
         self.cancel_auto_vote(proposal_id);
         self.cast_local_vote(proposal_id, approve)?;
-        Ok(self.finish())
+        self.finish()
     }
 
     /// Ask a steward for a `ConversationSync`. `tick` asks on its own
@@ -118,7 +118,7 @@ impl<St: EngineStore> Engine<St> {
     pub fn request_sync(&mut self, now: Timestamp) -> Result<Output, ConversationError> {
         self.begin(now);
         self.broadcast_sync_request();
-        Ok(self.finish())
+        self.finish()
     }
 
     /// File the deadlock emergency proposal: on ⌈2n/3⌉ YES the silent epoch
@@ -128,7 +128,7 @@ impl<St: EngineStore> Engine<St> {
     pub fn request_recovery(&mut self, now: Timestamp) -> Result<Output, ConversationError> {
         self.begin(now);
         self.file_deadlock_ecp()?;
-        Ok(self.finish())
+        self.finish()
     }
 
     /// Elect a fresh steward list now, even if the current one still
@@ -137,7 +137,7 @@ impl<St: EngineStore> Engine<St> {
     pub fn propose_election(&mut self, now: Timestamp) -> Result<Output, ConversationError> {
         self.begin(now);
         self.initiate_steward_election()?;
-        Ok(self.finish())
+        self.finish()
     }
 }
 

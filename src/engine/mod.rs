@@ -15,6 +15,7 @@ mod inbound;
 mod phase_timer;
 mod proposal_kind;
 mod queues;
+mod snapshot;
 mod steward;
 mod store;
 #[cfg(test)]

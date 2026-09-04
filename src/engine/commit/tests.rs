@@ -1,19 +1,25 @@
 use std::time::Duration;
 
+use prost::Message;
+
 use super::select::actions_match_voted;
 use crate::{
     Action,
     engine::{
         config::EngineConfig,
         handle::{Engine, PendingMerge},
-        store::InMemoryStore,
+        store::{EngineStore, InMemoryStore, keys},
         test_support::{id, member},
         types::{
             CommitHash, Decision, DecisionFailure, Event, MemberId, Phase, StagedFacts, Timestamp,
         },
     },
-    protos::de_mls::messages::v1::{
-        ConversationUpdateRequest, MemberInvite, RemoveMember, conversation_update_request::Payload,
+    protos::de_mls::{
+        engine::v1::{MetaState, ProposalsState},
+        messages::v1::{
+            ConversationUpdateRequest, MemberInvite, RemoveMember,
+            conversation_update_request::Payload,
+        },
     },
 };
 
@@ -167,7 +173,7 @@ fn the_epoch_stewards_candidate_merges_only_at_window_close() {
 
     e.start_selection();
     e.close_round().unwrap();
-    let out = e.finish();
+    let out = e.finish().unwrap();
     assert!(
         out.decisions
             .iter()
@@ -210,7 +216,7 @@ fn the_own_commit_reported_through_handle_candidate_merges() {
     e.start_selection();
     e.close_round().unwrap();
     assert!(e.pending_merge.as_ref().is_some_and(|m| m.is_local));
-    let out = e.finish();
+    let out = e.finish().unwrap();
     assert!(matches!(
         out.decisions.as_slice(),
         [Decision::Merge { hash: h }] if *h == hash
@@ -234,6 +240,21 @@ fn the_own_commit_reported_through_handle_candidate_merges() {
         e.queues.approved_proposals_count(),
         0,
         "the committed batch leaves the queue"
+    );
+
+    let meta_bytes = e.store().get(keys::META).unwrap().expect("meta written");
+    let meta = MetaState::decode(meta_bytes.as_slice()).unwrap();
+    assert_eq!(meta.snapshot_epoch, 1, "the epoch stamp advanced");
+
+    let proposals_bytes = e
+        .store()
+        .get(keys::PROPOSALS)
+        .unwrap()
+        .expect("proposals written");
+    let proposals = ProposalsState::decode(proposals_bytes.as_slice()).unwrap();
+    assert!(
+        proposals.approved.is_empty(),
+        "the committed batch is not persisted"
     );
 }
 
@@ -295,7 +316,7 @@ fn a_silent_epoch_steward_yields_commit_missing_and_keeps_the_batch() {
     e.begin(at(0));
     let before = e.scoring.score_for(&es).unwrap();
     e.close_round_without_commit().unwrap();
-    let out = e.finish();
+    let out = e.finish().unwrap();
 
     assert!(out.events.iter().any(|ev| matches!(
         ev,
@@ -338,7 +359,7 @@ fn a_mismatching_candidate_is_discarded_and_commit_missing_follows() {
     e.start_selection();
     let before = e.scoring.score_for(&member("alice")).unwrap();
     e.close_round().unwrap();
-    let out = e.finish();
+    let out = e.finish().unwrap();
 
     assert!(
         out.decisions
@@ -390,7 +411,7 @@ fn a_failed_merge_closes_the_round_without_a_commit() {
     .unwrap();
     e.start_selection();
     e.close_round().unwrap();
-    let _ = e.finish();
+    let _ = e.finish().unwrap();
     assert!(e.pending_merge.is_some());
 
     let out = e

@@ -34,7 +34,7 @@ impl<St: EngineStore> Engine<St> {
             Ok(message) => message,
             Err(e) => {
                 self.report_failure("control_decode", &e.into());
-                return Ok(self.finish());
+                return self.finish();
             }
         };
         let sender = sender.as_bytes().to_vec();
@@ -60,13 +60,13 @@ impl<St: EngineStore> Engine<St> {
                     sealed_at_epoch = epoch,
                     "control message carried no payload"
                 );
-                return Ok(self.finish());
+                return self.finish();
             }
         };
         if let (operation, Err(e)) = outcome {
             self.report_failure(operation, &e);
         }
-        Ok(self.finish())
+        self.finish()
     }
 }
 

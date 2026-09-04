@@ -43,7 +43,7 @@ impl<St: EngineStore> Engine<St> {
                 "candidate discarded: stale epoch"
             );
             self.decide(Decision::Discard { hashes: vec![hash] });
-            return Ok(self.finish());
+            return self.finish();
         }
 
         let expected = self.expected_steward();
@@ -58,7 +58,7 @@ impl<St: EngineStore> Engine<St> {
                 facts.sender.as_bytes(),
                 ScoreEvent::MisbehavingCommit,
             )]);
-            return Ok(self.finish());
+            return self.finish();
         }
 
         // The epoch steward's commit opens the round for everyone; a
@@ -76,7 +76,7 @@ impl<St: EngineStore> Engine<St> {
                 "candidate discarded: the epoch steward already sent one this round"
             );
             self.decide(Decision::Discard { hashes: vec![hash] });
-            return Ok(self.finish());
+            return self.finish();
         }
 
         self.round_candidate = Some((hash, facts));
@@ -84,7 +84,7 @@ impl<St: EngineStore> Engine<St> {
             received: 1,
             expected: 1,
         });
-        Ok(self.finish())
+        self.finish()
     }
 
     /// The router merged `hash`; the group is now at `epoch` with `members`.
@@ -113,7 +113,8 @@ impl<St: EngineStore> Engine<St> {
                 self.epoch = epoch;
                 self.members = adopted;
                 self.round_candidate = None;
-                return Ok(self.finish());
+                self.dirty.meta = true;
+                return self.finish();
             }
         };
 
@@ -132,7 +133,7 @@ impl<St: EngineStore> Engine<St> {
             self.cancel_all_auto_votes();
             self.round_candidate = None;
             self.decide(Decision::Leave);
-            return Ok(self.finish());
+            return self.finish();
         }
 
         if let Err(e) = self.steward_list_housekeeping() {
@@ -155,7 +156,7 @@ impl<St: EngineStore> Engine<St> {
         {
             self.report_failure("conversation_sync_broadcast", &e);
         }
-        Ok(self.finish())
+        self.finish()
     }
 
     /// Post-commit queue bookkeeping: stamp join epochs and clear the entries
@@ -169,7 +170,10 @@ impl<St: EngineStore> Engine<St> {
         } else {
             self.queues.drain_approved_proposals();
         }
-        // store: proposals (WP3g)
+        self.dirty.proposals = true;
+        self.dirty.join_epochs = true;
+        self.dirty.skipped_stewards = true;
+        self.dirty.meta = true;
     }
 
     /// Score each newly seated member from scratch and drop the departed, then
@@ -185,7 +189,7 @@ impl<St: EngineStore> Engine<St> {
         for member in &delta.added {
             self.scoring.add_member(member);
         }
-        // store: proposals (WP3g)
+        self.dirty.scores = true;
         if !delta.is_empty() {
             self.emit(Event::MembersChanged {
                 added: delta
@@ -230,6 +234,6 @@ impl<St: EngineStore> Engine<St> {
         if matches!(failure.decision, Decision::Merge { .. }) {
             self.close_round_without_commit()?;
         }
-        Ok(self.finish())
+        self.finish()
     }
 }

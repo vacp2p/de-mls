@@ -71,6 +71,12 @@ impl StewardListService {
         self.config = config;
     }
 
+    /// Install a list read back from the store, bypassing generation: it was
+    /// already validated when it was first installed.
+    pub(crate) fn restore_list(&mut self, list: StewardList) {
+        self.list = Some(list);
+    }
+
     /// Seed the deterministic-sort salt with the conversation id. Every member
     /// of a conversation must use the same salt or their generated/validated
     /// lists diverge on a subset election. The library sets this when it builds

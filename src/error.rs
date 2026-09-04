@@ -47,4 +47,7 @@ pub enum ConversationError {
 
     #[error("Non-MLS proposals found in approved queue (ids: {proposal_ids:?})")]
     UnexpectedNonMlsProposals { proposal_ids: Vec<u32> },
+
+    #[error("Store error: {0}")]
+    Store(String),
 }

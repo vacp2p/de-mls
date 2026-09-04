@@ -46,7 +46,7 @@ impl<St: EngineStore> Engine<St> {
         for member_id in &diff.to_remove {
             self.scoring.remove_member(member_id);
         }
-        // store: scores (WP3g)
+        self.dirty.scores = true;
         Ok(())
     }
 
@@ -86,7 +86,7 @@ impl<St: EngineStore> Engine<St> {
         let sn = self.steward_list.config().compute_list_size(settled.len());
         self.steward_list
             .install_list(current_epoch, &settled, sn, 0)?;
-        // store: steward_list (WP3g)
+        self.dirty.steward_list = true;
         Ok(StewardListReconcile::Settled)
     }
 

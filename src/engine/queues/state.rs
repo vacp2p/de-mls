@@ -135,7 +135,6 @@ impl EngineQueues {
     }
 
     /// Stewards skipped in the current epoch.
-    #[cfg(test)]
     pub fn skipped_stewards(&self) -> &HashSet<Vec<u8>> {
         &self.skipped_stewards
     }

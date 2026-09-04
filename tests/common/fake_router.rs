@@ -125,6 +125,31 @@ impl FakeRouter {
         out
     }
 
+    /// Restart from this router's own store: the group is unaffected (the
+    /// fake bed keeps no separate MLS-side storage to reload), and the
+    /// engine is rebuilt fresh from what it last flushed.
+    pub fn restart(&mut self, now: Timestamp) {
+        let store = self.engine.store().clone();
+        self.restart_with(now, store);
+    }
+
+    /// Restart with `store` in place of this router's own — a deliberately
+    /// stale or empty snapshot, for exercising `Engine::restore`'s recovery
+    /// path. Replaces the engine and drives what `Engine::restore` returns.
+    pub fn restart_with(&mut self, now: Timestamp, store: InMemoryStore) {
+        let (engine, out) = Engine::restore(
+            self.mls.conversation_id(),
+            self.own_id().clone(),
+            self.mls.epoch(),
+            &self.mls.members(),
+            store,
+        )
+        .expect("engine restore");
+        self.engine = engine;
+        self.pending_announcements.clear();
+        self.drive(now, out);
+    }
+
     /// Frames produced since the last call, in order.
     pub fn take_outbox(&mut self) -> Vec<Frame> {
         std::mem::take(&mut self.outbox)
@@ -410,6 +435,24 @@ impl Bed {
 
     pub fn live_nodes(&self) -> Vec<usize> {
         (0..self.nodes.len()).filter(|&i| self.is_live(i)).collect()
+    }
+
+    /// A clone of `node`'s current store, e.g. to hold onto for a later
+    /// deliberately-stale restart.
+    pub fn store_of(&self, node: usize) -> InMemoryStore {
+        self.router(node).engine.store().clone()
+    }
+
+    /// Restart `node`'s engine from its own store.
+    pub fn restart(&mut self, node: usize) {
+        let now = self.now;
+        self.router_mut(node).restart(now);
+    }
+
+    /// Restart `node`'s engine using `store` instead of its own.
+    pub fn restart_with(&mut self, node: usize, store: InMemoryStore) {
+        let now = self.now;
+        self.router_mut(node).restart_with(now, store);
     }
 
     /// Node 0 seats `nodes` with one commit, bypassing the engine's

@@ -35,7 +35,7 @@ impl<St: EngineStore> Engine<St> {
         let result = self.start_freeze_on_inactivity();
         self.report_step("start_freeze_on_inactivity", result);
 
-        Ok(self.finish())
+        self.finish()
     }
 
     /// Report a failed step and carry on.
