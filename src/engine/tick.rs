@@ -124,6 +124,7 @@ mod tests {
     /// every epoch.
     fn engine() -> Engine<InMemoryStore> {
         Engine::<InMemoryStore>::create(
+            at(0),
             "conv",
             id("alice"),
             0,

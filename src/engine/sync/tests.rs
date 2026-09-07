@@ -187,6 +187,7 @@ fn an_unsynced_node_ignores_sync_request_and_arms_nothing() {
 #[test]
 fn a_synced_non_steward_ignores_sync_request_and_arms_nothing() {
     let mut engine = Engine::create(
+        Timestamp::ZERO,
         "conv",
         id("bob"),
         0,
@@ -326,6 +327,7 @@ fn adopting_a_sync_clamps_voting_delay_below_its_timeout() {
         ..EngineConfig::default()
     };
     let mut steward = Engine::create(
+        Timestamp::ZERO,
         "conv",
         id("alice"),
         1,
@@ -346,6 +348,7 @@ fn adopting_a_sync_clamps_voting_delay_below_its_timeout() {
         ..EngineConfig::default()
     };
     let mut engine = Engine::join(
+        Timestamp::ZERO,
         "conv",
         id("bob"),
         1,

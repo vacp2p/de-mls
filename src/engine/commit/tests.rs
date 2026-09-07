@@ -32,6 +32,7 @@ fn at(secs: u64) -> Timestamp {
 fn engine(members: &[&str]) -> Engine<InMemoryStore> {
     let ids: Vec<MemberId> = members.iter().map(|m| id(m)).collect();
     let (engine, _) = Engine::<InMemoryStore>::create(
+        at(0),
         "conv",
         ids[0].clone(),
         0,

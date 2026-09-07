@@ -18,7 +18,9 @@ impl<St: EngineStore> Engine<St> {
     /// member set at `epoch`, `own` included. A single member is a plain
     /// creation; several are a founding group the router seated in one
     /// commit before calling, all of them settled stewards from `epoch`.
+    /// `now` is the router's clock, the one every later call passes.
     pub fn create(
+        now: Timestamp,
         conversation_id: &str,
         own: MemberId,
         epoch: u64,
@@ -30,7 +32,7 @@ impl<St: EngineStore> Engine<St> {
             return Err(ConversationError::EmptyMembersList);
         }
         let mut engine = Self::assemble(conversation_id, own, epoch, members, config, store)?;
-        engine.begin(Timestamp::ZERO);
+        engine.begin(now);
         for member in engine.members.clone() {
             engine.scoring.add_member(&member);
         }
@@ -51,8 +53,10 @@ impl<St: EngineStore> Engine<St> {
     /// Start a conversation this member joined from a welcome. The welcome
     /// carries nothing but the group state: the engine starts in `Syncing`,
     /// asks a steward for a `ConversationSync` in the returned `Output`, and
-    /// adopts the answer.
+    /// adopts the answer. `now` is the router's clock, the one every later
+    /// call passes.
     pub fn join(
+        now: Timestamp,
         conversation_id: &str,
         own: MemberId,
         epoch: u64,
@@ -61,7 +65,7 @@ impl<St: EngineStore> Engine<St> {
         store: St,
     ) -> Result<(Self, Output), ConversationError> {
         let mut engine = Self::assemble(conversation_id, own, epoch, members, config, store)?;
-        engine.begin(Timestamp::ZERO);
+        engine.begin(now);
         // A joiner holds no steward list: ask for the sync in this very
         // `Output` and report the answer turns as its wakeup.
         let syncing = engine.start_syncing();
@@ -77,8 +81,10 @@ impl<St: EngineStore> Engine<St> {
     /// never written starts the engine as [`Self::join`] does. A snapshot
     /// written at another epoch than the group's is stale: scores and
     /// config are kept, everything else is dropped, and the output carries
-    /// a sync request.
+    /// a sync request. `now` is the router's clock, the one every later
+    /// call passes.
     pub fn restore(
+        now: Timestamp,
         conversation_id: &str,
         own: MemberId,
         epoch: u64,
@@ -87,6 +93,7 @@ impl<St: EngineStore> Engine<St> {
     ) -> Result<(Self, Output), ConversationError> {
         let Some((config, snapshot_epoch)) = Self::load_config(&store)? else {
             return Self::join(
+                now,
                 conversation_id,
                 own,
                 epoch,
@@ -96,7 +103,7 @@ impl<St: EngineStore> Engine<St> {
             );
         };
         let mut engine = Self::assemble(conversation_id, own, epoch, members, config, store)?;
-        engine.begin(Timestamp::ZERO);
+        engine.begin(now);
         if let Some(bytes) = Self::read_key(&engine.store, keys::SCORES)? {
             engine.restore_scores(&bytes)?;
         }
@@ -141,6 +148,8 @@ impl<St: EngineStore> Engine<St> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::{
         ScoreEvent, ScoreOp,
@@ -152,11 +161,16 @@ mod tests {
         protos::de_mls::messages::v1::ConversationUpdateRequest,
     };
 
+    fn at(secs: u64) -> Timestamp {
+        Timestamp::from_duration_since_epoch(Duration::from_secs(secs))
+    }
+
     /// A store that was never written starts the engine unsynced, exactly
     /// as `join` does, with no error.
     #[test]
     fn restore_without_a_snapshot_joins() {
         let (engine, out) = Engine::restore(
+            Timestamp::ZERO,
             "conv",
             id("alice"),
             0,
@@ -193,6 +207,7 @@ mod tests {
     fn restore_with_a_stale_snapshot_keeps_scores_and_asks_for_sync() {
         let members = [id("alice"), id("bob")];
         let (mut engine, _) = Engine::create(
+            Timestamp::ZERO,
             "conv",
             id("alice"),
             1,
@@ -201,7 +216,7 @@ mod tests {
             InMemoryStore::default(),
         )
         .expect("create");
-        engine.begin(Timestamp::ZERO);
+        engine.begin(at(0));
         engine.apply_score_ops(&[ScoreOp {
             member_id: member("bob"),
             event: ScoreEvent::SuccessfulCommit,
@@ -215,7 +230,8 @@ mod tests {
 
         let store = engine.store().clone();
         let (restored, out) =
-            Engine::restore("conv", id("alice"), 3, &members, store).expect("restore");
+            Engine::restore(Timestamp::ZERO, "conv", id("alice"), 3, &members, store)
+                .expect("restore");
 
         assert_eq!(restored.scoring.score_for(&member("bob")), bob_score);
         assert!(restored.steward_list.current_list().is_none());
@@ -246,6 +262,7 @@ mod tests {
     #[test]
     fn a_joiner_asks_for_a_sync_at_join_and_reports_once() {
         let (mut engine, out) = Engine::join(
+            at(1_000),
             "conv",
             id("bob"),
             1,
@@ -266,18 +283,59 @@ mod tests {
         );
         assert_eq!(out.wakeup, Some(turns));
 
-        let out = engine.tick(Timestamp::ZERO).expect("tick");
+        let out = engine.tick(at(1_000)).expect("tick");
         assert!(out.outbound.is_empty());
         assert_eq!(engine.phase(), Phase::Syncing);
 
-        let out = engine.tick(Timestamp::ZERO + turns).expect("tick");
+        let out = engine.tick(at(1_000) + turns).expect("tick");
         assert!(out.outbound.is_empty());
         assert!(out.events.contains(&Event::SyncUnanswered));
         assert_eq!(engine.phase(), Phase::Syncing);
 
-        let out = engine.tick(Timestamp::ZERO + turns * 2).expect("tick");
+        let out = engine.tick(at(1_000) + turns * 2).expect("tick");
         assert!(out.outbound.is_empty());
         assert!(!out.events.contains(&Event::SyncUnanswered));
         assert_eq!(engine.phase(), Phase::Syncing);
+    }
+
+    /// A responsible proposer restarting into an exhausted list files the
+    /// election from the restart, on the restart's clock.
+    #[test]
+    fn restore_with_an_exhausted_list_files_the_election() {
+        let members = [id("alice"), id("bob"), id("carol"), id("dave")];
+        let (mut engine, _) = Engine::create(
+            at(0),
+            "conv",
+            id("alice"),
+            2,
+            &members,
+            EngineConfig::default(),
+            InMemoryStore::default(),
+        )
+        .expect("create");
+        // The list installed at creation has `sn_max` (2) members and covers
+        // epochs 2-3; epoch 4 runs it out.
+        engine.epoch = 4;
+        engine.dirty = Dirty::ALL;
+        engine.flush().expect("flush");
+
+        let store = engine.store().clone();
+        let (restored, out) =
+            Engine::restore(at(100), "conv", id("alice"), 4, &members, store).expect("restore");
+
+        assert_eq!(restored.phase(), Phase::Syncing);
+        assert!(
+            out.events
+                .iter()
+                .any(|e| matches!(e, Event::PhaseChange(Phase::Syncing)))
+        );
+        assert_eq!(
+            out.outbound
+                .iter()
+                .filter(|o| matches!(o, Outbound::Control(_)))
+                .count(),
+            1,
+            "alice is the first eligible member of the exhausted list, so files the election"
+        );
     }
 }
