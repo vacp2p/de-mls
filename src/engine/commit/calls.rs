@@ -16,8 +16,8 @@ use crate::{
         handle::Engine,
         store::EngineStore,
         types::{
-            CommitHash, Decision, DecisionFailure, Event, MemberId, MembershipDelta, Output, Phase,
-            StagedFacts, Timestamp,
+            CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId,
+            MembershipDelta, Output, Phase, StagedFacts, Timestamp,
         },
     },
     scoring_member_diff,
@@ -66,6 +66,10 @@ impl<St: EngineStore> Engine<St> {
                 facts.sender.as_bytes(),
                 ScoreEvent::MisbehavingCommit,
             )]);
+            self.emit(Event::CandidateRejected {
+                sender: facts.sender.clone(),
+                reason: CandidateRejection::NotEpochSteward,
+            });
             return self.finish();
         }
 

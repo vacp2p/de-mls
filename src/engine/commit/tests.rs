@@ -11,7 +11,8 @@ use crate::{
         store::{EngineStore, InMemoryStore, keys},
         test_support::{id, joiner, member},
         types::{
-            CommitHash, Decision, DecisionFailure, Event, MemberId, Phase, StagedFacts, Timestamp,
+            CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId, Phase,
+            StagedFacts, Timestamp,
         },
     },
     protos::de_mls::{
@@ -116,8 +117,9 @@ fn a_stale_epoch_candidate_is_discarded_without_a_score() {
     assert_eq!(before, after, "staleness alone scores nothing");
 }
 
-/// A candidate from anyone but the epoch steward is discarded on sight and
-/// its sender scored `MisbehavingCommit`, whatever it carries.
+/// A candidate from anyone but the epoch steward is discarded on sight,
+/// its sender scored `MisbehavingCommit`, and reported through
+/// `Event::CandidateRejected` so the router has a cue to `request_sync`.
 #[test]
 fn a_non_epoch_steward_candidate_is_discarded_and_scored() {
     let mut e = engine(&["alice", "bob", "carol"]);
@@ -148,6 +150,10 @@ fn a_non_epoch_steward_candidate_is_discarded_and_scored() {
     );
     let after = e.scoring.score_for(&member(impostor)).unwrap();
     assert!(after < before, "the impostor is penalised");
+    assert!(out.events.contains(&Event::CandidateRejected {
+        sender: id(impostor),
+        reason: CandidateRejection::NotEpochSteward,
+    }));
 }
 
 /// The voted set and the commit are compared as deduplicated sets: two
@@ -401,8 +407,9 @@ fn a_silent_epoch_steward_yields_commit_missing_and_keeps_the_batch() {
 }
 
 /// A candidate whose actions don't match the voted set is discarded and its
-/// sender scored `BrokenMlsProposal`, and the round then reports the same
-/// miss it would for an absent candidate.
+/// sender scored `BrokenMlsProposal`, reported through
+/// `Event::CandidateRejected`, and the round then reports the same miss it
+/// would for an absent candidate.
 #[test]
 fn a_mismatching_candidate_is_discarded_and_commit_missing_follows() {
     let mut e = engine(&["alice"]);
@@ -439,6 +446,10 @@ fn a_mismatching_candidate_is_discarded_and_commit_missing_follows() {
         ev,
         Event::CommitMissing { steward, .. } if steward == &Some(id("alice"))
     )));
+    assert!(out.events.contains(&Event::CandidateRejected {
+        sender: id("alice"),
+        reason: CandidateRejection::ActionsMismatch,
+    }));
     let after = e.scoring.score_for(&member("alice")).unwrap();
     assert!(after < before, "the sender is penalised for the mismatch");
     assert_eq!(e.phase(), Phase::Working);

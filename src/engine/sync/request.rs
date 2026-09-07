@@ -26,13 +26,9 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// Report the miss: both answer turns of the request this node sent
-    /// passed with no sync adopted. Asking again is the router's
-    /// (`Engine::request_sync`). Outside `Syncing` nothing is awaited.
+    /// passed with no valid answer. Asking again is the router's
+    /// (`Engine::request_sync`).
     pub(crate) fn drive_sync_request(&mut self) {
-        if self.is_synced() {
-            self.timing.sync_deadline = None;
-            return;
-        }
         if let Some(until) = self.timing.sync_deadline
             && self.now >= until
         {

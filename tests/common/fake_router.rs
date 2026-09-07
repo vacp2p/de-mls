@@ -36,7 +36,7 @@ pub struct FakeRouter {
     pending_announcements: Vec<(MemberId, Vec<u8>)>,
     /// Candidates the router holds because `handle_candidate` refused with
     /// `ConversationBlocked` (the engine was `Syncing`) — retried the same
-    /// way as `pending_announcements`, rule 7e.
+    /// way as `pending_announcements`.
     held_candidates: Vec<(CommitHash, StagedFacts)>,
 }
 
@@ -103,7 +103,7 @@ impl FakeRouter {
         self.mls.own_id()
     }
 
-    /// Announce a key package for `member` (router contract rule 7b): hold
+    /// Announce a key package for `member`, the router's job: hold
     /// it and propose it right away. A `ConversationBlocked` refusal (a
     /// commit round is open) keeps it parked until this router drains
     /// `Event::PhaseChange(Phase::Working)`.
@@ -132,7 +132,7 @@ impl FakeRouter {
         out
     }
 
-    /// `handle_candidate` for every held candidate (rule 7e); one refused
+    /// `handle_candidate` for every held candidate; one refused
     /// again because the engine is still `Syncing` stays held.
     fn retry_held_candidates(&mut self, now: Timestamp) -> Output {
         let mut out = Output::default();
