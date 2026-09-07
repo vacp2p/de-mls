@@ -5,8 +5,8 @@ use std::{collections::HashMap, time::Duration};
 
 use de_mls::EngineConfig;
 use de_mls::engine::{
-    CommitHash, Decision, DecisionFailure, Engine, Event, InMemoryStore, MemberId, Outbound,
-    Output, Phase, StagedFacts, Timestamp,
+    Action, CommitHash, Decision, DecisionFailure, Engine, Event, InMemoryStore, MemberId,
+    Outbound, Output, Phase, StagedFacts, Timestamp,
 };
 
 use crate::common::{
@@ -364,6 +364,16 @@ impl FakeRouter {
             snapshot: draft.snapshot,
         }));
     }
+
+    /// Broadcast a commit this router is not the epoch steward for: build it
+    /// on the group, push the raw bytes, then clear it as pending so this
+    /// router's own state is unaffected. Never reported to its own engine —
+    /// only peers that receive the frame see it, and discard it.
+    pub fn broadcast_foreign_commit(&mut self, actions: &[Action]) {
+        let built = self.mls.build_commit(actions);
+        self.outbox.push(Frame::Commit(built.commit));
+        self.mls.clear_pending();
+    }
 }
 
 /// A node slot in the bed: live once it has a router.
@@ -583,5 +593,58 @@ impl Bed {
             .map(|&i| self.router(i).mls.members())
             .collect();
         sets.windows(2).all(|w| w[0] == w[1])
+    }
+
+    /// The named nodes share epoch, authenticator and member set. Unlike
+    /// `converged`/`membership_agrees`, which compare every seated node
+    /// (muted or departed included), this lets a scenario with a muted or
+    /// removed node name explicitly which live nodes are expected to agree.
+    pub fn agree_among(&self, nodes: &[usize]) -> bool {
+        let epochs: Vec<u64> = nodes.iter().map(|&i| self.router(i).mls.epoch()).collect();
+        let auths: Vec<[u8; 32]> = nodes
+            .iter()
+            .map(|&i| self.router(i).mls.authenticator())
+            .collect();
+        let members: Vec<Vec<MemberId>> = nodes
+            .iter()
+            .map(|&i| self.router(i).mls.members())
+            .collect();
+        epochs.windows(2).all(|w| w[0] == w[1])
+            && auths.windows(2).all(|w| w[0] == w[1])
+            && members.windows(2).all(|w| w[0] == w[1])
+    }
+
+    /// The live node whose engine reports itself the epoch steward. Panics
+    /// if none does, or more than one does.
+    pub fn epoch_steward(&self) -> usize {
+        let stewards: Vec<usize> = self
+            .live_nodes()
+            .into_iter()
+            .filter(|&i| self.router(i).engine.is_epoch_steward())
+            .collect();
+        match stewards.as_slice() {
+            [only] => *only,
+            [] => panic!("no live node is the epoch steward"),
+            many => panic!("more than one epoch steward: {many:?}"),
+        }
+    }
+
+    /// Seat a fresh member: add it pending, announce it from `proposer`,
+    /// and wait until it is live, epochs agree, and it reports itself
+    /// synced. Returns the node index. For scenarios that need an
+    /// established group to build on, not a replacement for `seed`.
+    pub fn seat(&mut self, proposer: usize, name: &str) -> usize {
+        let node = self.add_pending(name);
+        let key_package = self.key_package_of(node);
+        let id = self.nodes[node].own.clone();
+        let now = self.now;
+        self.router_mut(proposer).announce(now, id, key_package);
+        self.process_until(&format!("{name} seated"), |b| {
+            b.is_live(node) && b.epochs_agree()
+        });
+        self.process_until(&format!("{name} synced"), |b| {
+            b.router(node).engine.is_synced()
+        });
+        node
     }
 }
