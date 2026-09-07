@@ -1662,9 +1662,9 @@ dependencies = [
 
 [[package]]
 name = "hashgraph-like-consensus"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cba53b85cc33f28262bbd9c258bbbf3f3b66501ef7cc2b7137712215fdf7cbf5"
+checksum = "bc3bd0b5b88d149deaf66734a210bba76c60f03812c3172367116ae139983b92"
 dependencies = [
  "alloy",
  "alloy-signer",

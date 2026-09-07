@@ -25,7 +25,7 @@ tracing = "0.1.44"
 indexmap = "2.14.0"
 prost = "0.14"
 
-hashgraph-like-consensus = "0.6.0"
+hashgraph-like-consensus = "0.7.0"
 
 [build-dependencies]
 prost-build = "0.14"
