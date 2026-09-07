@@ -1,6 +1,6 @@
-//! `ConversationSync` bootstrap: building and sharing the sync a bootstrap-
-//! less joiner or a degraded member adopts, its validation ladder, and the
-//! `ConversationSyncRequest` re-send.
+//! Validating and adopting a `ConversationSync`: the recomputation that
+//! verifies a steward's broadcast, and applying the list, timing and peer
+//! scores it carries.
 
 use tracing::{info, warn};
 
@@ -8,86 +8,10 @@ use crate::{
     ConversationError, DEFAULT_PEER_SCORE, ScoreSnapshot, ScoringConfig, StewardList,
     StewardListConfig,
     engine::{handle::Engine, store::EngineStore, types::Event, util::member_set},
-    protos::de_mls::messages::v1::{
-        ControlMessage, ConversationSync, ConversationSyncRequest, PeerScore, TimingConfig,
-        control_message,
-    },
+    protos::de_mls::messages::v1::{ConversationSync, TimingConfig},
 };
 
 impl<St: EngineStore> Engine<St> {
-    /// The `ConversationSync` control bytes that carry the current steward
-    /// list, protocol flags, timing and peer scores. `None` when there is no
-    /// list yet; the caller owns delivery.
-    pub(crate) fn build_bootstrap(&mut self) -> Result<Option<Vec<u8>>, ConversationError> {
-        // Sparse snapshot — only members whose score has diverged from
-        // `default_score`, which rides along in `default_peer_score` so the
-        // joiner adopts the same pivot and reads the omissions as we meant
-        // them. Saves wire size at scale.
-        let peer_scores: Vec<PeerScore> = self
-            .scoring
-            .snapshot()
-            .diverged
-            .into_iter()
-            .map(|(member_id, score)| PeerScore { member_id, score })
-            .collect();
-
-        let Some(list) = self.steward_list.current_list() else {
-            return Ok(None);
-        };
-        let steward_members = list.members().to_vec();
-        let election_epoch = list.election_epoch();
-        let sn_min = list.config().sn_min as u32;
-        let sn_max = list.config().sn_max as u32;
-        // `retry_round` is the fixed seed that made this list, frozen on the
-        // list rather than the next dynamic attempt. Joiners use it to
-        // recompute the list order.
-        let retry_round = list.retry_round();
-
-        // Members that weren't settled at election time. A joiner uses them to
-        // reconstruct the candidate pool and re-derive the list itself.
-        let unsettled_members: Vec<Vec<u8>> = self
-            .members
-            .iter()
-            .filter(|m| !self.queues.is_settled(m, election_epoch))
-            .cloned()
-            .collect();
-
-        let sync = ConversationSync {
-            steward_members,
-            election_epoch,
-            sn_min,
-            sn_max,
-            peer_scores,
-            default_peer_score: self.scoring.default_score(),
-            timing: Some(TimingConfig::from(&self.config)),
-            retry_round,
-            liveness_criteria_yes: self.config.liveness_criteria_yes,
-            unsettled_members,
-        };
-        Ok(Some(control_bytes(
-            control_message::Payload::ConversationSync(sync),
-        )))
-    }
-
-    /// Broadcast the current `ConversationSync` so a bootstrap-less joiner can
-    /// adopt it. No-op while there is no list to share.
-    pub(crate) fn share_conversation_sync(&mut self) -> Result<(), ConversationError> {
-        if let Some(bytes) = self.build_bootstrap()? {
-            self.send_control(bytes);
-        }
-        Ok(())
-    }
-
-    /// Broadcast a `ConversationSyncRequest` so a steward re-sends its
-    /// `ConversationSync`. The message carries no fields: the router hands the
-    /// authenticated sender over, and that is the requester.
-    pub(crate) fn broadcast_sync_request(&mut self) {
-        let bytes = control_bytes(control_message::Payload::ConversationSyncRequest(
-            ConversationSyncRequest {},
-        ));
-        self.send_control(bytes);
-    }
-
     /// Adopt a steward's `ConversationSync` when we hold no steward list, or
     /// one that is exhausted at the current epoch. Reconstructs the candidate
     /// pool (members minus the carried unsettled set), re-derives the steward
@@ -115,8 +39,10 @@ impl<St: EngineStore> Engine<St> {
 
         let stewards = sync.steward_members.len();
         self.adopt_conversation_sync(&sync)?;
-        self.timing.unanswered_sync_rounds = 0;
         self.emit(Event::SyncApplied);
+        if let Some(working) = self.leave_syncing() {
+            self.emit_phase(Some(working));
+        }
         info!(
             conversation = %self.conversation_id,
             election_epoch = sync.election_epoch,
@@ -125,31 +51,6 @@ impl<St: EngineStore> Engine<St> {
             timing = sync.timing.is_some(),
             "conversation sync applied"
         );
-        Ok(())
-    }
-
-    /// Answer a sync re-send request. The epoch steward responds now; a backup
-    /// arms `sync_resend_anchor` and takes over from `tick` only if the epoch
-    /// steward stays silent. The list-present guard in
-    /// [`Self::on_conversation_sync`] means only the degraded requester adopts
-    /// the broadcast.
-    pub(crate) fn on_conversation_sync_request(
-        &mut self,
-        requester: &[u8],
-    ) -> Result<(), ConversationError> {
-        if self.is_epoch_steward() {
-            self.timing.sync_resend_anchor = None;
-            tracing::debug!(
-                conversation = %self.conversation_id,
-                requester = ?requester,
-                "epoch steward re-sending conversation sync"
-            );
-            return self.share_conversation_sync();
-        }
-        // A backup arms the takeover timer; a plain member can't answer.
-        if self.is_steward() && self.timing.sync_resend_anchor.is_none() {
-            self.timing.sync_resend_anchor = Some(self.now);
-        }
         Ok(())
     }
 
@@ -181,7 +82,7 @@ impl<St: EngineStore> Engine<St> {
                 .map(|ps| (ps.member_id.clone(), ps.score))
                 .collect(),
         };
-        // Record the bootstrap scores, reporting how far each member had
+        // Record the synced scores, reporting how far each member had
         // already diverged from the default this node would have assumed.
         self.apply_score_snapshot(&snapshot);
         self.config.liveness_criteria_yes = sync.liveness_criteria_yes;
@@ -204,13 +105,6 @@ impl<St: EngineStore> Engine<St> {
         self.dirty.meta = true;
         Ok(())
     }
-}
-
-/// Encode one `ControlMessage` payload for the router to seal.
-pub(crate) fn control_bytes(payload: control_message::Payload) -> Vec<u8> {
-    prost::Message::encode_to_vec(&ControlMessage {
-        payload: Some(payload),
-    })
 }
 
 /// Returns `true` when the sync is acceptable for application. Logs the

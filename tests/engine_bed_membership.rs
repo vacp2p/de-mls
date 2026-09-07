@@ -1,11 +1,11 @@
-//! Membership changes on the fake bed: a voted removal, a self-leave, and a
-//! rejected invite that never lands.
+//! Membership changes on the fake bed: a voted removal, a self-leave, a
+//! rejected invite that never lands, and steward-list exhaustion by growth.
 
 mod common;
 
 use common::fake_router::Bed;
 use common::fast_config;
-use de_mls::engine::{Decision, Event, Verdict};
+use de_mls::engine::{Decision, Event, Phase, Verdict};
 
 #[test]
 fn removal_is_voted_and_the_removed_member_leaves() {
@@ -111,4 +111,33 @@ fn rejected_invite_never_lands() {
     assert!(!bed.is_live(dave));
     assert_eq!(bed.router(0).mls.epoch(), epoch_before);
     assert!(bed.agree_among(&[0, bob, carol]));
+}
+
+// Backlog 32: at four settled members the steward list (`sn_max` == 2)
+// exhausts into a genuine subset. Every node enters `Syncing`, alice files
+// the election, it lands, everyone returns to `Working`, and a fifth
+// member seats normally afterward.
+#[test]
+fn five_members_keep_committing() {
+    let mut bed = Bed::new("conv", "alice", fast_config());
+    bed.seat(0, "bob");
+    bed.seat(0, "carol");
+    bed.seat(0, "dave");
+    bed.seat(0, "eve");
+    bed.seat(0, "frank");
+
+    assert!(bed.converged() && bed.membership_agrees());
+    assert_eq!(bed.router(0).mls.members().len(), 6);
+    assert!(
+        bed.router(0)
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::PhaseChange(Phase::Syncing))),
+        "the list ran out and an election replaced it"
+    );
+    assert!(
+        bed.live_nodes()
+            .iter()
+            .all(|&n| bed.router(n).engine.phase() == Phase::Working)
+    );
 }

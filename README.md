@@ -64,9 +64,9 @@ against your own removal threshold, or watch the trend. Act on it by calling
 votes on — any member may raise one, and on YES it commits immediately
 instead of waiting out the inactivity timer.
 
-Scores are per-node: they travel once, in a joiner's `ConversationSync`
-bootstrap, and after that each member scores what it observes, so two
-members can hold different scores for the same peer.
+Scores are per-node: they travel once, in the `ConversationSync` a
+joiner asks for, and after that each member scores what it observes, so
+two members can hold different scores for the same peer.
 
 ## Steward list
 

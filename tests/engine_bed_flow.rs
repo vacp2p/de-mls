@@ -1,5 +1,5 @@
 //! The engine end to end on the fake bed: a proposal is voted, the epoch
-//! steward builds, the round closes, the joiner is welcomed and bootstrapped,
+//! steward builds, the round closes, the joiner is welcomed and synced,
 //! and a second add driven by a non-steward converges the whole group.
 
 mod common;

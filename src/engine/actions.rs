@@ -111,13 +111,20 @@ impl<St: EngineStore> Engine<St> {
         self.finish()
     }
 
-    /// Ask a steward for a `ConversationSync`. `tick` asks on its own
-    /// whenever the local steward list is missing or exhausted, paced at
-    /// `backup_takeover_window`; [`Engine::is_synced`] turns true once a sync
-    /// is adopted.
+    /// Request a `ConversationSync` from a steward, triggering a single request
+    /// with two possible response windows.
+    /// The engine automatically performs this request during `join`
+    /// and after detecting a stale restart, emitting `Event::SyncUnanswered`
+    /// if neither response window produces a sync.
+    ///
+    /// Any additional sync request should use this method per router contract rule.
+    /// A successful sync sets [`Engine::is_synced`] to true. A no-op outside
+    /// `Syncing`: a list covers the epoch and nothing newer would be adopted.
     pub fn request_sync(&mut self, now: Timestamp) -> Result<Output, ConversationError> {
         self.begin(now);
-        self.broadcast_sync_request();
+        if self.phase == Phase::Syncing {
+            self.broadcast_sync_request();
+        }
         self.finish()
     }
 
@@ -161,7 +168,7 @@ mod tests {
     /// Adding someone already seated is refused, and nothing moves.
     #[test]
     fn propose_add_refuses_an_existing_member() {
-        let mut engine = joiner();
+        let mut engine = creator();
         assert!(matches!(
             engine.propose_add(Timestamp::ZERO, id("alice"), b"kp".to_vec()),
             Err(ConversationError::AlreadyMember)
@@ -189,7 +196,7 @@ mod tests {
     /// Removing someone who isn't here is refused.
     #[test]
     fn propose_remove_refuses_a_stranger() {
-        let mut engine = joiner();
+        let mut engine = creator();
         assert!(matches!(
             engine.propose_remove(Timestamp::ZERO, id("ghost")),
             Err(ConversationError::MemberGone)
@@ -202,6 +209,16 @@ mod tests {
         let mut engine = joiner();
         let out = engine.request_sync(Timestamp::ZERO).expect("request sync");
         assert_eq!(out.outbound.len(), 1);
+    }
+
+    /// A synced node has nothing to ask: the call sends nothing and arms
+    /// nothing.
+    #[test]
+    fn request_sync_is_a_noop_while_synced() {
+        let mut engine = creator();
+        let out = engine.request_sync(Timestamp::ZERO).expect("request sync");
+        assert!(out.outbound.is_empty());
+        assert!(out.wakeup.is_none());
     }
 
     /// Scoring an unknown member has nothing to file.

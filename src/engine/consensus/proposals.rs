@@ -453,11 +453,14 @@ impl<St: EngineStore> Engine<St> {
     // ── private ──────────────────────────────────────────────────────
 
     /// Whether this proposal can be opened right now, and how many voters it
-    /// expects. Nothing opens while a round is running; an active emergency
-    /// also blocks lower-priority proposals.
+    /// expects. Nothing opens outside `Working`, except the steward election
+    /// that ends `Syncing`; an active emergency also blocks lower-priority
+    /// proposals.
     fn check_proposal_allowed(&self, kind: ProposalKind) -> Result<u32, ConversationError> {
         let state = self.phase;
-        if state != Phase::Working {
+        let allowed_here =
+            state == Phase::Working || (state == Phase::Syncing && kind.is_steward_election());
+        if !allowed_here {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
         if self.queues.partial_freeze_blocks(kind) {

@@ -27,9 +27,7 @@ impl<St: EngineStore> Engine<St> {
     }
 
     fn sync_request_deadline(&self) -> Option<Timestamp> {
-        self.timing
-            .sync_request_anchor
-            .map(|anchor| anchor + self.config.backup_takeover_window)
+        self.timing.sync_deadline
     }
 
     /// The backup-takeover anchor, so a backup's turn wakes the router.

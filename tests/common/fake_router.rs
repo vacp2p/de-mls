@@ -34,6 +34,10 @@ pub struct FakeRouter {
     /// `ConversationBlocked` — retried once an `Event::PhaseChange(Phase::Working)`
     /// is drained. The engine keeps no memory of these; the router does.
     pending_announcements: Vec<(MemberId, Vec<u8>)>,
+    /// Candidates the router holds because `handle_candidate` refused with
+    /// `ConversationBlocked` (the engine was `Syncing`) — retried the same
+    /// way as `pending_announcements`, rule 7e.
+    held_candidates: Vec<(CommitHash, StagedFacts)>,
 }
 
 impl FakeRouter {
@@ -89,6 +93,7 @@ impl FakeRouter {
             next_wakeup: None,
             left: false,
             pending_announcements: Vec::new(),
+            held_candidates: Vec::new(),
         }
     }
 
@@ -120,6 +125,25 @@ impl FakeRouter {
                     self.pending_announcements.push((member, key_package));
                 }
                 Err(e) => panic!("announce: propose_add failed: {e}"),
+            }
+        }
+        out
+    }
+
+    /// `handle_candidate` for every held candidate (rule 7e); one refused
+    /// again because the engine is still `Syncing` stays held.
+    fn retry_held_candidates(&mut self, now: Timestamp) -> Output {
+        let mut out = Output::default();
+        for (hash, facts) in std::mem::take(&mut self.held_candidates) {
+            match self.engine.handle_candidate(now, hash, facts.clone()) {
+                Ok(o) => out.merge(o),
+                Err(de_mls::ConversationError::ConversationBlocked(_)) => {
+                    self.held_candidates.push((hash, facts));
+                }
+                Err(e) => self.events.push(Event::Error {
+                    operation: "handle_candidate".into(),
+                    message: e.to_string(),
+                }),
             }
         }
         out
@@ -201,9 +225,16 @@ impl FakeRouter {
                 }
             }
             Frame::Commit(bytes) => match self.mls.stage(&bytes) {
-                Ok(facts) => self
-                    .engine
-                    .handle_candidate(now, CommitHash::of(&bytes), facts),
+                Ok(facts) => {
+                    let hash = CommitHash::of(&bytes);
+                    match self.engine.handle_candidate(now, hash, facts.clone()) {
+                        Err(de_mls::ConversationError::ConversationBlocked(_)) => {
+                            self.held_candidates.push((hash, facts));
+                            return;
+                        }
+                        result => result,
+                    }
+                }
                 Err(_) => return,
             },
             Frame::Welcome(_) => return,
@@ -252,6 +283,7 @@ impl FakeRouter {
             self.events.append(&mut out.events);
             if round_closed {
                 next.merge(self.propose_announced(now));
+                next.merge(self.retry_held_candidates(now));
             }
             if let Some(d) = out.wakeup {
                 self.next_wakeup = Some(now + d);

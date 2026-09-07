@@ -1,6 +1,9 @@
 //! Phase transitions and their phase-timer bookkeeping: entering
-//! `Working`, `Freezing`, and `Selection`, and the steward-inactivity check
-//! that drives the `Working` → `Freezing` transition.
+//! `Working`, `Freezing`, `Selection` and `Syncing`, leaving `Syncing`, and
+//! the steward-inactivity check that drives the `Working` → `Freezing`
+//! transition. Every transition sets the phase here and returns it; the
+//! caller reports it through `emit_phase` at once, so the router sees one
+//! `PhaseChange` per transition, in order.
 
 use std::time::Duration;
 
@@ -33,6 +36,26 @@ impl<St: EngineStore> Engine<St> {
         self.phase = Phase::Selection;
         info!(state = "Selection", "state transition");
         Phase::Selection
+    }
+
+    /// Enter `Syncing`: no list covers this epoch. The inactivity clock
+    /// stops; the router is told through the returned phase.
+    pub(crate) fn start_syncing(&mut self) -> Phase {
+        self.phase = Phase::Syncing;
+        self.timing.phase_timer.clear();
+        info!(state = "Syncing", "state transition");
+        Phase::Syncing
+    }
+
+    /// Leave `Syncing` for `Working`: a sync was adopted, or an election
+    /// resolved it. `None` from any other phase.
+    pub(crate) fn leave_syncing(&mut self) -> Option<Phase> {
+        if self.phase == Phase::Syncing {
+            self.timing.sync_deadline = None;
+            Some(self.start_working())
+        } else {
+            None
+        }
     }
 
     /// `true` once the freeze window elapsed while in `Freezing`.

@@ -9,7 +9,7 @@ use tracing::info;
 
 use crate::{
     ConversationError, ElectionDecision, ElectionSkip,
-    engine::{handle::Engine, store::EngineStore},
+    engine::{handle::Engine, store::EngineStore, types::Phase},
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, ViolationEvidence,
     },
@@ -52,17 +52,31 @@ impl<St: EngineStore> Engine<St> {
 
     // ── steward list ───────────────────────────────────────────────────
 
-    /// Reconcile the list after an epoch advance, opening a voted election
-    /// when one is needed. Election-init failures are logged, not surfaced —
-    /// the conversation may legitimately reject a new proposal right now.
-    pub(crate) fn steward_list_housekeeping(&mut self) -> Result<(), ConversationError> {
-        let reconcile = self.reconcile_steward_list()?;
-        if reconcile == StewardListReconcile::NeedsElection
+    /// Reconcile the list to the current epoch and set the phase from the
+    /// result: `Working` when a list covers the epoch, `Syncing` when the
+    /// settled members outgrew it and an election is required — filed here
+    /// when this node is the responsible proposer. Runs after every merge
+    /// and at a restart. A reconcile failure is reported and leaves the
+    /// list as it was; an election-init failure is logged, since the
+    /// proposal may legitimately be refused right now.
+    pub(crate) fn reconcile_list_and_phase(&mut self) {
+        let reconcile = match self.reconcile_steward_list() {
+            Ok(reconcile) => reconcile,
+            Err(e) => {
+                self.report_failure("reconcile_steward_list", &e);
+                StewardListReconcile::Settled
+            }
+        };
+        let phase = match reconcile {
+            StewardListReconcile::Settled => self.start_working(),
+            StewardListReconcile::NeedsElection => self.start_syncing(),
+        };
+        self.emit_phase(Some(phase));
+        if phase == Phase::Syncing
             && let Err(e) = self.initiate_steward_election()
         {
             info!(conversation = %self.conversation_id, error = %e, "election initiation deferred");
         }
-        Ok(())
     }
 
     /// Reconcile the steward list to the current epoch. No-op while the list
@@ -226,5 +240,37 @@ impl<St: EngineStore> Engine<St> {
         );
         // Bundled YES: proposing it is this member's own vote for the removal.
         self.initiate_proposal(request)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        protos::de_mls::messages::v1::StewardElectionProposal,
+        test_support::{creator, member},
+    };
+
+    /// The honest list recomputes from the local members
+    #[test]
+    fn validate_election_list_recomputes_from_local_members() {
+        let engine = creator();
+        let honest = StewardElectionProposal {
+            proposed_stewards: vec![engine.own.clone()],
+            election_epoch: engine.epoch,
+            retry_round: 0,
+        };
+        assert!(
+            engine.validate_election_list(&honest).unwrap(),
+            "the honest list matches the local members"
+        );
+        let forged = StewardElectionProposal {
+            proposed_stewards: vec![member("nobody")],
+            election_epoch: engine.epoch,
+            retry_round: 0,
+        };
+        assert!(
+            !engine.validate_election_list(&forged).unwrap(),
+            "a list off the local members is rejected"
+        );
     }
 }

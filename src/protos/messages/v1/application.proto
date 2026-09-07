@@ -91,7 +91,7 @@ message ConversationSync {
   int64 default_peer_score = 10;
 }
 
-// A member that joined without a bootstrap asks a steward to re-send the
+// A member with no steward list covering its epoch asks a steward for the
 // ConversationSync. Carries no fields: MLS decryption scopes it to this
 // conversation and the authenticated sender identifies the requester.
 message ConversationSyncRequest {}

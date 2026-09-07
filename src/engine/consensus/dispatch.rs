@@ -203,6 +203,9 @@ impl<St: EngineStore> Engine<St> {
             "steward election applied"
         );
         self.dirty.steward_list = true;
+        if let Some(working) = self.leave_syncing() {
+            self.emit_phase(Some(working));
+        }
 
         // Broadcast the elected list so a member that missed the vote learns
         // it and authorizes the next steward's commit.

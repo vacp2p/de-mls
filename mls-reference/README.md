@@ -46,7 +46,7 @@ application's builder last so they always win.
 | `discard(hash)`, `clear_pending()` | | |
 | `commit_hash(bytes)` | hash | one function, same on every node |
 | `delete()` | | idempotent teardown after `Decision::Leave` |
-| welcome delivery | | MUST carry the bootstrap bytes the engine hands over for that commit |
+| welcome delivery | | delivers the welcome; the joiner's engine asks for its sync itself |
 
 ## 3. Router contract
 
@@ -101,6 +101,22 @@ MUST.
     side at threshold): filing again is the router's call, and the
     engine treats the new filing like a first one. `Approved` work lands
     in a later commit; `MembersChanged` reports what landed.
+7d. `Phase::Syncing` means the engine holds no steward list that covers
+    the epoch: a joiner, a restart from a stale store, or a list that ran
+    out at an epoch boundary. Until it adopts a `ConversationSync` or an
+    election lands it refuses proposals (rule 7b's retry on `Working`
+    covers them) and candidates (rule 7e); votes continue.
+7e. A candidate reported while the engine is `Syncing` is refused with
+    `ConversationBlocked`. The router keeps the commit staged and calls
+    `handle_candidate` again after it drains `Event::PhaseChange(Phase::Working)`;
+    a merge in between drops it as stale (rule 9).
+7f. A sync is pulled. At `join` and at a stale restart the engine sends
+    one `ConversationSyncRequest` in the same `Output` and waits two
+    answer turns, the epoch steward's and then a backup's; if both pass
+    it reports `Event::SyncUnanswered` once and asks no more. A list that
+    ran out is the election's to fix, not a request's. Asking again is
+    `request_sync(now)`, the router's call: it knows the transport, the
+    engine does not.
 
 **Commits**
 
@@ -115,8 +131,9 @@ MUST.
 12. After `Decision::BuildCommit` the router builds, keeps the commit
     pending, broadcasts the commit bytes, and reports it through
     `handle_candidate` with the facts the build returned. The welcome
-    carries nothing but the MLS welcome; the joiner's sync arrives as an
-    ordinary control message.
+    carries nothing but the MLS welcome. The joiner's sync is a steward's
+    answer to the request its own `join` sends, delivered as an ordinary
+    control message.
 
 **Storage and restart**
 
@@ -128,7 +145,10 @@ MUST.
     returned `Output` (it may contain a sync request). A store the engine
     never wrote starts the engine as `join` does.
 15. On join the router opens the welcome first, then
-    `Engine::join(store, own, epoch, members)`.
+    `Engine::join(store, own, epoch, members)`, then executes the
+    returned `Output`: the engine is in `Syncing`, the `Output` carries
+    its sync request and reports the end of the answer turns as its
+    wakeup.
 16. Exactly one live group instance per storage scope.
 
 ## 4. Reference router
@@ -142,6 +162,7 @@ struct Router {
     engine: Engine<KvStore>,
     staged: HashMap<CommitHash, StagedCommit>,
     announced: Vec<(MemberId, Vec<u8>)>,   // wanted joiners, not yet proposed
+    held: Vec<(CommitHash, StagedFacts)>,  // candidates refused while Syncing
 }
 
 impl Router {
@@ -207,7 +228,10 @@ impl Router {
             for e in out.events.drain(..) {
                 if matches!(e, Event::PhaseChange(Phase::Working)) {
                     next.merge(self.propose_announced(now));         // rule 7b retry
+                    next.merge(self.retry_held_candidates(now));     // rule 7e retry
                 }
+                // Rule 7f. SyncUnanswered: the app decides whether to call
+                // request_sync.
                 self.app.notify(e);
             }
             if let Some(d) = out.wakeup { self.timer.arm(d); }
