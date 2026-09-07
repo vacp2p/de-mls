@@ -140,6 +140,49 @@ fn duplicate_approvals_of_one_change_match_a_single_action() {
     ));
 }
 
+/// Under an urgent freeze the expected set is the target's removal alone;
+/// the rest of the approved queue waits, exactly as `batch_actions` builds it.
+#[test]
+fn an_urgent_candidate_matches_the_target_removal_alone() {
+    let mut e = engine(&["alice", "bob", "carol"]);
+    e.queues.insert_approved_proposal(7, invite("dave"));
+    e.queues.insert_approved_proposal(8, removal("carol"));
+    e.queues.set_urgent_commit_target(member("carol"));
+
+    assert!(actions_match_voted(
+        &e.queues,
+        &[Action::Remove {
+            member: id("carol")
+        }]
+    ));
+    assert!(!actions_match_voted(
+        &e.queues,
+        &[
+            Action::Add {
+                member: id("dave"),
+                key_package: b"kp:dave".to_vec(),
+            },
+            Action::Remove {
+                member: id("carol")
+            },
+        ]
+    ));
+
+    e.queues.take_urgent_commit_target();
+    assert!(actions_match_voted(
+        &e.queues,
+        &[
+            Action::Add {
+                member: id("dave"),
+                key_package: b"kp:dave".to_vec(),
+            },
+            Action::Remove {
+                member: id("carol")
+            },
+        ]
+    ));
+}
+
 // ── the round end to end ───────────────────────────────────────────
 
 /// The epoch steward's candidate sits in `round_candidate` until the round

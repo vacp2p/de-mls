@@ -439,8 +439,10 @@ impl Bed {
         self.nodes[node].router.as_mut().expect("node is live")
     }
 
+    /// A seated node whose router is still in the conversation; a member
+    /// that executed `Decision::Leave` is not live.
     pub fn is_live(&self, node: usize) -> bool {
-        self.nodes[node].router.is_some()
+        self.nodes[node].router.as_ref().is_some_and(|r| !r.left)
     }
 
     pub fn live_nodes(&self) -> Vec<usize> {

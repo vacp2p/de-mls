@@ -39,12 +39,9 @@ impl<St: EngineStore> Engine<St> {
     /// Close the round: validate the epoch steward's candidate against the
     /// voted set, or report the miss when none arrived this round.
     ///
-    /// A valid candidate scores `SuccessfulCommit` for its sender and asks
-    /// the router to merge it. An invalid one — a proposal count that
-    /// contradicts the staged commit, or actions that don't match exactly
-    /// what was voted — scores `BrokenMlsProposal`, asks the router to
-    /// discard it, then falls through to the same miss the round reports
-    /// when no candidate arrived at all.
+    /// A valid candidate scores `SuccessfulCommit` for its sender and merges.
+    /// An invalid one scores `BrokenMlsProposal`, discards it, and falls through
+    /// to the same miss as when no candidate arrived.
     pub(crate) fn close_round(&mut self) -> Result<(), ConversationError> {
         let Some((hash, facts)) = self.round_candidate.take() else {
             return self.close_round_without_commit();
@@ -104,18 +101,20 @@ pub(crate) fn penalty(member_id: &[u8], event: ScoreEvent) -> ScoreOp {
     }
 }
 
-/// Whether a commit's actions are exactly the membership changes the group
-/// voted to approve.
+/// Checks if a commit's actions match the allowed membership changes this round:
+/// either all approved adds/removals, or just the urgent removal target.
 ///
-/// Both sides are compared as sorted, deduplicated `(kind, member)`
-/// projections: any member may open a proposal, so several approvals can name
-/// the same change while the commit carries it once.
+/// Compares sorted, deduped `(kind, member)` pairs; duplicate approvals collapse
+/// to one commit action.
 pub(crate) fn actions_match_voted(queues: &EngineQueues, actions: &[Action]) -> bool {
-    let mut expected: Vec<(ActionKind, Vec<u8>)> = queues
-        .approved_proposals()
-        .values()
-        .filter_map(voted_projection)
-        .collect();
+    let mut expected: Vec<(ActionKind, Vec<u8>)> = match queues.urgent_commit_target() {
+        Some(target) => vec![(ActionKind::Remove, target.to_vec())],
+        None => queues
+            .approved_proposals()
+            .values()
+            .filter_map(voted_projection)
+            .collect(),
+    };
     let mut actual: Vec<(ActionKind, Vec<u8>)> = actions.iter().map(staged_projection).collect();
     expected.sort();
     expected.dedup();
