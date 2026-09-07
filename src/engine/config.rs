@@ -46,8 +46,8 @@ pub struct EngineConfig {
     /// How long the freeze collects commit candidates before one is
     /// deterministically selected (RFC §Freezing).
     pub freeze_duration: Duration,
-    /// How long a backup steward waits for a silent epoch steward to answer a
-    /// sync-resend before covering it (RFC §Inactivity Timer #3).
+    /// How long a backup steward waits for a silent epoch steward to answer
+    /// a sync request before answering itself (RFC §Inactivity Timer #3).
     pub backup_takeover_window: Duration,
     /// How long a proposal stays open before it expires unvoted
     /// (RFC §Creating Voting Proposal).

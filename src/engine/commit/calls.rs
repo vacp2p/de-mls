@@ -20,6 +20,7 @@ use crate::{
             StagedFacts, Timestamp,
         },
     },
+    scoring_member_diff,
 };
 
 impl<St: EngineStore> Engine<St> {
@@ -143,9 +144,7 @@ impl<St: EngineStore> Engine<St> {
             return self.finish();
         }
 
-        if let Err(e) = self.sync_scoring_members() {
-            self.report_failure("sync_scoring_members", &e);
-        }
+        self.sync_scoring_members();
         self.queues.clear_skipped();
         self.timing.last_commit_round_progress = None;
         self.round_candidate = None;
@@ -172,6 +171,26 @@ impl<St: EngineStore> Engine<St> {
         self.dirty.join_epochs = true;
         self.dirty.skipped_stewards = true;
         self.dirty.meta = true;
+    }
+
+    /// Add every reported member not yet tracked in scoring, and drop scored
+    /// entries for members that departed. Diffing is delegated to
+    /// [`scoring_member_diff`]; this method only applies the diff.
+    fn sync_scoring_members(&mut self) {
+        let scored: Vec<Vec<u8>> = self
+            .scoring
+            .all_members_with_scores()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let diff = scoring_member_diff(&scored, &self.members);
+        for member_id in &diff.to_add {
+            self.scoring.add_member(member_id);
+        }
+        for member_id in &diff.to_remove {
+            self.scoring.remove_member(member_id);
+        }
+        self.dirty.scores = true;
     }
 
     /// Score each newly seated member from scratch and drop the departed, then

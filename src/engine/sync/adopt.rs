@@ -1,5 +1,5 @@
 //! Validating and adopting a `ConversationSync`: the recomputation that
-//! verifies a steward's broadcast, and applying the list, timing and peer
+//! verifies a steward's answer, and applying the list, timing and peer
 //! scores it carries.
 
 use tracing::{info, warn};
@@ -23,12 +23,15 @@ impl<St: EngineStore> Engine<St> {
     ) -> Result<(), ConversationError> {
         // A sync is on the wire — the request round is answered, so disarm any
         // pending backup takeover before the guard returns.
-        self.timing.sync_resend_anchor = None;
+        self.timing.sync_takeover_anchor = None;
         let current_epoch = self.epoch;
-        // Install a first list, or replace an exhausted one with a strictly
-        // newer election (higher `election_epoch`).
+        // A synced node adopts nothing; an exhausted list yields only to a
+        // strictly newer election.
+        if self.is_synced() {
+            return Ok(());
+        }
         if let Some(mine) = self.steward_list.election_epoch()
-            && (!self.steward_list.is_exhausted(current_epoch) || sync.election_epoch <= mine)
+            && sync.election_epoch <= mine
         {
             return Ok(());
         }

@@ -8,4 +8,4 @@ mod service;
 
 pub(crate) use list::StewardList;
 pub use list::StewardListConfig;
-pub(crate) use service::{ElectionDecision, ElectionSkip, StewardListService};
+pub(crate) use service::{ElectionDecision, StewardListService};

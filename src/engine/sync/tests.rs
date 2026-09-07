@@ -156,14 +156,12 @@ fn each_zero_field_is_detected() {
 }
 
 /// The creator is its own steward list, so it answers a sync request by
-/// broadcasting the sync a listless joiner can adopt.
+/// sharing the sync a joiner with no list can adopt.
 #[test]
 fn epoch_steward_answers_sync_request() {
     let mut engine = creator();
     engine.begin(Timestamp::ZERO);
-    engine
-        .on_conversation_sync_request(b"joiner")
-        .expect("answer request");
+    engine.on_conversation_sync_request(b"joiner");
     assert!(matches!(
         engine.out.outbound.as_slice(),
         [Outbound::Control(_)]
@@ -175,11 +173,9 @@ fn epoch_steward_answers_sync_request() {
 fn an_unsynced_node_ignores_sync_request_and_arms_nothing() {
     let mut engine = joiner();
     engine.begin(Timestamp::ZERO);
-    engine
-        .on_conversation_sync_request(b"joiner")
-        .expect("ignore request");
+    engine.on_conversation_sync_request(b"joiner");
     assert!(engine.out.outbound.is_empty());
-    assert!(engine.timing.sync_resend_anchor.is_none());
+    assert!(engine.timing.sync_takeover_anchor.is_none());
 }
 
 /// A synced member off the list can't answer either — one answerer keeps
@@ -204,11 +200,9 @@ fn a_synced_non_steward_ignores_sync_request_and_arms_nothing() {
         .expect("a list of alice alone");
     assert!(engine.is_synced() && !engine.is_steward());
 
-    engine
-        .on_conversation_sync_request(b"joiner")
-        .expect("ignore request");
+    engine.on_conversation_sync_request(b"joiner");
     assert!(engine.out.outbound.is_empty());
-    assert!(engine.timing.sync_resend_anchor.is_none());
+    assert!(engine.timing.sync_takeover_anchor.is_none());
 }
 
 /// An unsynced node cannot judge whether it is the epoch steward or a
@@ -217,11 +211,9 @@ fn a_synced_non_steward_ignores_sync_request_and_arms_nothing() {
 fn an_unsynced_steward_does_not_answer() {
     let mut engine = joiner();
     engine.begin(Timestamp::ZERO);
-    engine
-        .on_conversation_sync_request(b"x")
-        .expect("ignore request");
+    engine.on_conversation_sync_request(b"x");
     assert!(engine.out.outbound.is_empty());
-    assert!(engine.timing.sync_resend_anchor.is_none());
+    assert!(engine.timing.sync_takeover_anchor.is_none());
 }
 
 /// The epoch steward answers reactively, so it never leaves a backup
@@ -230,11 +222,9 @@ fn an_unsynced_steward_does_not_answer() {
 fn epoch_steward_request_clears_takeover_anchor() {
     let mut engine = creator();
     engine.begin(Timestamp::ZERO);
-    engine.timing.sync_resend_anchor = Some(Timestamp::ZERO);
-    engine
-        .on_conversation_sync_request(b"joiner")
-        .expect("answer request");
-    assert!(engine.timing.sync_resend_anchor.is_none());
+    engine.timing.sync_takeover_anchor = Some(Timestamp::ZERO);
+    engine.on_conversation_sync_request(b"joiner");
+    assert!(engine.timing.sync_takeover_anchor.is_none());
     assert_eq!(engine.out.outbound.len(), 1);
 }
 
@@ -243,7 +233,7 @@ fn epoch_steward_request_clears_takeover_anchor() {
 fn share_conversation_sync_is_noop_without_list() {
     let mut engine = joiner();
     engine.begin(Timestamp::ZERO);
-    engine.share_conversation_sync().expect("share sync");
+    engine.share_conversation_sync();
     assert!(engine.out.outbound.is_empty());
 }
 
@@ -256,17 +246,17 @@ fn a_sync_request_is_reported_missing_once() {
     let turns = engine.config.backup_takeover_window * 2;
 
     engine.begin(Timestamp::ZERO);
-    engine.drive_sync_request().expect("first drive");
+    engine.drive_sync_request();
     assert!(engine.out.events.is_empty());
 
     engine.begin(Timestamp::ZERO + turns);
-    engine.drive_sync_request().expect("second drive");
+    engine.drive_sync_request();
     assert!(engine.out.events.contains(&Event::SyncUnanswered));
     assert!(engine.timing.sync_deadline.is_none());
     assert_eq!(engine.phase(), Phase::Syncing);
 
     engine.begin(Timestamp::ZERO + turns * 2);
-    engine.drive_sync_request().expect("third drive");
+    engine.drive_sync_request();
     assert_eq!(
         engine
             .out
@@ -288,20 +278,19 @@ fn a_sync_request_is_reported_missing_once() {
     assert_eq!(out.outbound.len(), 1, "every further ask is the router's");
 
     engine.begin(Timestamp::ZERO + turns * 3);
-    engine.drive_sync_request().expect("fourth drive");
+    engine.drive_sync_request();
     assert!(engine.out.events.contains(&Event::SyncUnanswered));
 }
 
-/// The sync round-trips: what a steward builds, a listless member adopts
-/// off the wire like any other control message, leaving `Syncing` for
-/// `Working`.
+/// The sync round-trips: what a steward builds, a member with no list
+/// adopts off the wire like any other control message, leaving `Syncing`
+/// for `Working`.
 #[test]
 fn conversation_sync_round_trips_into_a_joiner() {
     let mut steward = founder();
     steward.begin(Timestamp::ZERO);
     let bytes = steward
         .build_conversation_sync()
-        .expect("build sync")
         .expect("a list is installed");
 
     let mut engine = joiner();
@@ -340,7 +329,6 @@ fn adopting_a_sync_clamps_voting_delay_below_its_timeout() {
     steward.begin(Timestamp::ZERO);
     let bytes = steward
         .build_conversation_sync()
-        .expect("build sync")
         .expect("a list is installed");
 
     let joiner_config = EngineConfig {
