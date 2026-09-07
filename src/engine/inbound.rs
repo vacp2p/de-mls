@@ -49,10 +49,10 @@ impl<St: EngineStore> Engine<St> {
             Some(control_message::Payload::ConversationSync(sync)) => {
                 ("conversation_sync", self.on_conversation_sync(sync))
             }
-            Some(control_message::Payload::ConversationSyncRequest(_)) => (
-                "conversation_sync_request",
-                self.on_conversation_sync_request(&sender),
-            ),
+            Some(control_message::Payload::ConversationSyncRequest(_)) => {
+                self.on_conversation_sync_request(&sender);
+                ("conversation_sync_request", Ok(()))
+            }
             None => {
                 tracing::debug!(
                     conversation = %self.conversation_id,

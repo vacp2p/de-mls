@@ -1,21 +1,20 @@
-//! The answer side of sync recovery: building and sharing the current
-//! `ConversationSync`, and answering a `ConversationSyncRequest` — the epoch
+//! The answer side of sync: building and sending the current
+//! `ConversationSync`, and answering a `ConversationSyncRequest`: the epoch
 //! steward at once, a backup steward after `backup_takeover_window` if the
 //! epoch steward stays silent.
 
 use tracing::info;
 
 use crate::{
-    ConversationError,
     engine::{consensus::wire::control_bytes, handle::Engine, store::EngineStore},
     protos::de_mls::messages::v1::{ConversationSync, PeerScore, TimingConfig, control_message},
 };
 
 impl<St: EngineStore> Engine<St> {
-    /// The `ConversationSync` control bytes that carry the current steward
-    /// list, protocol flags, timing and peer scores. `None` when there is no
-    /// list yet; the caller owns delivery.
-    pub(crate) fn build_conversation_sync(&mut self) -> Result<Option<Vec<u8>>, ConversationError> {
+    /// The `ConversationSync` control bytes carrying the current steward
+    /// list, protocol flags, timing and peer scores. `None` while there is no
+    /// list; the caller owns delivery.
+    pub(crate) fn build_conversation_sync(&self) -> Option<Vec<u8>> {
         // Sparse snapshot — only members whose score has diverged from
         // `default_score`, which rides along in `default_peer_score` so the
         // joiner adopts the same pivot and reads the omissions as we meant
@@ -28,9 +27,7 @@ impl<St: EngineStore> Engine<St> {
             .map(|(member_id, score)| PeerScore { member_id, score })
             .collect();
 
-        let Some(list) = self.steward_list.current_list() else {
-            return Ok(None);
-        };
+        let list = self.steward_list.current_list()?;
         let steward_members = list.members().to_vec();
         let election_epoch = list.election_epoch();
         let sn_min = list.config().sn_min as u32;
@@ -61,75 +58,67 @@ impl<St: EngineStore> Engine<St> {
             liveness_criteria_yes: self.config.liveness_criteria_yes,
             unsettled_members,
         };
-        Ok(Some(control_bytes(
-            control_message::Payload::ConversationSync(sync),
+        Some(control_bytes(control_message::Payload::ConversationSync(
+            sync,
         )))
     }
 
-    /// Broadcast the current `ConversationSync` as an ordinary control
-    /// message, for anyone with no list, or a stale one, to adopt. No-op
-    /// while there is no list to share.
-    pub(crate) fn share_conversation_sync(&mut self) -> Result<(), ConversationError> {
-        if let Some(bytes) = self.build_conversation_sync()? {
+    /// Send the current `ConversationSync` as a control message. No-op while
+    /// there is no list to share.
+    pub(crate) fn share_conversation_sync(&mut self) {
+        if let Some(bytes) = self.build_conversation_sync() {
             self.send_control(bytes);
         }
-        Ok(())
     }
 
-    /// Answer a sync re-send request. The epoch steward responds now; a backup
-    /// arms `sync_resend_anchor` and takes over from `tick` only if the epoch
-    /// steward stays silent. The list-present guard in
-    /// `on_conversation_sync` means only a listless or exhausted node adopts
-    /// the broadcast.
-    pub(crate) fn on_conversation_sync_request(
-        &mut self,
-        requester: &[u8],
-    ) -> Result<(), ConversationError> {
-        // An exhausted list helps nobody; only a synced node answers.
+    /// Answer a sync request. The epoch steward answers now; a backup
+    /// steward arms `sync_takeover_anchor` and answers from `tick` only if
+    /// the epoch steward stays silent; a plain member cannot answer. Only a
+    /// synced node answers: an exhausted list helps nobody.
+    pub(crate) fn on_conversation_sync_request(&mut self, requester: &[u8]) {
         if !self.is_synced() {
-            return Ok(());
+            return;
         }
         if self.is_epoch_steward() {
-            self.timing.sync_resend_anchor = None;
+            self.timing.sync_takeover_anchor = None;
             tracing::debug!(
                 conversation = %self.conversation_id,
                 requester = ?requester,
-                "epoch steward re-sending conversation sync"
+                "epoch steward answering sync request"
             );
-            return self.share_conversation_sync();
+            self.share_conversation_sync();
+            return;
         }
         // A backup arms the takeover timer; a plain member can't answer.
-        if self.is_steward() && self.timing.sync_resend_anchor.is_none() {
-            self.timing.sync_resend_anchor = Some(self.now);
+        if self.is_steward() && self.timing.sync_takeover_anchor.is_none() {
+            self.timing.sync_takeover_anchor = Some(self.now);
         }
-        Ok(())
     }
 
-    /// Backup-steward sync re-send takeover. The epoch steward answers a
-    /// `ConversationSyncRequest` reactively; a backup arms `sync_resend_anchor`
-    /// and re-sends here only if no `ConversationSync` was observed within
-    /// `backup_takeover_window` — so an offline epoch steward can't strand a
-    /// listless member. Only a synced backup steward drives it; the anchor
-    /// clears otherwise.
-    pub(crate) fn drive_sync_resend(&mut self) -> Result<(), ConversationError> {
-        let Some(anchor) = self.timing.sync_resend_anchor else {
-            return Ok(());
+    /// The backup steward's answer turn. A backup arms `sync_takeover_anchor`
+    /// when a request arrives and answers here only if no `ConversationSync`
+    /// was seen within `backup_takeover_window`, so a silent epoch steward
+    /// cannot strand a requester. The anchor clears when this node is not a
+    /// synced backup steward.
+    pub(crate) fn drive_sync_takeover(&mut self) {
+        let Some(anchor) = self.timing.sync_takeover_anchor else {
+            return;
         };
         // Only a synced backup takes over: an exhausted list can't answer,
         // the epoch steward already did, and a plain member can't. Any of
         // these means the anchor no longer applies.
         if !self.is_synced() || self.is_epoch_steward() || !self.is_steward() {
-            self.timing.sync_resend_anchor = None;
-            return Ok(());
+            self.timing.sync_takeover_anchor = None;
+            return;
         }
         if self.now < anchor + self.config.backup_takeover_window {
-            return Ok(());
+            return;
         }
-        self.timing.sync_resend_anchor = None;
+        self.timing.sync_takeover_anchor = None;
         info!(
             conversation = %self.conversation_id,
-            "backup steward re-sending conversation sync: epoch steward silent past backup_takeover_window"
+            "backup steward answering sync request: epoch steward silent past backup_takeover_window"
         );
-        self.share_conversation_sync()
+        self.share_conversation_sync();
     }
 }

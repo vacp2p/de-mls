@@ -8,12 +8,11 @@
 use tracing::info;
 
 use crate::{
-    ConversationError, ElectionDecision, ElectionSkip,
+    ConversationError, ElectionDecision,
     engine::{handle::Engine, store::EngineStore, types::Phase},
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, ViolationEvidence,
     },
-    scoring_member_diff,
 };
 
 /// Outcome of reconciling the steward list to the current epoch.
@@ -27,31 +26,6 @@ pub(crate) enum StewardListReconcile {
 }
 
 impl<St: EngineStore> Engine<St> {
-    // ── membership bookkeeping ─────────────────────────────────────────
-
-    /// Add every reported member not yet tracked in scoring, and drop scored
-    /// entries for members that departed. Diffing is delegated to
-    /// [`scoring_member_diff`]; this method only applies the diff.
-    pub(crate) fn sync_scoring_members(&mut self) -> Result<(), ConversationError> {
-        let scored: Vec<Vec<u8>> = self
-            .scoring
-            .all_members_with_scores()
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-        let diff = scoring_member_diff(&scored, &self.members);
-        for member_id in &diff.to_add {
-            self.scoring.add_member(member_id);
-        }
-        for member_id in &diff.to_remove {
-            self.scoring.remove_member(member_id);
-        }
-        self.dirty.scores = true;
-        Ok(())
-    }
-
-    // ── steward list ───────────────────────────────────────────────────
-
     /// Reconcile the list to the current epoch and set the phase from the
     /// result: `Working` when a list covers the epoch, `Syncing` when the
     /// settled members outgrew it and an election is required — filed here
@@ -156,23 +130,7 @@ impl<St: EngineStore> Engine<St> {
                     .propose_election(epoch, &candidate_pool, &self.own, eligible)?;
             match decision {
                 ElectionDecision::Skip(skip) => {
-                    match skip {
-                        ElectionSkip::NotResponsibleProposer => {
-                            let proposer = self.steward_list.responsible_proposer(
-                                0,
-                                &candidate_pool,
-                                eligible,
-                            );
-                            info!(
-                                conversation = %self.conversation_id,
-                                proposer = ?proposer,
-                                "skipping election: {skip}"
-                            );
-                        }
-                        ElectionSkip::NoEligibleCandidates => {
-                            info!(conversation = %self.conversation_id, "skipping election: {skip}");
-                        }
-                    }
+                    info!(conversation = %self.conversation_id, "skipping election: {skip}");
                     return Ok(());
                 }
                 ElectionDecision::Proposed {

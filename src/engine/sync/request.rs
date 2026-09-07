@@ -1,20 +1,14 @@
-//! The pull side of sync recovery: asking for a `ConversationSync` and
-//! reporting the miss once both answer turns pass. Entering and leaving
-//! `Syncing` are phase transitions and live with the others.
+//! The pull side of sync: asking for a `ConversationSync` and reporting the
+//! miss once both answer turns pass. Entering and leaving `Syncing` are phase
+//! transitions and live with the others.
 
 use crate::{
-    ConversationError,
-    engine::{
-        consensus::wire::control_bytes,
-        handle::Engine,
-        store::EngineStore,
-        types::{Event, Phase},
-    },
+    engine::{consensus::wire::control_bytes, handle::Engine, store::EngineStore, types::Event},
     protos::de_mls::messages::v1::{ConversationSyncRequest, control_message},
 };
 
 impl<St: EngineStore> Engine<St> {
-    /// Broadcast a `ConversationSyncRequest` so a steward re-sends its
+    /// Broadcast a `ConversationSyncRequest` so a steward answers with its
     /// `ConversationSync`. The message carries no fields: the router hands the
     /// authenticated sender over, and that is the requester. The answer has
     /// two turns — the epoch steward's at once, a backup's after
@@ -31,13 +25,13 @@ impl<St: EngineStore> Engine<St> {
         self.timing.sync_deadline = Some(self.now + self.config.backup_takeover_window * 2);
     }
 
-    /// Report the miss: both answer turns of the request this node sent have
+    /// Report the miss: both answer turns of the request this node sent
     /// passed with no sync adopted. Asking again is the router's
     /// (`Engine::request_sync`). Outside `Syncing` nothing is awaited.
-    pub(crate) fn drive_sync_request(&mut self) -> Result<(), ConversationError> {
-        if self.phase != Phase::Syncing {
+    pub(crate) fn drive_sync_request(&mut self) {
+        if self.is_synced() {
             self.timing.sync_deadline = None;
-            return Ok(());
+            return;
         }
         if let Some(until) = self.timing.sync_deadline
             && self.now >= until
@@ -45,6 +39,5 @@ impl<St: EngineStore> Engine<St> {
             self.timing.sync_deadline = None;
             self.emit(Event::SyncUnanswered);
         }
-        Ok(())
     }
 }

@@ -111,15 +111,12 @@ impl<St: EngineStore> Engine<St> {
         self.finish()
     }
 
-    /// Request a `ConversationSync` from a steward, triggering a single request
-    /// with two possible response windows.
-    /// The engine automatically performs this request during `join`
-    /// and after detecting a stale restart, emitting `Event::SyncUnanswered`
-    /// if neither response window produces a sync.
-    ///
-    /// Any additional sync request should use this method per router contract rule.
-    /// A successful sync sets [`Engine::is_synced`] to true. A no-op outside
-    /// `Syncing`: a list covers the epoch and nothing newer would be adopted.
+    /// Ask the stewards for a `ConversationSync` again. The engine asks once
+    /// on its own, at `join` and at a stale restart, and reports
+    /// [`Event::SyncUnanswered`](crate::engine::Event::SyncUnanswered) when
+    /// both answer turns pass; asking again is the router's call (contract
+    /// rule 7f). A no-op outside `Syncing`: a list covers the epoch and
+    /// nothing newer would be adopted.
     pub fn request_sync(&mut self, now: Timestamp) -> Result<Output, ConversationError> {
         self.begin(now);
         if self.phase == Phase::Syncing {

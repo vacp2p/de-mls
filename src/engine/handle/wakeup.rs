@@ -20,22 +20,14 @@ impl<St: EngineStore> Engine<St> {
             .copied()
             .chain(self.timing.pending_auto_votes.values().map(|e| e.fire_at))
             .chain(self.phase_deadline())
-            .chain(self.sync_request_deadline())
-            .chain(self.takeover_deadlines())
+            .chain(self.timing.sync_deadline)
+            .chain(
+                self.timing
+                    .sync_takeover_anchor
+                    .map(|anchor| anchor + self.config.backup_takeover_window),
+            )
             .min()?;
         Some(earliest.saturating_duration_since(self.now))
-    }
-
-    fn sync_request_deadline(&self) -> Option<Timestamp> {
-        self.timing.sync_deadline
-    }
-
-    /// The backup-takeover anchor, so a backup's turn wakes the router.
-    fn takeover_deadlines(&self) -> impl Iterator<Item = Timestamp> {
-        let window = self.config.backup_takeover_window;
-        [self.timing.sync_resend_anchor.map(|a| a + window)]
-            .into_iter()
-            .flatten()
     }
 
     fn phase_deadline(&self) -> Option<Timestamp> {

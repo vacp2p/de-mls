@@ -56,8 +56,9 @@ pub(crate) struct Timing {
     pub(crate) pending_consensus_timeouts: HashMap<u32, Timestamp>,
     /// Last `CommitRoundProgress` emitted; reset outside `Freezing`.
     pub(crate) last_commit_round_progress: Option<(usize, usize)>,
-    /// Backup-steward sync re-send anchor.
-    pub(crate) sync_resend_anchor: Option<Timestamp>,
+    /// The backup steward's answer-turn anchor: the arrival of a request the
+    /// epoch steward has the first turn on.
+    pub(crate) sync_takeover_anchor: Option<Timestamp>,
     /// End of the answer turns armed by the last sync request; `None` while
     /// nothing is awaited or the miss was reported.
     pub(crate) sync_deadline: Option<Timestamp>,
@@ -70,7 +71,7 @@ impl Timing {
             pending_auto_votes: HashMap::new(),
             pending_consensus_timeouts: HashMap::new(),
             last_commit_round_progress: None,
-            sync_resend_anchor: None,
+            sync_takeover_anchor: None,
             sync_deadline: None,
         }
     }

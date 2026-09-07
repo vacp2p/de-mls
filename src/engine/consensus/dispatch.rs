@@ -210,9 +210,8 @@ impl<St: EngineStore> Engine<St> {
         // Broadcast the elected list so a member that missed the vote learns
         // it and authorizes the next steward's commit.
         if self.is_epoch_steward() {
-            self.share_conversation_sync()
-        } else {
-            Ok(())
+            self.share_conversation_sync();
         }
+        Ok(())
     }
 }

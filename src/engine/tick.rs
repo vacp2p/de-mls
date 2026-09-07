@@ -14,7 +14,8 @@ use crate::{
 
 impl<St: EngineStore> Engine<St> {
     /// Run every deadline that has passed by `now`: consensus ticks, the
-    /// freeze phase, the backup-takeover windows, and the inactivity freeze.
+    /// freeze phase, the backup steward's answer turn, the sync-request
+    /// deadline, and the inactivity freeze.
     ///
     /// Every step runs even when an earlier one failed, so there is no single
     /// error to return; each failure arrives as [`Event::Error`] naming its
@@ -26,11 +27,8 @@ impl<St: EngineStore> Engine<St> {
         let result = self.advance_freezing();
         self.report_step("advance_freezing", result);
 
-        let result = self.drive_sync_resend();
-        self.report_step("drive_sync_resend", result);
-
-        let result = self.drive_sync_request();
-        self.report_step("drive_sync_request", result);
+        self.drive_sync_takeover();
+        self.drive_sync_request();
 
         let result = self.start_freeze_on_inactivity();
         self.report_step("start_freeze_on_inactivity", result);
