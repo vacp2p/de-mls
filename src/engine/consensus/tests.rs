@@ -26,6 +26,7 @@ fn member(id: u8) -> Vec<u8> {
 fn engine() -> Engine<InMemoryStore> {
     let members: Vec<MemberId> = (1..=4).map(|i| MemberId::from(member(i))).collect();
     let (mut engine, _) = Engine::create(
+        Timestamp::ZERO,
         "conv",
         MemberId::from(member(1)),
         1,

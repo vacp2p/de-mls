@@ -50,6 +50,7 @@ impl FakeRouter {
     ) -> Self {
         let mls = FakeMls::create(conversation_id, own.clone());
         let (engine, out) = Engine::create(
+            now,
             conversation_id,
             own,
             mls.epoch(),
@@ -68,6 +69,7 @@ impl FakeRouter {
     pub fn join(now: Timestamp, own: MemberId, welcome: &Welcome, config: EngineConfig) -> Self {
         let mls = FakeMls::from_welcome(own.clone(), &welcome.snapshot);
         let (engine, out) = Engine::join(
+            now,
             mls.conversation_id(),
             own,
             mls.epoch(),
@@ -162,6 +164,7 @@ impl FakeRouter {
     /// path. Replaces the engine and drives what `Engine::restore` returns.
     pub fn restart_with(&mut self, now: Timestamp, store: InMemoryStore) {
         let (engine, out) = Engine::restore(
+            now,
             self.mls.conversation_id(),
             self.own_id().clone(),
             self.mls.epoch(),

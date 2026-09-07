@@ -357,6 +357,7 @@ mod tests {
     fn each_key_round_trips() {
         let members: Vec<MemberId> = (1..=4).map(|i| MemberId::from(member(i))).collect();
         let (mut engine, _) = Engine::create(
+            Timestamp::ZERO,
             "conv",
             members[0].clone(),
             0,
@@ -389,8 +390,15 @@ mod tests {
         engine.flush().expect("flush");
 
         let store = engine.store().clone();
-        let (restored, _) =
-            Engine::restore("conv", members[0].clone(), 0, &members, store).expect("restore");
+        let (restored, _) = Engine::restore(
+            Timestamp::ZERO,
+            "conv",
+            members[0].clone(),
+            0,
+            &members,
+            store,
+        )
+        .expect("restore");
 
         assert_eq!(
             restored

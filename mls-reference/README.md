@@ -59,7 +59,9 @@ MUST.
 1. One engine per conversation, driven from one thread at a time. Calls
    never interleave.
 2. `now` passed to the engine is monotonic per conversation. `tick(now)`
-   is called no later than the `wakeup` of the last `Output`.
+   is called no later than the `wakeup` of the last `Output`. The
+   constructors take the same clock; a deadline armed at construction is
+   measured against it.
 3. Every `Output` is executed completely before the next driving call,
    in this order: seal and send `outbound` (at the current epoch), then
    execute `decisions` in the order given, then handle `events`. A report
@@ -141,11 +143,11 @@ MUST.
     `outbound` of the same `Output` is sent. A node must not send a vote
     it can forget.
 14. On restart the router loads the group first, then
-    `Engine::restore(store, own, epoch, members)`, then executes the
+    `Engine::restore(now, store, own, epoch, members)`, then executes the
     returned `Output` (it may contain a sync request). A store the engine
     never wrote starts the engine as `join` does.
 15. On join the router opens the welcome first, then
-    `Engine::join(store, own, epoch, members)`, then executes the
+    `Engine::join(now, store, own, epoch, members)`, then executes the
     returned `Output`: the engine is in `Syncing`, the `Output` carries
     its sync request and reports the end of the answer turns as its
     wakeup.

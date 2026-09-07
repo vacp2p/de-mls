@@ -1,7 +1,12 @@
 //! Test-only helpers for constructing [`Engine`] fixtures, shared across the
 //! engine's test modules.
 
-use crate::engine::{config::EngineConfig, handle::Engine, store::InMemoryStore, types::MemberId};
+use crate::engine::{
+    config::EngineConfig,
+    handle::Engine,
+    store::InMemoryStore,
+    types::{MemberId, Timestamp},
+};
 
 /// A member id as the group would issue it: a signature key.
 pub(crate) fn member(name: &str) -> Vec<u8> {
@@ -16,6 +21,7 @@ pub(crate) fn id(name: &str) -> MemberId {
 /// is the epoch steward at every epoch.
 pub(crate) fn creator() -> Engine<InMemoryStore> {
     Engine::create(
+        Timestamp::ZERO,
         "conv",
         id("alice"),
         1,
@@ -31,6 +37,7 @@ pub(crate) fn creator() -> Engine<InMemoryStore> {
 /// settled stewards from `epoch`.
 pub(crate) fn founder() -> Engine<InMemoryStore> {
     Engine::create(
+        Timestamp::ZERO,
         "conv",
         id("alice"),
         1,
@@ -46,6 +53,7 @@ pub(crate) fn founder() -> Engine<InMemoryStore> {
 /// until a sync is adopted, so it is neither steward nor epoch steward.
 pub(crate) fn joiner() -> Engine<InMemoryStore> {
     Engine::join(
+        Timestamp::ZERO,
         "conv",
         id("bob"),
         1,
