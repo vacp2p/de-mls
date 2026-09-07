@@ -60,8 +60,7 @@ message MetaState {
   uint64 voting_delay_ms = 3;
   bool liveness_criteria_yes = 4;
   uint64 max_consensus_sessions = 5;
-  uint32 unanswered_sync_rounds = 6;
-  uint32 sn_min = 7;
-  uint32 sn_max = 8;
-  int64 default_peer_score = 9;
+  uint32 sn_min = 6;
+  uint32 sn_max = 7;
+  int64 default_peer_score = 8;
 }

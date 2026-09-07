@@ -60,7 +60,6 @@ impl<St: EngineStore> Engine<St> {
         self.pending_merge = Some(PendingMerge {
             hash,
             facts: (!is_local).then_some(facts),
-            is_local,
         });
         self.decide(Decision::Merge { hash });
         Ok(())

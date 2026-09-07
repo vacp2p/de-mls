@@ -34,15 +34,10 @@ pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 /// in-flight proposals.
 pub const DEFAULT_MAX_CONSENSUS_SESSIONS: usize = 128;
 
-/// Default unanswered sync-request rounds before the conversation reports it:
-/// three tries across the answer latency. `0` never reports. See
-/// [`EngineConfig::unanswered_sync_rounds`].
-pub const DEFAULT_UNANSWERED_SYNC_ROUNDS: u32 = 3;
-
 /// Per-conversation timing and policy config, fixed at conversation creation.
 /// The group-wide fields travel in `ConversationSync`, so a joiner runs the
-/// creator's values; `voting_delay`, `max_consensus_sessions` and
-/// `unanswered_sync_rounds` are this node's own.
+/// creator's values; `voting_delay` and `max_consensus_sessions` are this
+/// node's own.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     /// How long approved work is batched before the epoch steward builds the
@@ -71,11 +66,6 @@ pub struct EngineConfig {
     /// Max consensus sessions retained per conversation before the oldest is
     /// evicted. See [`DEFAULT_MAX_CONSENSUS_SESSIONS`].
     pub max_consensus_sessions: usize,
-    /// How many sync requests may go unanswered before the conversation emits
-    /// [`crate::engine::Event::SyncUnanswered`]. Rounds are one
-    /// `backup_takeover_window` apart. `0` never emits it; requesting continues
-    /// either way. See [`DEFAULT_UNANSWERED_SYNC_ROUNDS`].
-    pub unanswered_sync_rounds: u32,
     /// Steward-list size bounds (`sn_min` / `sn_max`). The list itself is
     /// library-owned; this is the only steward knob the integrator sets.
     pub steward_list: StewardListConfig,
@@ -94,7 +84,6 @@ impl Default for EngineConfig {
             voting_delay: DEFAULT_VOTING_DELAY,
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
             max_consensus_sessions: DEFAULT_MAX_CONSENSUS_SESSIONS,
-            unanswered_sync_rounds: DEFAULT_UNANSWERED_SYNC_ROUNDS,
             steward_list: StewardListConfig::default(),
             scoring: ScoringConfig::default(),
         }

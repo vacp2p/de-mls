@@ -58,10 +58,9 @@ pub(crate) struct Timing {
     pub(crate) last_commit_round_progress: Option<(usize, usize)>,
     /// Backup-steward sync re-send anchor.
     pub(crate) sync_resend_anchor: Option<Timestamp>,
-    /// Pull-side sync request anchor.
-    pub(crate) sync_request_anchor: Option<Timestamp>,
-    /// Consecutive unanswered sync requests.
-    pub(crate) unanswered_sync_rounds: u32,
+    /// End of the answer turns armed by the last sync request; `None` while
+    /// nothing is awaited or the miss was reported.
+    pub(crate) sync_deadline: Option<Timestamp>,
 }
 
 impl Timing {
@@ -72,8 +71,7 @@ impl Timing {
             pending_consensus_timeouts: HashMap::new(),
             last_commit_round_progress: None,
             sync_resend_anchor: None,
-            sync_request_anchor: None,
-            unanswered_sync_rounds: 0,
+            sync_deadline: None,
         }
     }
 }
@@ -84,7 +82,6 @@ pub(crate) struct PendingMerge {
     pub(crate) hash: CommitHash,
     /// Facts of the winning candidate, or `None` for our own commit.
     pub(crate) facts: Option<StagedFacts>,
-    pub(crate) is_local: bool,
 }
 
 /// One conversation's protocol state, with no group, provider, signer or
@@ -217,11 +214,10 @@ impl<St: EngineStore> Engine<St> {
             .is_some_and(|s| s == self.own.as_slice())
     }
 
-    /// Whether the steward list is installed and covers the current epoch.
+    /// Whether a steward list covers the current epoch: every phase but
+    /// `Syncing`.
     pub fn is_synced(&self) -> bool {
-        self.steward_list
-            .current_list()
-            .is_some_and(|_| !self.steward_list.is_exhausted(self.epoch))
+        self.phase != Phase::Syncing
     }
 
     /// The durable store, for the router to flush.
@@ -314,7 +310,7 @@ impl<St: EngineStore> Engine<St> {
         self.emit_score_changes(changes);
     }
 
-    /// Adopt a bootstrap score snapshot, reporting each moved score.
+    /// Adopt the score snapshot a sync carries, reporting each moved score.
     pub(crate) fn apply_score_snapshot(&mut self, snapshot: &ScoreSnapshot) {
         let changes = self.scoring.apply_snapshot(snapshot);
         self.dirty.scores = true;

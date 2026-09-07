@@ -23,11 +23,10 @@ use crate::{
 };
 
 impl<St: EngineStore> Engine<St> {
-    /// The facts the router learned by staging a candidate's commit. The
-    /// engine keeps at most one per round — the epoch steward's — and
-    /// answers anyone else's at once with `Decision::Discard` and a
-    /// `MisbehavingCommit` score. Validation against the voted set happens
-    /// when the round's window closes.
+    /// Handles a candidate commit staged by the router. Only the epoch steward's
+    /// candidate is kept per round; others are immediately discarded and scored.
+    /// Validation happens at round close. If `Syncing`, the call is refused until
+    /// `Working`.
     pub fn handle_candidate(
         &mut self,
         now: Timestamp,
@@ -44,6 +43,14 @@ impl<St: EngineStore> Engine<St> {
             );
             self.decide(Decision::Discard { hashes: vec![hash] });
             return self.finish();
+        }
+
+        // Without a list this node cannot judge the candidate. The router
+        // keeps it staged and reports it again after `PhaseChange(Working)`.
+        if self.phase == Phase::Syncing {
+            return Err(ConversationError::ConversationBlocked(
+                self.phase.to_string(),
+            ));
         }
 
         let expected = self.expected_steward();
@@ -136,26 +143,17 @@ impl<St: EngineStore> Engine<St> {
             return self.finish();
         }
 
-        if let Err(e) = self.steward_list_housekeeping() {
-            self.report_failure("steward_list_housekeeping", &e);
-        }
         if let Err(e) = self.sync_scoring_members() {
             self.report_failure("sync_scoring_members", &e);
         }
         self.queues.clear_skipped();
         self.timing.last_commit_round_progress = None;
-        let working = self.start_working();
-        self.emit_phase(Some(working));
         self.round_candidate = None;
 
-        // Our own commit seated joiners: broadcast the sync they need as an
-        // ordinary control message, sealed at the epoch this merge reached.
-        if merged.is_local
-            && !delta.added.is_empty()
-            && let Err(e) = self.share_conversation_sync()
-        {
-            self.report_failure("conversation_sync_broadcast", &e);
-        }
+        // The phase follows the list: `Working` when one covers the new
+        // epoch, `Syncing` when an election has to elect one.
+        self.reconcile_list_and_phase();
+
         self.finish()
     }
 

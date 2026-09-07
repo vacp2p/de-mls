@@ -4,12 +4,12 @@ use prost::Message;
 
 use super::select::actions_match_voted;
 use crate::{
-    Action,
+    Action, ConversationError,
     engine::{
         config::EngineConfig,
         handle::{Engine, PendingMerge},
         store::{EngineStore, InMemoryStore, keys},
-        test_support::{id, member},
+        test_support::{id, joiner, member},
         types::{
             CommitHash, Decision, DecisionFailure, Event, MemberId, Phase, StagedFacts, Timestamp,
         },
@@ -61,6 +61,31 @@ fn removal(target: &str) -> ConversationUpdateRequest {
 }
 
 // ── admission at handle_candidate ───────────────────────────────────
+
+/// A joiner without a list refuses a candidate rather than judging it;
+/// nothing is discarded and nobody is scored.
+#[test]
+fn a_candidate_while_syncing_is_refused_and_kept() {
+    let mut e = joiner();
+    let hash = CommitHash::of(b"commit");
+    let result = e.handle_candidate(
+        at(0),
+        hash,
+        StagedFacts {
+            sender: id("alice"),
+            epoch: e.epoch,
+            actions: Vec::new(),
+            proposal_count: 0,
+            self_removed: false,
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(ConversationError::ConversationBlocked(_))
+    ));
+    assert!(e.round_candidate.is_none());
+    assert!(e.out.decisions.is_empty());
+}
 
 /// A candidate sealed at any epoch but the current one is discarded on
 /// sight, with no score against its sender: staleness is not misbehaviour.
@@ -226,7 +251,7 @@ fn the_epoch_stewards_candidate_merges_only_at_window_close() {
 }
 
 /// The steward's own commit, reported back through `handle_candidate` the
-/// same way a peer's is, merges with `pending_merge.is_local` set.
+/// same way a peer's is, merges with `pending_merge.facts` unset.
 #[test]
 fn the_own_commit_reported_through_handle_candidate_merges() {
     let mut e = engine(&["alice"]);
@@ -258,7 +283,7 @@ fn the_own_commit_reported_through_handle_candidate_merges() {
 
     e.start_selection();
     e.close_round().unwrap();
-    assert!(e.pending_merge.as_ref().is_some_and(|m| m.is_local));
+    assert!(e.pending_merge.as_ref().is_some_and(|m| m.facts.is_none()));
     let out = e.finish().unwrap();
     assert!(matches!(
         out.decisions.as_slice(),
@@ -335,7 +360,6 @@ fn a_commit_that_removes_us_asks_the_router_to_leave() {
             proposal_count: 1,
             self_removed: true,
         }),
-        is_local: false,
     });
     let out = e.commit_applied(at(0), hash, 1, &[id("bob")]).unwrap();
     assert_eq!(out.decisions, vec![Decision::Leave]);

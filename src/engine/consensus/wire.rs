@@ -30,6 +30,14 @@ pub(crate) struct ProposalParams {
     pub(crate) liveness_criteria_yes: bool,
 }
 
+/// Encode one `ControlMessage` payload for the router to seal.
+pub(crate) fn control_bytes(payload: control_message::Payload) -> Vec<u8> {
+    ControlMessage {
+        payload: Some(payload),
+    }
+    .encode_to_vec()
+}
+
 /// Encode `proposal` as the control message peers receive.
 pub(crate) fn control_proposal(proposal: Proposal) -> Vec<u8> {
     ControlMessage {

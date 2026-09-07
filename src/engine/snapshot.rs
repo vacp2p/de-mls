@@ -84,7 +84,6 @@ impl<St: EngineStore> Engine<St> {
         config.voting_delay = Duration::from_millis(meta.voting_delay_ms);
         config.liveness_criteria_yes = meta.liveness_criteria_yes;
         config.max_consensus_sessions = meta.max_consensus_sessions as usize;
-        config.unanswered_sync_rounds = meta.unanswered_sync_rounds;
         config.steward_list = StewardListConfig::new(meta.sn_min as usize, meta.sn_max as usize)?;
         config.scoring = ScoringConfig {
             default_score: meta.default_peer_score,
@@ -185,7 +184,6 @@ impl<St: EngineStore> Engine<St> {
             voting_delay_ms: self.config.voting_delay.as_millis() as u64,
             liveness_criteria_yes: self.config.liveness_criteria_yes,
             max_consensus_sessions: self.config.max_consensus_sessions as u64,
-            unanswered_sync_rounds: self.config.unanswered_sync_rounds,
             sn_min: self.config.steward_list.sn_min as u32,
             sn_max: self.config.steward_list.sn_max as u32,
             default_peer_score: self.scoring.default_score(),

@@ -49,9 +49,9 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// Start a conversation this member joined from a welcome. The welcome
-    /// carries nothing but the group state: the engine starts unsynced and
-    /// adopts the first `ConversationSync` a steward broadcasts, falling
-    /// back to `request_sync` if none arrives.
+    /// carries nothing but the group state: the engine starts in `Syncing`,
+    /// asks a steward for a `ConversationSync` in the returned `Output`, and
+    /// adopts the answer.
     pub fn join(
         conversation_id: &str,
         own: MemberId,
@@ -62,8 +62,11 @@ impl<St: EngineStore> Engine<St> {
     ) -> Result<(Self, Output), ConversationError> {
         let mut engine = Self::assemble(conversation_id, own, epoch, members, config, store)?;
         engine.begin(Timestamp::ZERO);
-        let phase = engine.phase();
-        engine.emit(Event::PhaseChange(phase));
+        // A joiner holds no steward list: ask for the sync in this very
+        // `Output` and report the answer turns as its wakeup.
+        let syncing = engine.start_syncing();
+        engine.emit_phase(Some(syncing));
+        engine.broadcast_sync_request();
         // A fresh store: every key gets its first write.
         engine.dirty = Dirty::ALL;
         let out = engine.finish()?;
@@ -106,6 +109,8 @@ impl<St: EngineStore> Engine<St> {
                 "restored snapshot is stale: dropping everything but scores and config"
             );
             engine.dirty = Dirty::ALL;
+            let syncing = engine.start_syncing();
+            engine.emit_phase(Some(syncing));
             engine.broadcast_sync_request();
         } else {
             if let Some(bytes) = Self::read_key(&engine.store, keys::STEWARD_LIST)? {
@@ -123,10 +128,12 @@ impl<St: EngineStore> Engine<St> {
             if let Some(bytes) = Self::read_key(&engine.store, keys::CONSENSUS)? {
                 engine.restore_sessions(&bytes)?;
             }
+            // The phase follows the restored list: `Working` when it covers
+            // the epoch, `Syncing` when the election it ran out into is still
+            // to be filed or voted. No ask: nobody holds a newer list.
+            engine.reconcile_list_and_phase();
         }
 
-        let phase = engine.phase();
-        engine.emit(Event::PhaseChange(phase));
         let out = engine.finish()?;
         Ok((engine, out))
     }
@@ -158,10 +165,24 @@ mod tests {
         )
         .expect("restore over an empty store");
         assert!(!engine.is_synced());
+        assert_eq!(engine.phase(), Phase::Syncing);
         assert!(
             out.events
                 .iter()
-                .any(|e| matches!(e, Event::PhaseChange(Phase::Working)))
+                .any(|e| matches!(e, Event::PhaseChange(Phase::Syncing)))
+        );
+        assert_eq!(
+            out.outbound
+                .iter()
+                .filter(|o| matches!(o, Outbound::Control(_)))
+                .count(),
+            1,
+            "a joiner asks for a sync"
+        );
+        assert_eq!(
+            out.wakeup,
+            Some(engine.config().backup_takeover_window * 2),
+            "a joiner wakes to report the answer missing"
         );
     }
 
@@ -199,6 +220,12 @@ mod tests {
         assert_eq!(restored.scoring.score_for(&member("bob")), bob_score);
         assert!(restored.steward_list.current_list().is_none());
         assert_eq!(restored.queues.approved_proposals_count(), 0);
+        assert_eq!(restored.phase(), Phase::Syncing);
+        assert!(
+            out.events
+                .iter()
+                .any(|e| matches!(e, Event::PhaseChange(Phase::Syncing)))
+        );
         assert_eq!(
             out.outbound
                 .iter()
@@ -206,5 +233,51 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(
+            out.wakeup,
+            Some(restored.config().backup_takeover_window * 2),
+            "the request it sent arms both answer turns"
+        );
+    }
+
+    /// A joiner asks for a sync in the output of its join, reports it
+    /// unanswered once both answer turns have passed, and does not ask
+    /// again on its own.
+    #[test]
+    fn a_joiner_asks_for_a_sync_at_join_and_reports_once() {
+        let (mut engine, out) = Engine::join(
+            "conv",
+            id("bob"),
+            1,
+            &[id("alice"), id("bob")],
+            EngineConfig::default(),
+            InMemoryStore::default(),
+        )
+        .expect("join");
+        let turns = engine.config().backup_takeover_window * 2;
+
+        assert_eq!(engine.phase(), Phase::Syncing);
+        assert_eq!(
+            out.outbound
+                .iter()
+                .filter(|o| matches!(o, Outbound::Control(_)))
+                .count(),
+            1
+        );
+        assert_eq!(out.wakeup, Some(turns));
+
+        let out = engine.tick(Timestamp::ZERO).expect("tick");
+        assert!(out.outbound.is_empty());
+        assert_eq!(engine.phase(), Phase::Syncing);
+
+        let out = engine.tick(Timestamp::ZERO + turns).expect("tick");
+        assert!(out.outbound.is_empty());
+        assert!(out.events.contains(&Event::SyncUnanswered));
+        assert_eq!(engine.phase(), Phase::Syncing);
+
+        let out = engine.tick(Timestamp::ZERO + turns * 2).expect("tick");
+        assert!(out.outbound.is_empty());
+        assert!(!out.events.contains(&Event::SyncUnanswered));
+        assert_eq!(engine.phase(), Phase::Syncing);
     }
 }

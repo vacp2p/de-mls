@@ -42,8 +42,8 @@ pub(crate) fn founder() -> Engine<InMemoryStore> {
     .0
 }
 
-/// A member seated by a welcome: no steward list until a sync is adopted,
-/// so it is neither steward nor epoch steward.
+/// A member seated by a welcome: starts in `Syncing` with no steward list
+/// until a sync is adopted, so it is neither steward nor epoch steward.
 pub(crate) fn joiner() -> Engine<InMemoryStore> {
     Engine::join(
         "conv",

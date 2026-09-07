@@ -16,8 +16,8 @@ mod phase_timer;
 mod proposal_kind;
 mod queues;
 mod snapshot;
-mod steward;
 mod store;
+mod sync;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod tick;
@@ -28,7 +28,7 @@ mod util;
 pub use config::{
     DEFAULT_BACKUP_TAKEOVER_WINDOW, DEFAULT_COMMIT_BATCH_WINDOW, DEFAULT_CONSENSUS_TIMEOUT,
     DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_CONSENSUS_SESSIONS, DEFAULT_PROPOSAL_EXPIRATION,
-    DEFAULT_UNANSWERED_SYNC_ROUNDS, DEFAULT_VOTING_DELAY, EngineConfig,
+    DEFAULT_VOTING_DELAY, EngineConfig,
 };
 pub use handle::Engine;
 pub use store::{EngineStore, InMemoryStore, keys};

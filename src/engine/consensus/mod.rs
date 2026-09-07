@@ -12,7 +12,7 @@ mod dispatch;
 mod outcome_bus;
 mod proposals;
 mod signer;
-mod wire;
+pub(crate) mod wire;
 
 pub(crate) use outcome_bus::{OutcomeBus, OutcomeReceiver};
 pub(crate) use signer::MemberSigner;
