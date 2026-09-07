@@ -73,10 +73,13 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// Steward-inactivity freeze entry: once the inactivity window passes with
-    /// approved work pending, open the commit round. Held while an election is
-    /// in flight — committing on a known-stale list only wastes a round.
+    /// approved work pending, open the commit round.
+    ///
+    /// Held while an election is in flight and while an emergency is voting:
+    /// the partial freeze withholds the commit round too (RFC §Partial Freeze),
+    /// so the verdict never lands on an open round and invalidates the candidate already built.
     fn start_freeze_on_inactivity(&mut self) -> Result<(), ConversationError> {
-        if self.queues.has_election_in_flight() {
+        if self.queues.has_election_in_flight() || self.queues.has_active_emergency() {
             return Ok(());
         }
         let proposal_count = self.queues.approved_proposals_count();
@@ -104,7 +107,9 @@ mod tests {
             store::InMemoryStore,
             types::{Action, CommitHash, Decision, MemberId, Phase, StagedFacts},
         },
-        protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberInvite},
+        protos::de_mls::messages::v1::{
+            ConversationUpdateRequest, MemberInvite, ViolationEvidence,
+        },
     };
 
     fn at(secs: u64) -> Timestamp {
@@ -183,6 +188,33 @@ mod tests {
                 .iter()
                 .any(|d| matches!(d, Decision::Merge { hash: h } if *h == hash)),
             "merges once the freeze window elapses"
+        );
+    }
+
+    /// While an emergency is voting the commit round stays shut, however
+    /// long approved work has waited; it opens on the first tick after the
+    /// emergency resolves.
+    #[test]
+    fn the_inactivity_freeze_waits_while_an_emergency_is_voting() {
+        let mut e = engine();
+        e.queues.insert_approved_proposal(7, invite("bob"));
+        let emergency = ViolationEvidence::deadlock(0)
+            .with_creator(b"alice".to_vec())
+            .into_update_request()
+            .unwrap();
+        e.queues.track_voting_proposal(9, &emergency);
+
+        let window = e.config.commit_batch_window;
+        e.tick(at(0)).unwrap();
+        e.tick(at(0) + window * 2).unwrap();
+        assert_eq!(e.phase(), Phase::Working, "held while the emergency votes");
+
+        e.queues.remove_voting_proposal(9);
+        e.tick(at(0) + window * 2).unwrap();
+        assert_eq!(
+            e.phase(),
+            Phase::Freezing,
+            "opens once the emergency resolves"
         );
     }
 }
