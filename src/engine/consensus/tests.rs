@@ -303,7 +303,8 @@ mod outcome_application {
         engine::{
             consensus::apply::{ApplyOutcome, apply_outcome},
             queues::EngineQueues,
-            types::{Event, Verdict},
+            test_support::founder,
+            types::{Event, Timestamp, Verdict},
         },
         peer_scoring::emergency_score_ops,
         protos::de_mls::messages::v1::{
@@ -600,8 +601,6 @@ mod outcome_application {
         assert_eq!(queues.approved_proposals_count(), 1);
     }
 
-    use crate::engine::{test_support::founder, types::Timestamp};
-
     /// A `Deadlock` YES skips the epoch steward for this epoch: the skip is
     /// recorded, `StewardSkipped` names it, and the rotation then hands the
     /// role to the next eligible steward.
@@ -629,5 +628,28 @@ mod outcome_application {
         let eligible = e.queues.steward_eligibility(&e.members);
         let next = e.steward_list.epoch_steward(e.epoch, &eligible).unwrap();
         assert_ne!(next, es.as_slice(), "the next eligible steward takes over");
+    }
+
+    /// An election installed while an ask is pending settles it: the node
+    /// got its list, so no miss follows when the answer turns pass.
+    #[test]
+    fn an_installed_election_settles_a_pending_ask() {
+        let mut e = founder();
+        e.begin(Timestamp::ZERO);
+        e.broadcast_sync_request();
+        assert!(e.timing.sync_deadline.is_some());
+
+        let list = e.steward_list.current_list().expect("founder list");
+        let election = StewardElectionProposal {
+            proposed_stewards: list.members().to_vec(),
+            election_epoch: list.election_epoch(),
+            retry_round: list.retry_round(),
+        };
+        e.handle_election_accepted(election).expect("install");
+        assert!(e.timing.sync_deadline.is_none());
+
+        e.begin(Timestamp::ZERO + e.config.backup_takeover_window * 2);
+        e.drive_sync_request();
+        assert!(!e.out.events.contains(&Event::SyncUnanswered));
     }
 }

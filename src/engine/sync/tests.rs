@@ -1,16 +1,33 @@
 use std::time::Duration;
 
+use prost::Message;
+
 use super::adopt::{
     first_zero_timing_field, synced_default_peer_score, validate_conversation_sync,
 };
 use crate::{
-    DEFAULT_PEER_SCORE, Engine, EngineConfig, Event, InMemoryStore,
+    DEFAULT_PEER_SCORE, Decision, Engine, EngineConfig, Event, InMemoryStore,
     engine::{
-        test_support::{creator, founder, id, joiner},
-        types::{Outbound, Phase, Timestamp},
+        test_support::{creator, founder, id, joiner, member},
+        types::{CommitHash, Outbound, Phase, StagedFacts, Timestamp},
     },
-    protos::de_mls::messages::v1::{ConversationSync, TimingConfig},
+    protos::de_mls::messages::v1::{
+        ControlMessage, ConversationSync, TimingConfig, control_message,
+    },
 };
+
+fn at(secs: u64) -> Timestamp {
+    Timestamp::from_duration_since_epoch(Duration::from_secs(secs))
+}
+
+/// Decode the `ConversationSync` payload out of the control bytes a steward
+/// built.
+fn decode_sync(bytes: &[u8]) -> ConversationSync {
+    match ControlMessage::decode(bytes).expect("decode").payload {
+        Some(control_message::Payload::ConversationSync(sync)) => sync,
+        other => panic!("expected a ConversationSync payload, got {other:?}"),
+    }
+}
 
 fn nonzero_timing() -> TimingConfig {
     TimingConfig {
@@ -351,4 +368,151 @@ fn adopting_a_sync_clamps_voting_delay_below_its_timeout() {
         .expect("handle control");
 
     assert_eq!(engine.config.voting_delay, Duration::from_millis(2_500));
+}
+
+/// A node that is already `Working` — its own list still covers the epoch —
+/// adopts an answer whose election is strictly newer, in any phase: the
+/// pull is not limited to `Syncing`.
+#[test]
+fn a_working_node_adopts_a_newer_election() {
+    let members = [id("alice"), id("bob"), id("carol")];
+    // B's list, elected at 0, has two stewards (default sn_max) and so
+    // covers epochs 0-1: setting its epoch to 1 leaves it `Working`.
+    let mut b = Engine::create(
+        at(0),
+        "conv",
+        id("alice"),
+        0,
+        &members,
+        EngineConfig::default(),
+        InMemoryStore::default(),
+    )
+    .expect("create")
+    .0;
+    b.epoch = 1;
+    assert_eq!(b.phase(), Phase::Working);
+
+    let a = Engine::create(
+        at(0),
+        "conv",
+        id("alice"),
+        1,
+        &members,
+        EngineConfig::default(),
+        InMemoryStore::default(),
+    )
+    .expect("create")
+    .0;
+    let bytes = a.build_conversation_sync().expect("a list is installed");
+    let sync = decode_sync(&bytes);
+
+    b.begin(at(5));
+    b.broadcast_sync_request();
+    b.on_conversation_sync(sync).expect("adopt");
+
+    assert_eq!(b.steward_list.election_epoch(), Some(1));
+    assert!(b.out.events.contains(&Event::SyncApplied));
+    assert_eq!(b.phase(), Phase::Working);
+    assert!(b.timing.sync_deadline.is_none());
+}
+
+/// A current node — its own list is from this same election or a newer one
+/// — still counts the answer against the request it sent: nothing is
+/// adopted, but the pending deadline is settled and no miss follows.
+#[test]
+fn a_current_node_counts_an_answer_and_reports_no_miss() {
+    let members = [id("alice"), id("bob"), id("carol")];
+    let mut a = Engine::create(
+        at(0),
+        "conv",
+        id("alice"),
+        1,
+        &members,
+        EngineConfig::default(),
+        InMemoryStore::default(),
+    )
+    .expect("create")
+    .0;
+
+    a.begin(at(0));
+    a.broadcast_sync_request();
+    let bytes = a.build_conversation_sync().expect("a list is installed");
+    let sync = decode_sync(&bytes);
+
+    a.on_conversation_sync(sync)
+        .expect("answered, nothing newer");
+    assert!(!a.out.events.contains(&Event::SyncApplied));
+    assert!(a.timing.sync_deadline.is_none());
+
+    a.begin(at(0) + a.config.backup_takeover_window * 2);
+    a.drive_sync_request();
+    assert!(!a.out.events.contains(&Event::SyncUnanswered));
+}
+
+/// A candidate held while `Freezing` is re-checked against the newly
+/// adopted list: one from anyone but its epoch steward is discarded and the
+/// round reopens on `Working`. The lists here may name the same steward;
+/// the sender is chosen to be someone else.
+#[test]
+fn adopting_a_newer_list_drops_a_candidate_from_the_old_steward() {
+    let members = [id("alice"), id("bob"), id("carol")];
+    let mut b = Engine::create(
+        at(0),
+        "conv",
+        id("alice"),
+        0,
+        &members,
+        EngineConfig::default(),
+        InMemoryStore::default(),
+    )
+    .expect("create")
+    .0;
+    b.epoch = 1;
+
+    let a = Engine::create(
+        at(0),
+        "conv",
+        id("alice"),
+        1,
+        &members,
+        EngineConfig::default(),
+        InMemoryStore::default(),
+    )
+    .expect("create")
+    .0;
+    let bytes = a.build_conversation_sync().expect("a list is installed");
+    let sync = decode_sync(&bytes);
+
+    let new_steward = a.expected_steward().expect("a steward at epoch 1");
+    let stale_sender = ["alice", "bob", "carol"]
+        .into_iter()
+        .find(|m| member(m) != new_steward)
+        .expect("at least one member isn't the new epoch steward");
+
+    b.begin(at(5));
+    b.broadcast_sync_request();
+    b.start_freezing();
+    let hash = CommitHash::of(b"stale candidate");
+    b.round_candidate = Some((
+        hash,
+        StagedFacts {
+            sender: id(stale_sender),
+            epoch: 1,
+            actions: vec![],
+            proposal_count: 0,
+            self_removed: false,
+        },
+    ));
+
+    b.on_conversation_sync(sync).expect("adopt");
+
+    assert!(
+        b.out
+            .decisions
+            .iter()
+            .any(|d| matches!(d, Decision::Discard { hashes } if hashes == &vec![hash]))
+    );
+    assert!(b.round_candidate.is_none());
+    assert_eq!(b.phase(), Phase::Working);
+    assert!(b.out.events.contains(&Event::PhaseChange(Phase::Working)));
 }

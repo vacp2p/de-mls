@@ -7,36 +7,41 @@ use tracing::{info, warn};
 use crate::{
     ConversationError, DEFAULT_PEER_SCORE, ScoreSnapshot, ScoringConfig, StewardList,
     StewardListConfig,
-    engine::{handle::Engine, store::EngineStore, types::Event, util::member_set},
+    engine::{
+        handle::Engine,
+        store::EngineStore,
+        types::{Decision, Event, Phase},
+        util::member_set,
+    },
     protos::de_mls::messages::v1::{ConversationSync, TimingConfig},
 };
 
 impl<St: EngineStore> Engine<St> {
-    /// Adopt a steward's `ConversationSync` when we hold no steward list, or
-    /// one that is exhausted at the current epoch. Reconstructs the candidate
-    /// pool (members minus the carried unsettled set), re-derives the steward
-    /// list to verify it, then applies list, protocol flags, timing and peer
-    /// scores.
+    /// Adopt a steward's `ConversationSync` when this node holds no steward
+    /// list, or one from a strictly older election, in any phase.
+    /// Reconstructs the candidate pool (members minus the carried unsettled
+    /// set), re-derives the steward list to verify it, then applies list,
+    /// protocol flags, timing and peer scores. A valid answer settles the
+    /// pending request whether or not it is adopted.
     pub(crate) fn on_conversation_sync(
         &mut self,
         sync: ConversationSync,
     ) -> Result<(), ConversationError> {
-        // A sync is on the wire — the request round is answered, so disarm any
-        // pending backup takeover before the guard returns.
-        self.timing.sync_takeover_anchor = None;
         let current_epoch = self.epoch;
-        // A synced node adopts nothing; an exhausted list yields only to a
-        // strictly newer election.
-        if self.is_synced() {
+        // Every node validates, a current one included: only a valid sync
+        // settles anything below.
+        if !validate_conversation_sync(&self.conversation_id, &sync, current_epoch, &self.members)?
+        {
             return Ok(());
         }
+        // A valid answer settles the request, adopted or not: the requester's
+        // deadline and a backup steward's pending turn.
+        self.timing.sync_deadline = None;
+        self.timing.sync_takeover_anchor = None;
         if let Some(mine) = self.steward_list.election_epoch()
             && sync.election_epoch <= mine
         {
-            return Ok(());
-        }
-        if !validate_conversation_sync(&self.conversation_id, &sync, current_epoch, &self.members)?
-        {
+            // Current: nothing newer to adopt.
             return Ok(());
         }
 
@@ -45,6 +50,8 @@ impl<St: EngineStore> Engine<St> {
         self.emit(Event::SyncApplied);
         if let Some(working) = self.leave_syncing() {
             self.emit_phase(Some(working));
+        } else {
+            self.recheck_round_candidate();
         }
         info!(
             conversation = %self.conversation_id,
@@ -55,6 +62,30 @@ impl<St: EngineStore> Engine<St> {
             "conversation sync applied"
         );
         Ok(())
+    }
+
+    /// A newer list may name a different epoch steward; a candidate held
+    /// from anyone else is dropped and the round reopens on the right
+    /// steward's. `Freezing` is the only phase that holds a candidate:
+    /// `Selection` lasts from round close to `commit_applied` inside one
+    /// drive loop, which no control message enters. Discarding this
+    /// node's own hash is a no-op at the router, whose pending commit
+    /// clears before the next merge.
+    fn recheck_round_candidate(&mut self) {
+        if self.phase != Phase::Freezing {
+            return;
+        }
+        let Some((hash, facts)) = &self.round_candidate else {
+            return;
+        };
+        if self.expected_steward().as_deref() == Some(facts.sender.as_bytes()) {
+            return;
+        }
+        let hash = *hash;
+        self.round_candidate = None;
+        self.decide(Decision::Discard { hashes: vec![hash] });
+        let working = self.start_working();
+        self.emit_phase(Some(working));
     }
 
     /// Apply a validated sync: steward list, protocol bounds, retry ceiling,

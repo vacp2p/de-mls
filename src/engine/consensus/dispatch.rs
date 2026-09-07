@@ -177,7 +177,7 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// Validate and install an accepted steward list.
-    fn handle_election_accepted(
+    pub(crate) fn handle_election_accepted(
         &mut self,
         election: StewardElectionProposal,
     ) -> Result<(), ConversationError> {
@@ -203,14 +203,10 @@ impl<St: EngineStore> Engine<St> {
             "steward election applied"
         );
         self.dirty.steward_list = true;
+        // An installed election settles a pending ask in any phase.
+        self.timing.sync_deadline = None;
         if let Some(working) = self.leave_syncing() {
             self.emit_phase(Some(working));
-        }
-
-        // Broadcast the elected list so a member that missed the vote learns
-        // it and authorizes the next steward's commit.
-        if self.is_epoch_steward() {
-            self.share_conversation_sync();
         }
         Ok(())
     }

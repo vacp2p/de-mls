@@ -222,6 +222,24 @@ pub enum Verdict {
     Failed,
 }
 
+/// Why a candidate was discarded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateRejection {
+    /// Its sender is not the epoch steward this node expects.
+    NotEpochSteward,
+    /// Its actions do not match the voted set.
+    ActionsMismatch,
+}
+
+impl fmt::Display for CandidateRejection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CandidateRejection::NotEpochSteward => write!(f, "not the epoch steward"),
+            CandidateRejection::ActionsMismatch => write!(f, "actions do not match the voted set"),
+        }
+    }
+}
+
 /// Something the engine observed or did. Informational: dropping one loses
 /// nothing the engine needs, and each request-like variant names its
 /// fallback.
@@ -261,6 +279,13 @@ pub enum Event {
     CommitMissing {
         epoch: u64,
         steward: Option<MemberId>,
+    },
+    /// A candidate from `sender` was discarded. The router cannot tell a
+    /// misbehaving committer from its own stale picture; a `request_sync`
+    /// settles it.
+    CandidateRejected {
+        sender: MemberId,
+        reason: CandidateRejection,
     },
     /// The deadlock vote passed: `steward` is skipped for this epoch and
     /// the next eligible steward on the list builds the commit.

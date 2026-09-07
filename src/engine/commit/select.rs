@@ -12,7 +12,7 @@ use crate::{
         handle::{Engine, PendingMerge},
         queues::EngineQueues,
         store::EngineStore,
-        types::{Action, Decision, Event, MemberId},
+        types::{Action, CandidateRejection, Decision, Event, MemberId},
     },
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, conversation_update_request::Payload,
@@ -52,6 +52,10 @@ impl<St: EngineStore> Engine<St> {
         if !valid {
             self.apply_score_ops(&[penalty(&sender, ScoreEvent::BrokenMlsProposal)]);
             self.decide(Decision::Discard { hashes: vec![hash] });
+            self.emit(Event::CandidateRejected {
+                sender: facts.sender.clone(),
+                reason: CandidateRejection::ActionsMismatch,
+            });
             return self.close_round_without_commit();
         }
 

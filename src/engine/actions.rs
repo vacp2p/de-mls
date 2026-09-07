@@ -111,17 +111,17 @@ impl<St: EngineStore> Engine<St> {
         self.finish()
     }
 
-    /// Ask the stewards for a `ConversationSync` again. The engine asks once
-    /// on its own, at `join` and at a stale restart, and reports
-    /// [`Event::SyncUnanswered`](crate::engine::Event::SyncUnanswered) when
-    /// both answer turns pass; asking again is the router's call (contract
-    /// rule 7f). A no-op outside `Syncing`: a list covers the epoch and
-    /// nothing newer would be adopted.
+    /// Ask the stewards for a `ConversationSync`. The engine asks once on its
+    /// own, at `join` and at a stale restart; every other ask is the
+    /// router's, in any phase: after an offline stretch, after
+    /// [`Event::SyncUnanswered`](crate::engine::Event::SyncUnanswered), after
+    /// [`Event::CandidateRejected`](crate::engine::Event::CandidateRejected).
+    /// An answer carrying nothing newer is ignored silently; `SyncApplied`
+    /// reports an adoption; `SyncUnanswered` reports two answer turns with no
+    /// valid answer.
     pub fn request_sync(&mut self, now: Timestamp) -> Result<Output, ConversationError> {
         self.begin(now);
-        if self.phase == Phase::Syncing {
-            self.broadcast_sync_request();
-        }
+        self.broadcast_sync_request();
         self.finish()
     }
 
@@ -208,14 +208,16 @@ mod tests {
         assert_eq!(out.outbound.len(), 1);
     }
 
-    /// A synced node has nothing to ask: the call sends nothing and arms
-    /// nothing.
+    /// The router's ask goes out in any phase, `Working` included: exactly
+    /// one control message, and the answer-turn window is armed as the
+    /// wakeup.
     #[test]
-    fn request_sync_is_a_noop_while_synced() {
+    fn request_sync_asks_in_any_phase() {
         let mut engine = creator();
+        let config = engine.config().clone();
         let out = engine.request_sync(Timestamp::ZERO).expect("request sync");
-        assert!(out.outbound.is_empty());
-        assert!(out.wakeup.is_none());
+        assert!(matches!(out.outbound.as_slice(), [Outbound::Control(_)]));
+        assert_eq!(out.wakeup, Some(config.backup_takeover_window * 2));
     }
 
     /// Scoring an unknown member has nothing to file.

@@ -247,8 +247,8 @@ impl<St: EngineStore> Engine<St> {
 
     /// End a driving call: drain pending consensus outcomes, compute the
     /// next wakeup, write the keys this call changed before the output is
-    /// returned (contract rule 13), and hand back everything the call
-    /// produced.
+    /// returned (the store is durable before anything is sent), and hand
+    /// back everything the call produced.
     pub(crate) fn finish(&mut self) -> Result<Output, ConversationError> {
         self.drain_consensus_outcomes();
         self.anchor_inactivity_timer();

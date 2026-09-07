@@ -58,10 +58,9 @@ MUST.
 
 1. One engine per conversation, driven from one thread at a time. Calls
    never interleave.
-2. `now` passed to the engine is monotonic per conversation. `tick(now)`
-   is called no later than the `wakeup` of the last `Output`. The
-   constructors take the same clock; a deadline armed at construction is
-   measured against it.
+2. `now` is monotonic per conversation. The constructors take the same
+   clock, and a deadline armed at construction is measured against it.
+   `tick(now)` is called no later than the `wakeup` of the last `Output`.
 3. Every `Output` is executed completely before the next driving call,
    in this order: seal and send `outbound` (at the current epoch), then
    execute `decisions` in the order given, then handle `events`. A report
@@ -73,85 +72,94 @@ MUST.
 
 **Inbound**
 
-5. Sealed frames are opened first. A control payload reaches the engine
-   only with the sender MLS authenticated and the epoch it was sealed at.
-   A payload the router could not authenticate never reaches the engine.
-6. The router never reads, interprets or generates control bytes, and
-   never ranks or validates candidates. A candidate on the wire is the raw
-   commit bytes; the router stages it and reports the facts through
-   `handle_candidate`, the group rejecting a foreign or stale commit.
-7. Chat content never reaches the engine.
-7a. An invite proposal carries the joiner's id as the proposer read it from
-    the key package. Every member executes `Decision::ValidateKeyPackage`
-    (full validation plus identity equals the claimed id) and reports
-    `key_package_checked` before its vote proceeds; the engine never parses
-    a key package.
-7b. A key-package announcement is the router's. It arrives outside the
-    group (a discovery topic, a contact exchange) and never reaches the
-    engine as bytes: the router validates the key package, reads the
-    joiner's id from it, decides whether it wants the member, and calls
-    `propose_add(now, member, key_package)`. A `ConversationBlocked`
-    refusal means a commit round is open; the router keeps the
-    announcement and proposes it again after it drains
-    `Event::PhaseChange(Phase::Working)`. The engine keeps no
-    announcement and no re-propose memory; any member may propose, and the
-    engine dedups a proposal whose target a peer's proposal or an approval
-    already covers.
-7c. `Event::ConsensusReached` carries a verdict. `Rejected` is the
-    group's decision: the router does not file the same request again
-    this epoch. `Failed` is no decision (the timeout passed with neither
-    side at threshold): filing again is the router's call, and the
-    engine treats the new filing like a first one. `Approved` work lands
-    in a later commit; `MembersChanged` reports what landed.
-7d. `Phase::Syncing` means the engine holds no steward list that covers
+5. Sealed frames are opened first. Chat content never reaches the engine.
+   A control payload reaches it only with the sender MLS-authenticated and
+   the epoch it was sealed at; one the router could not authenticate never
+   does. The router never reads, interprets or generates control bytes.
+6. Control traffic is delivered in the order it was sent and before the
+   commit of the epoch it belongs to. A node that missed a proposal or an
+   emergency outcome cannot judge that epoch's commit, and a sync cannot
+   restore what it missed: it rejects the commit and stays at its epoch
+   until the router brings the traffic and the commit back.
+7. A candidate on the wire is the raw commit bytes. The router stages it
+   and reports the facts through `handle_candidate`; it never ranks or
+   validates candidates, the group rejecting a foreign or stale commit.
+
+**Proposals**
+
+8. A key-package announcement is the router's. It arrives outside the
+   group (a discovery topic, a contact exchange) and never reaches the
+   engine as bytes: the router validates the key package, reads the
+   joiner's id from it, decides whether it wants the member, and calls
+   `propose_add(now, member, key_package)`. A `ConversationBlocked`
+   refusal means a commit round is open or the engine is `Syncing`; the
+   router keeps the announcement and proposes it again after it drains
+   `Event::PhaseChange(Phase::Working)`. The engine keeps no announcement
+   and no re-propose memory; any member may propose, and the engine dedups
+   a proposal whose target a peer's proposal or an approval already covers.
+9. An invite proposal carries the joiner's id as the proposer read it from
+   the key package. Every member executes `Decision::ValidateKeyPackage`
+   (full validation plus identity equals the claimed id) and reports
+   `key_package_checked` before its vote proceeds; the engine never parses
+   a key package.
+10. `Event::ConsensusReached` carries a verdict. `Rejected` is the group's
+    decision: the router does not file the same request again this epoch.
+    `Failed` is no decision (the timeout passed with neither side at
+    threshold): filing again is the router's call, and the engine treats
+    the new filing like a first one. `Approved` work lands in a later
+    commit; `MembersChanged` reports what landed.
+
+**Sync**
+
+11. `Phase::Syncing` means the engine holds no steward list that covers
     the epoch: a joiner, a restart from a stale store, or a list that ran
     out at an epoch boundary. Until it adopts a `ConversationSync` or an
-    election lands it refuses proposals (rule 7b's retry on `Working`
-    covers them) and candidates (rule 7e); votes continue.
-7e. A candidate reported while the engine is `Syncing` is refused with
-    `ConversationBlocked`. The router keeps the commit staged and calls
-    `handle_candidate` again after it drains `Event::PhaseChange(Phase::Working)`;
-    a merge in between drops it as stale (rule 9).
-7f. A sync is pulled. At `join` and at a stale restart the engine sends
-    one `ConversationSyncRequest` in the same `Output` and waits two
-    answer turns, the epoch steward's and then a backup's; if both pass
-    it reports `Event::SyncUnanswered` once and asks no more. A list that
-    ran out is the election's to fix, not a request's. Asking again is
-    `request_sync(now)`, the router's call: it knows the transport, the
-    engine does not.
+    election lands it refuses proposals and candidates with
+    `ConversationBlocked`; votes continue. The router keeps a refused
+    candidate staged and calls `handle_candidate` again after it drains
+    `Event::PhaseChange(Phase::Working)` (a refused proposal follows rule
+    8); a merge in between drops the candidate as stale (rule 14).
+12. A sync is pulled, never pushed. The engine asks once when it holds
+    nothing, at `join` and at a stale restart; every other ask is
+    `request_sync(now)`, the router's call in any phase: after an offline
+    stretch, after `Event::SyncUnanswered`, after
+    `Event::CandidateRejected`. A synced steward answers. Any node whose
+    list is from an older election adopts the answer, in any phase, and
+    reports `SyncApplied`; a current node ignores it. Two answer turns
+    with no valid answer report `SyncUnanswered` once. A list elected
+    after the node's own epoch is not a valid answer for it (it cannot be
+    recomputed over a member set the node lacks): a node an epoch behind
+    heals through the missing commit (rule 6), not through a sync.
 
 **Commits**
 
-8. The epoch advances only by executing `Decision::Merge`. No self-update,
-   add, remove, external commit or merge of a pending commit outside one.
-9. Staged commits are held by hash. `Decision::Discard` drops the named
-   ones; after a merge every remaining staged commit is dropped as stale.
-10. A loser clears its own pending commit before merging the winner.
-11. After a merge, `commit_applied(now, hash, epoch, members)` is called
+13. The epoch advances only by executing `Decision::Merge`. No
+    self-update, add, remove, external commit or merge of a pending commit
+    outside one.
+14. Staged commits are held by hash. `Decision::Discard` drops the named
+    ones; after a merge every remaining staged commit is dropped as stale.
+    A loser clears its own pending commit before merging the winner.
+15. After a merge, `commit_applied(now, hash, epoch, members)` is called
     before any other engine call. A missed report forks the steward
     election on that node.
-12. After `Decision::BuildCommit` the router builds, keeps the commit
+16. After `Decision::BuildCommit` the router builds, keeps the commit
     pending, broadcasts the commit bytes, and reports it through
     `handle_candidate` with the facts the build returned. The welcome
-    carries nothing but the MLS welcome. The joiner's sync is a steward's
-    answer to the request its own `join` sends, delivered as an ordinary
-    control message.
+    carries nothing but the MLS welcome.
 
 **Storage and restart**
 
-13. The `EngineStore` write of a driving call is durable before the
+17. The `EngineStore` write of a driving call is durable before the
     `outbound` of the same `Output` is sent. A node must not send a vote
     it can forget.
-14. On restart the router loads the group first, then
-    `Engine::restore(now, store, own, epoch, members)`, then executes the
-    returned `Output` (it may contain a sync request). A store the engine
-    never wrote starts the engine as `join` does.
-15. On join the router opens the welcome first, then
-    `Engine::join(now, store, own, epoch, members)`, then executes the
-    returned `Output`: the engine is in `Syncing`, the `Output` carries
-    its sync request and reports the end of the answer turns as its
-    wakeup.
-16. Exactly one live group instance per storage scope.
+18. On restart the router loads the group first, then
+    `Engine::restore(now, store, own, epoch, members)`; on join it opens
+    the welcome first, then `Engine::join(now, store, own, epoch,
+    members)`. Either way it executes the returned `Output`. A joiner, a
+    store the engine never wrote, and a store from another epoch all start
+    in `Syncing`: that `Output` carries the sync request and reports the
+    end of the answer turns as its wakeup.
+19. Exactly one live group instance per storage scope.
 
 ## 4. Reference router
 
@@ -193,8 +201,8 @@ impl Router {
         self.drive(now, out);
     }
 
-    // Rule 7b. The announcement arrived outside the group; the router owns
-    // it until the engine has accepted the proposal.
+    // The announcement arrived outside the group; the router owns it
+    // until the engine has accepted the proposal.
     fn on_announcement(&mut self, now: Timestamp, key_package: Vec<u8>) {
         if self.mls.validate_key_package(&key_package).is_err() { return }
         let Ok(member) = MlsService::key_package_identity(&key_package) else { return };
@@ -229,11 +237,12 @@ impl Router {
             }
             for e in out.events.drain(..) {
                 if matches!(e, Event::PhaseChange(Phase::Working)) {
-                    next.merge(self.propose_announced(now));         // rule 7b retry
-                    next.merge(self.retry_held_candidates(now));     // rule 7e retry
+                    next.merge(self.propose_announced(now));         // refused proposals
+                    next.merge(self.retry_held_candidates(now));     // refused candidates
                 }
-                // Rule 7f. SyncUnanswered: the app decides whether to call
-                // request_sync.
+                // SyncUnanswered and CandidateRejected: the app decides
+                // whether to call request_sync; a stale list and a
+                // misbehaving committer look the same from here.
                 self.app.notify(e);
             }
             if let Some(d) = out.wakeup { self.timer.arm(d); }
