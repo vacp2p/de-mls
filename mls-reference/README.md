@@ -195,7 +195,9 @@ MUST.
     the same `Output`; the router executes that `Output` as any other. A
     commit other than the one the group applied leaves the node on a
     different epoch state, the next frames fail to open, and the node
-    rejoins.
+    rejoins. With two members no vote can pass while one is away, so this
+    is also how the survivor moves the group, and how the returning member
+    learns which commit was applied.
 
 **Liveness**
 
@@ -225,7 +227,7 @@ and the network. A router written another way should still pass them.
 | 11 | a node with no list guesses the steward; at list exhaustion every node enters `Syncing`, the election lands, work resumes | `engine_bed_membership::five_members_keep_committing`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs` |
 | 12 | a joiner or a restarted node never learns the list; a silent epoch steward leaves the ask unanswered until the backup takes over | `engine_bed_sync::backup_steward_answers_when_the_epoch_steward_is_silent`, `engine_bed_sync::a_working_member_can_ask_and_learns_it_is_current` |
 | 13, 14 | a foreign commit merges, or a discarded one stays staged and merges later | `engine_bed_liveness::foreign_commit_is_discarded_and_scored` |
-| 15, 21 | the engine's member set drifts from the group's; a commit merged on the router's own trust is adopted in full and the node follows the next one | `engine_bed_catch_up::a_member_that_missed_only_the_commit_adopts_it_and_follows_the_next` |
+| 15, 21 | the engine's member set drifts from the group's; a commit merged on the router's own trust is adopted in full and the node follows the next one | `engine_bed_catch_up::a_member_that_missed_only_the_commit_adopts_it_and_follows_the_next`, `engine_bed_catch_up::two_members_survivor_commits_on_its_own_authority` |
 | 17, 18 | a restart loses the vote in flight, or loads the engine before the group and starts from the wrong epoch | `engine_bed_flow::restart_mid_vote_resumes_and_merges`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs` |
 
 Rules 1, 2, 4 and 19 are preconditions the test suite satisfies by construction
