@@ -76,6 +76,9 @@ MUST.
    A control payload reaches it only with the sender MLS-authenticated and
    the epoch it was sealed at; one the router could not authenticate never
    does. The router never reads, interprets or generates control bytes.
+   A frame the group cannot open because it was sealed at a newer epoch is
+   the router's cue that this node is behind (rule 20); the engine never
+   sees it.
 6. Control traffic is delivered in the order it was sent and before the
    commit of the epoch it belongs to. A node that missed a proposal or an
    emergency outcome cannot judge that epoch's commit, and a sync cannot
@@ -153,13 +156,25 @@ MUST.
     `outbound` of the same `Output` is sent. A node must not send a vote
     it can forget.
 18. On restart the router loads the group first, then
-    `Engine::restore(now, store, own, epoch, members)`; on join it opens
-    the welcome first, then `Engine::join(now, store, own, epoch,
-    members)`. Either way it executes the returned `Output`. A joiner, a
-    store the engine never wrote, and a store from another epoch all start
-    in `Syncing`: that `Output` carries the sync request and reports the
-    end of the answer turns as its wakeup.
+    `Engine::restore(now, conversation_id, own, epoch, members, store)`;
+    on join it opens the welcome first, then `Engine::join(now,
+    conversation_id, own, epoch, members, config, store)`. Either way it
+    executes the returned `Output`. A joiner, a store the engine never
+    wrote, and a store from another epoch all start in `Syncing`: that
+    `Output` carries the sync request and reports the end of the answer
+    turns as its wakeup.
 19. Exactly one live group instance per storage scope.
+20. Catch-up is the live path replayed. A member that comes back fetches
+    the frames the group published since the last one it consumed, sorted
+    by send time, restores the engine at that cursor's time, and feeds
+    them through the ordinary calls with each frame's time as `now`,
+    running every wakeup due before a frame before the frame itself, then
+    the wakeups due up to the present. During replay every `outbound` is
+    dropped and `Decision::BuildCommit` is not executed: the group decided
+    those while this member was away. A commit merges only through
+    `Decision::Merge`, exactly as live; nothing is adopted without its
+    vote, and a member removed while away gets `Decision::Leave` at that
+    epoch.
 
 ## 4. Reference router
 
