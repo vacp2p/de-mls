@@ -9,11 +9,8 @@ use std::error::Error as StdError;
 
 use openmls::prelude::tls_codec::Error as TlsCodecError;
 use openmls::{
-    group::{NewGroupError, ProposeRemoveMemberError, WelcomeError},
-    prelude::{
-        CommitToPendingProposalsError, CreateMessageError, MergeCommitError,
-        MergePendingCommitError, ProcessMessageError, ProposeAddMemberError,
-    },
+    group::{CommitBuilderStageError, CreateCommitError, NewGroupError, WelcomeError},
+    prelude::{CreateMessageError, MergeCommitError, MergePendingCommitError, ProcessMessageError},
 };
 
 /// Boxed `std::error::Error` used as the storage-error payload in any
@@ -51,13 +48,7 @@ pub enum MlsError {
     MergePendingCommit(BoxedError),
 
     #[error(transparent)]
-    CommitToPendingProposals(BoxedError),
-
-    #[error(transparent)]
-    ProposeAddMember(BoxedError),
-
-    #[error(transparent)]
-    ProposeRemoveMember(BoxedError),
+    BuildCommit(BoxedError),
 
     #[error(transparent)]
     NewGroup(BoxedError),
@@ -110,21 +101,15 @@ impl<E: StdError + Send + Sync + 'static> From<MergePendingCommitError<E>> for M
     }
 }
 
-impl<E: StdError + Send + Sync + 'static> From<CommitToPendingProposalsError<E>> for MlsError {
-    fn from(e: CommitToPendingProposalsError<E>) -> Self {
-        MlsError::CommitToPendingProposals(Box::new(e))
+impl From<CreateCommitError> for MlsError {
+    fn from(e: CreateCommitError) -> Self {
+        MlsError::BuildCommit(Box::new(e))
     }
 }
 
-impl<E: StdError + Send + Sync + 'static> From<ProposeAddMemberError<E>> for MlsError {
-    fn from(e: ProposeAddMemberError<E>) -> Self {
-        MlsError::ProposeAddMember(Box::new(e))
-    }
-}
-
-impl<E: StdError + Send + Sync + 'static> From<ProposeRemoveMemberError<E>> for MlsError {
-    fn from(e: ProposeRemoveMemberError<E>) -> Self {
-        MlsError::ProposeRemoveMember(Box::new(e))
+impl<E: StdError + Send + Sync + 'static> From<CommitBuilderStageError<E>> for MlsError {
+    fn from(e: CommitBuilderStageError<E>) -> Self {
+        MlsError::BuildCommit(Box::new(e))
     }
 }
 

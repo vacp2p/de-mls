@@ -6,6 +6,7 @@
 
 mod common;
 
+use openmls::group::MlsGroupJoinConfig;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -93,7 +94,7 @@ fn create_builds_a_working_steward_session_without_user() {
         "standalone",
         &integrator.provider,
         integrator.credential.clone(),
-        &test_mls_group_config(),
+        test_mls_group_config(),
         &integrator.signer,
         &integrator.consensus,
         integrator.scoring(),
@@ -133,7 +134,7 @@ fn mls_group_is_readable_through_openmls() {
         "standalone-read",
         &integrator.provider,
         integrator.credential.clone(),
-        &test_mls_group_config(),
+        test_mls_group_config(),
         &integrator.signer,
         &integrator.consensus,
         integrator.scoring(),
@@ -179,7 +180,7 @@ fn join_completes_in_one_call() {
         "standalone-welcome",
         &alice.provider,
         alice.credential.clone(),
-        &test_mls_group_config(),
+        test_mls_group_config(),
         &alice.signer,
         &alice.consensus,
         alice.scoring(),
@@ -227,6 +228,7 @@ fn join_completes_in_one_call() {
         &bystander.provider,
         &bystander.signer,
         &welcome.welcome_bytes,
+        MlsGroupJoinConfig::builder(),
         &welcome.conversation_sync_bytes,
         &bystander.consensus,
         bystander.scoring(),
@@ -247,6 +249,7 @@ fn join_completes_in_one_call() {
         &bob.provider,
         &bob.signer,
         &welcome.welcome_bytes,
+        MlsGroupJoinConfig::builder(),
         &welcome.conversation_sync_bytes,
         &bob.consensus,
         bob.scoring(),
@@ -283,7 +286,7 @@ fn create_with_members_seeds_initial_members_at_genesis() {
         "genesis",
         &alice.provider,
         alice.credential.clone(),
-        &test_mls_group_config(),
+        test_mls_group_config(),
         &alice.signer,
         &alice.consensus,
         alice.scoring(),
@@ -329,6 +332,7 @@ fn create_with_members_seeds_initial_members_at_genesis() {
             &member.provider,
             &member.signer,
             &welcome.welcome_bytes,
+            MlsGroupJoinConfig::builder(),
             &welcome.conversation_sync_bytes,
             &member.consensus,
             member.scoring(),
@@ -368,7 +372,7 @@ fn create_with_members_founds_a_subset_steward_group() {
         "genesis-subset",
         &alice.provider,
         alice.credential.clone(),
-        &test_mls_group_config(),
+        test_mls_group_config(),
         &alice.signer,
         &alice.consensus,
         alice.scoring(),
@@ -402,6 +406,7 @@ fn create_with_members_founds_a_subset_steward_group() {
             &member.provider,
             &member.signer,
             &welcome.welcome_bytes,
+            MlsGroupJoinConfig::builder(),
             &welcome.conversation_sync_bytes,
             &member.consensus,
             member.scoring(),

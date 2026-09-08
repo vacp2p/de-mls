@@ -134,7 +134,7 @@ mod tests {
     fn candidate(commit_byte: u8) -> CommitCandidate {
         CommitCandidate {
             conversation_id: b"g".to_vec(),
-            mls_proposals: vec![vec![0xAB; 8]],
+            proposal_count: 1,
             commit_message: vec![commit_byte; 32],
             steward_member_id: vec![0x01],
         }

@@ -216,9 +216,9 @@ where
             self_removed,
             commit_actions,
         } => (commit_sender, self_removed, commit_actions),
-        StagingOutcome::Abort => return reject_staged(mls, provider, None),
+        StagingOutcome::Abort => return Ok(reject_staged(mls, None)),
         StagingOutcome::Violation(v) => {
-            return reject_staged(mls, provider, v.target_score_op());
+            return Ok(reject_staged(mls, v.target_score_op()));
         }
     };
 
@@ -226,14 +226,14 @@ where
     if let Some(violation) =
         check_commit_sender_authorized(conversation, steward_list, &commit_sender, ctx)
     {
-        return reject_staged(mls, provider, violation.target_score_op());
+        return Ok(reject_staged(mls, violation.target_score_op()));
     }
 
     // MLS actions must match the set we voted to approve.
     if let Some(violation) =
         validate_commit_candidate(conversation, &commit_sender, &commit_actions, ctx)?
     {
-        return reject_staged(mls, provider, violation.target_score_op());
+        return Ok(reject_staged(mls, violation.target_score_op()));
     }
 
     // The remote wins. Clear our own pending commit (if any) before applying it.
@@ -256,17 +256,9 @@ where
 
 /// Roll back a staged remote candidate and drop it, optionally with a penalty,
 /// so the priority loop falls through to the next candidate.
-fn reject_staged<Pr>(
-    mls: &mut MlsService,
-    provider: &Pr,
-    penalty: Option<ScoreOp>,
-) -> Result<CandidateOutcome, ConversationError>
-where
-    Pr: OpenMlsProvider,
-    <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
-{
-    mls.discard_staged_commit(provider)?;
-    Ok(CandidateOutcome::Drop(penalty))
+fn reject_staged(mls: &mut MlsService, penalty: Option<ScoreOp>) -> CandidateOutcome {
+    mls.discard_staged_commit();
+    CandidateOutcome::Drop(penalty)
 }
 
 /// Apply post-commit bookkeeping and return the cleared batch (empty when
@@ -332,7 +324,7 @@ mod tests {
         let local = BufferedCommitCandidate {
             candidate_msg: CommitCandidate {
                 conversation_id: b"test-conversation".to_vec(),
-                mls_proposals: artifacts.proposals.clone(),
+                proposal_count: artifacts.proposal_count as u32,
                 commit_message: artifacts.commit.clone(),
                 steward_member_id: alice.clone(),
             },
@@ -346,7 +338,7 @@ mod tests {
         let failing_remote = BufferedCommitCandidate {
             candidate_msg: CommitCandidate {
                 conversation_id: b"test-conversation".to_vec(),
-                mls_proposals: vec![],
+                proposal_count: 1,
                 commit_message: vec![0xFFu8; 64],
                 steward_member_id: alice.clone(),
             },

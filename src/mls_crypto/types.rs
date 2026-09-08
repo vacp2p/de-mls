@@ -34,16 +34,6 @@ pub enum MlsProposalOutput {
     Remove(Vec<u8>),
 }
 
-/// The kind of an MLS wire message, as far as the commit-round pipeline cares.
-/// `Proposal` and `Commit` are the control kinds it gates on; `Other` covers
-/// everything else (application messages, welcomes, unrecognized frames).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MlsMessageKind {
-    Proposal,
-    Commit,
-    Other,
-}
-
 /// Represents a decrypted application message received from the network,
 /// containing the plaintext `payload` and the MLS-authenticated sender as an
 /// OpenMLS [`Member`] (including leaf index, credential, and keys).
@@ -56,37 +46,34 @@ pub struct DecryptedMessage {
 /// Outcome of staging a remote commit candidate.
 #[derive(Clone, Debug)]
 pub enum StagedCandidateResult {
-    /// Staged and ready to merge. `commit_sender` is the MLS-authenticated
-    /// signer; staging checked that every bundled proposal came from it.
+    /// Staged and ready to merge; `commit_sender` is the MLS-authenticated
+    /// signer.
     Staged {
         commit_sender: Vec<u8>,
         /// Whether this commit removes us from the conversation.
         self_removed: bool,
-        /// Membership changes (Add/Remove) carried by the commit's proposals.
+        /// Membership changes (Add/Remove) the commit performs.
         actions: Vec<MlsProposalOutput>,
+        /// Total proposals of any type — checked against the wire claim.
+        proposal_count: usize,
     },
-    /// Could not be staged — a stale (earlier-epoch) commit, a wrong group, or a
-    /// slot holding the wrong message kind. Dropped without penalty: the commit
+    /// Could not be staged — a stale (earlier-epoch) commit, a wrong group, or
+    /// bytes that aren't a commit at all. Dropped without penalty: the commit
     /// never staged, so its sender isn't MLS-authenticated, and de-mls won't pin
     /// a violation on the forgeable wire `steward_member_id`. (The RFC counts an
     /// earlier-epoch commit as a steward violation, but only an authenticated
     /// committer can be scored for it.)
     Aborted,
-    /// Not every bundled proposal was signed by `commit_sender`. MLS permits a
-    /// commit to reference others' proposals; de-mls requires the committer to
-    /// own each one, so this is a broken commit attributed to `commit_sender`.
-    BundleSenderMismatch { commit_sender: Vec<u8> },
 }
 
-/// The raw MLS artifacts from building a commit candidate, before it's merged
-/// or wrapped into the wire `CommitCandidate` envelope: the serialized
-/// proposals, the commit, and a welcome when the batch adds members.
+/// The raw MLS artifacts from building a commit candidate: the commit (its
+/// proposals ride inline) and a welcome when the batch adds members.
 #[derive(Clone, Debug)]
 pub struct CommitArtifacts {
-    /// Serialized MLS proposal messages.
-    pub proposals: Vec<Vec<u8>>,
-    /// Serialized MLS commit message.
+    /// Serialized MLS commit message, proposals inline.
     pub commit: Vec<u8>,
+    /// Total proposals in the commit — the candidate's wire claim.
+    pub proposal_count: usize,
     /// Welcome message for new members, when the batch has any adds.
     pub welcome: Option<Vec<u8>>,
 }

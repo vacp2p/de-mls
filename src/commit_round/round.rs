@@ -10,9 +10,10 @@ use crate::{
     commit_round::{
         apply::apply_in_priority_order, context::RoundContext, validate::rank_applicable_candidates,
     },
-    mls_crypto::{MlsMessageKind, MlsService},
+    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{CommitCandidate, MemberWelcome},
 };
+use openmls::prelude::ContentType;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 use sha2::{Digest, Sha256};
 
@@ -53,10 +54,10 @@ pub fn compute_commit_hash(commit_message: &[u8]) -> CommitHash {
     CommitHash(hasher.finalize().into())
 }
 
-/// Ingest a commit candidate received from a peer: validate it (non-empty
-/// proposals/commit, valid MLS wire kinds, non-empty `steward_member_id`,
-/// non-duplicate hash) and buffer it into the commit round. No MLS state is
-/// mutated. The local-candidate counterpart is `Conversation::build_local_candidate`.
+/// Ingest a commit candidate received from a peer: validate it (non-zero
+/// claimed proposals, non-empty commit of MLS wire kind Commit, non-empty
+/// `steward_member_id`, non-duplicate hash) and buffer it into the commit
+/// round. The local-candidate counterpart is `Conversation::build_local_candidate`.
 pub fn receive_commit_candidate(
     conversation: &mut ConversationQueues,
     mls: &MlsService,
@@ -72,8 +73,8 @@ pub fn receive_commit_candidate(
         return Ok(ProcessResult::Noop(NoopReason::AlreadyCommitted));
     }
 
-    if candidate_msg.mls_proposals.is_empty() || candidate_msg.commit_message.is_empty() {
-        tracing::debug!(conversation = %conversation_id, "candidate ignored: empty proposals or commit");
+    if candidate_msg.proposal_count == 0 || candidate_msg.commit_message.is_empty() {
+        tracing::debug!(conversation = %conversation_id, "candidate ignored: empty commit or zero claimed proposals");
         return Ok(ProcessResult::Noop(NoopReason::EmptyCandidatePayload));
     }
 
@@ -83,20 +84,14 @@ pub fn receive_commit_candidate(
     }
 
     // Wire-level kind check — no MLS staging.
-    let proposals_ok = candidate_msg
-        .mls_proposals
-        .iter()
-        .all(|p| matches!(mls.inspect_message_kind(p), Ok(MlsMessageKind::Proposal)));
     let commit_ok = matches!(
-        mls.inspect_message_kind(&candidate_msg.commit_message),
-        Ok(MlsMessageKind::Commit)
+        mls.inspect_content_type(&candidate_msg.commit_message),
+        Ok(Some(ContentType::Commit))
     );
-    if !proposals_ok || !commit_ok {
+    if !commit_ok {
         tracing::debug!(
             conversation = %conversation_id,
-            proposals_ok,
-            commit_ok,
-            "candidate ignored: wire kind mismatch (not Proposal/Commit)"
+            "candidate ignored: wire kind mismatch (not a Commit)"
         );
         return Ok(ProcessResult::Noop(NoopReason::WireKindMismatch));
     }

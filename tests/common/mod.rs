@@ -12,8 +12,9 @@ pub mod wallet;
 use de_mls::defaults::{DefaultPeerScoring, InMemoryPeerScoreStorage};
 use de_mls::{PeerScoringService, ScoringConfig, default_score_deltas};
 use openmls::credentials::{BasicCredential, CredentialWithKey};
-use openmls::group::MlsGroupCreateConfig;
+use openmls::group::{MlsGroupCreateConfig, MlsGroupCreateConfigBuilder};
 use openmls::key_packages::KeyPackage;
+use openmls::prelude::Ciphersuite;
 use openmls::prelude::tls_codec::Serialize as _;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
@@ -24,8 +25,7 @@ pub type TestProvider = OpenMlsRustCrypto;
 /// Build a fresh credential + signer for `member_id` (the integrator-side
 /// "credentials" the library no longer owns).
 pub fn test_credential(member_id: &[u8]) -> (CredentialWithKey, SignatureKeyPair) {
-    let config = test_mls_group_config();
-    let signer = SignatureKeyPair::new(config.ciphersuite().signature_algorithm()).expect("signer");
+    let signer = SignatureKeyPair::new(TEST_CIPHERSUITE.signature_algorithm()).expect("signer");
     let credential = CredentialWithKey {
         credential: BasicCredential::new(member_id.to_vec()).into(),
         signature_key: signer.to_public_vec().into(),
@@ -33,11 +33,13 @@ pub fn test_credential(member_id: &[u8]) -> (CredentialWithKey, SignatureKeyPair
     (credential, signer)
 }
 
-// Build a default Group create configuration, which enables ratchet tree extension
-pub fn test_mls_group_config() -> MlsGroupCreateConfig {
-    MlsGroupCreateConfig::builder()
-        .use_ratchet_tree_extension(true)
-        .build()
+/// The ciphersuite the tests build credentials and key packages with.
+pub const TEST_CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+
+/// The integrator-side half of the create config. de-mls stamps its own
+/// reliability settings on top, so nothing here needs to set them.
+pub fn test_mls_group_config() -> MlsGroupCreateConfigBuilder {
+    MlsGroupCreateConfig::builder().ciphersuite(TEST_CIPHERSUITE)
 }
 
 /// A minted key package plus the owner's `member_id` — the (bytes, id) bundle
@@ -67,9 +69,8 @@ pub fn mint_key_package(
     signer: &SignatureKeyPair,
 ) -> MintedKeyPackage {
     let signature_key = credential.signature_key.as_slice().to_vec();
-    let config = test_mls_group_config();
     let bundle = KeyPackage::builder()
-        .build(config.ciphersuite(), provider, signer, credential.clone())
+        .build(TEST_CIPHERSUITE, provider, signer, credential.clone())
         .expect("key package");
     let bytes = bundle
         .key_package()

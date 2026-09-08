@@ -24,6 +24,7 @@ use std::time::Duration;
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use openmls::credentials::CredentialWithKey;
+use openmls::group::MlsGroupJoinConfig;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use prost::Message;
@@ -168,7 +169,7 @@ impl Member {
             conversation_id,
             &integ.provider,
             integ.credential.clone(),
-            &mls_group_config,
+            mls_group_config,
             &integ.signer,
             &integ.consensus,
             scoring,
@@ -718,6 +719,7 @@ impl Member {
             &self.integ.provider,
             &self.integ.signer,
             &welcome.welcome_bytes,
+            MlsGroupJoinConfig::builder(),
             &welcome.conversation_sync_bytes,
             &self.integ.consensus,
             scoring,

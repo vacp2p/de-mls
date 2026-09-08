@@ -91,9 +91,7 @@ pub(crate) fn make_creator_mls(member_id: &[u8]) -> (TestMls, TestProvider, Sign
         "test-conversation".to_string(),
         &provider,
         credential,
-        &MlsGroupCreateConfig::builder()
-            .use_ratchet_tree_extension(true)
-            .build(),
+        MlsGroupCreateConfig::builder(),
         &signer,
     )
     .expect("create creator mls");
