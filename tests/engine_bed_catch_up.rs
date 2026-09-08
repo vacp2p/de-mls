@@ -1,6 +1,7 @@
 //! Catch-up on the fake bed: a member that was offline through a vote and a
 //! commit replays the retained frames and merges the missed commit through
-//! the ordinary path.
+//! the ordinary path, and a returning steward reaches the group's verdict
+//! on a vote it missed instead of casting its own.
 
 mod common;
 
@@ -9,7 +10,7 @@ use std::time::Duration;
 use common::fake_router::Bed;
 use common::fast_config;
 use common::net::Frame;
-use de_mls::engine::{Decision, Event, Verdict};
+use de_mls::engine::{Decision, Event, Phase, Verdict};
 
 #[test]
 fn a_member_offline_through_a_commit_catches_up_by_replay() {
@@ -231,4 +232,67 @@ fn a_member_that_missed_only_the_commit_adopts_it_and_follows_the_next() {
         merges_before + 1,
         "n merges frank's commit through the ordinary round"
     );
+}
+
+// The live member's recovery vote failed while the steward was away, one
+// vote of two. The replay reaches the same verdict instead of adding the
+// steward's own vote and skipping it; the steward commits the queued work.
+#[test]
+fn a_failed_recovery_vote_stays_failed_on_replay() {
+    let mut bed = Bed::new("conv", "alice", fast_config());
+    let bob = bed.seat(0, "bob");
+    let steward = bed.epoch_steward();
+    let other = if steward == 0 { bob } else { 0 };
+
+    let carol = bed.add_pending("carol");
+    let key_package = bed.key_package_of(carol);
+    let carol_id = bed.nodes[carol].own.clone();
+    let now = bed.now;
+    bed.router_mut(other).announce(now, carol_id, key_package);
+    bed.process_until("both approved carol", |b| {
+        [0, bob].iter().all(|&n| {
+            b.router(n)
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::ConsensusReached { .. }))
+        })
+    });
+
+    bed.take_offline(steward);
+    bed.process_until("the miss is reported in Working", |b| {
+        b.router(other)
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::CommitMissing { .. }))
+            && b.router(other).engine.phase() == Phase::Working
+    });
+    let now = bed.now;
+    bed.router_mut(other)
+        .act(now, |e| e.request_recovery(now))
+        .expect("recovery filed");
+    bed.process_until("the recovery vote failed", |b| {
+        b.router(other).events.iter().any(|e| {
+            matches!(
+                e,
+                Event::ConsensusReached {
+                    verdict: Verdict::Failed,
+                    ..
+                }
+            )
+        })
+    });
+
+    bed.come_back(steward);
+    bed.process_until("carol seated everywhere", |b| {
+        b.is_live(carol) && b.converged()
+    });
+
+    assert!(
+        !bed.router(steward)
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::StewardSkipped { .. })),
+        "the replay reached the group's verdict"
+    );
+    assert_eq!(bed.router(other).mls.members().len(), 3);
 }

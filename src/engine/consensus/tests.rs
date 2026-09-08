@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use hashgraph_like_consensus::{
     protos::consensus::v1::{Proposal, Vote},
     storage::ConsensusStorage,
@@ -295,6 +297,75 @@ fn auto_vote_fires_at_its_deadline() {
         [Outbound::Control(_)]
     ));
     assert!(engine.timing.pending_auto_votes.is_empty());
+}
+
+/// A replayed proposal arms only its consensus timeout: no vote request,
+/// no key-package check, no auto-vote. The timeout reproduces the group's
+/// verdict.
+#[test]
+fn a_replayed_proposal_arms_only_its_timeout() {
+    let mut engine = engine();
+    let horizon = Timestamp::ZERO + Duration::from_secs(1000);
+    engine.replay_until(horizon);
+    engine.begin(Timestamp::ZERO + Duration::from_secs(10));
+
+    let request = ConversationUpdateRequest::remove_member(member(4));
+    let proposal = peer_proposal(&member(2), 20, &request, 2);
+    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+
+    assert!(
+        !engine
+            .out
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::VoteRequested { .. })),
+        "a replay casts no vote and asks for none"
+    );
+    assert!(
+        !engine
+            .out
+            .decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ValidateKeyPackage { .. }))
+    );
+    assert!(engine.timing.pending_auto_votes.is_empty());
+    assert!(engine.timing.pending_consensus_timeouts.contains_key(&20));
+
+    let fire_at = engine.timing.pending_consensus_timeouts[&20];
+    let out = engine.tick(fire_at).unwrap();
+    assert!(
+        out.events.iter().any(|e| matches!(
+            e,
+            Event::ConsensusReached {
+                verdict: Verdict::Failed,
+                ..
+            }
+        )),
+        "the timeout reproduces the group's verdict, not a fresh vote"
+    );
+}
+
+/// At the horizon the engine is live again: a proposal asks for a vote
+/// and arms the auto-vote as usual.
+#[test]
+fn past_the_horizon_the_engine_votes_again() {
+    let mut engine = engine();
+    let horizon = Timestamp::ZERO + Duration::from_secs(100);
+    engine.replay_until(horizon);
+    engine.begin(horizon);
+
+    let request = ConversationUpdateRequest::remove_member(member(4));
+    let proposal = peer_proposal(&member(2), 21, &request, 4);
+    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+
+    assert!(
+        engine
+            .out
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::VoteRequested { proposal_id, .. } if *proposal_id == 21))
+    );
+    assert!(engine.timing.pending_auto_votes.contains_key(&21));
 }
 
 /// What a resolved proposal does to the queues, and the follow-up it owes.

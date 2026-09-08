@@ -175,12 +175,13 @@ MUST.
 19. Exactly one live group instance per storage scope.
 20. Catch-up is the live path replayed. A member that comes back fetches
     the frames the group published since the last one it consumed, sorted
-    by send time, restores the engine at that cursor's time, and feeds
-    them through the ordinary calls with each frame's time as `now`,
-    running every wakeup due before a frame before the frame itself, then
-    the wakeups due up to the present. During replay every `outbound` is
-    dropped and `Decision::BuildCommit` is not executed: the group decided
-    those while this member was away. A commit merges only through
+    by send time, restores the engine at that cursor's time, tells it the
+    present with `replay_until(present)`, and feeds them through the
+    ordinary calls with each frame's time as `now`, running every wakeup
+    due before a frame before the frame itself, then the wakeups due up to
+    the present. Before the present the engine casts no vote and asks for
+    none, every `outbound` is dropped and `Decision::BuildCommit` is not
+    executed: the group decided those while this member was away. A commit merges only through
     `Decision::Merge`, exactly as live; nothing is adopted without its
     vote, and a member removed while away gets `Decision::Leave` at that
     epoch.
@@ -217,7 +218,7 @@ and the network. A router written another way should still pass them.
 |---|---|---|
 | 3, 16 | a decision executed out of order or half-way leaves the group and the engine disagreeing on the epoch | `engine_bed_smoke::creator_seats_two_joiners_and_chat_crosses` |
 | 5 | chat reaches the engine, or a vote is counted for a sender the group never authenticated | `engine_bed_smoke::creator_seats_two_joiners_and_chat_crosses` |
-| 6, 20 | a member that missed the traffic cannot judge the commit; replayed in order with the frame's time it merges through the ordinary path | `engine_bed_catch_up::a_member_offline_through_a_commit_catches_up_by_replay` |
+| 6, 20 | a member that missed the traffic cannot judge the commit; replayed in order with the frame's time it merges through the ordinary path | `engine_bed_catch_up::a_member_offline_through_a_commit_catches_up_by_replay`, `engine_bed_catch_up::a_failed_recovery_vote_stays_failed_on_replay` |
 | 7 | a commit from anyone but the epoch steward is applied; or the substitute's commit, rejected a moment before the skip verdict, is lost and the node stays behind | `engine_bed_liveness::foreign_commit_is_discarded_and_scored`, `engine_bed_liveness::a_substitute_commit_that_beats_the_verdict_is_staged_again_after_the_skip` |
 | 8 | an announcement refused while a round is open is never proposed again | `engine_bed_flow::announcement_during_a_round_is_retried_after_it_closes` |
 | 9, 10 | an invite lands without the key package checked, or a rejected one lands anyway | `engine_bed_flow::creator_adds_one_then_a_member_adds_another`, `engine_bed_membership::rejected_invite_never_lands` |
