@@ -413,6 +413,18 @@ impl FakeRouter {
         }
     }
 
+    /// A commit received outside the live path, merged on the router's own
+    /// trust and reported after the fact.
+    pub fn adopt_commit(&mut self, now: Timestamp, bytes: Vec<u8>) {
+        self.mls.stage(&bytes).expect("stage the adopted commit");
+        let hash = CommitHash::of(&bytes);
+        let applied = self.merge(hash).expect("merge the adopted commit");
+        let out = self
+            .engine
+            .commit_applied(now, hash, applied.epoch, &applied.members);
+        self.finish(now, out);
+    }
+
     fn merge(
         &mut self,
         hash: CommitHash,
@@ -653,6 +665,12 @@ impl Bed {
     pub fn take_offline(&mut self, node: usize) {
         self.mute(node);
         self.nodes[node].offline_since = Some(self.now);
+    }
+
+    /// Back on the live network with no history to replay.
+    pub fn reconnect(&mut self, node: usize) {
+        self.nodes[node].offline_since = None;
+        self.unmute(node);
     }
 
     /// Resume, then catch up: restore at the cursor, replay what the group

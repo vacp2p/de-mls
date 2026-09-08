@@ -7,7 +7,7 @@
 //! the group; the engine names a hash and the router reports back through
 //! [`Engine::commit_applied`] or [`Engine::decision_failed`].
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{
     ConversationError, ScoreEvent,
@@ -101,6 +101,10 @@ impl<St: EngineStore> Engine<St> {
 
     /// The router merged `hash`; the group is now at `epoch` with `members`.
     /// The engine moves its own view only here.
+    ///
+    /// A hash the engine did not decide is an adoption: the router merged on
+    /// its own trust; the engine takes the group's facts in full, reports
+    /// `CommitAdopted`, keeps `Syncing` if it is there, and asks for a sync.
     pub fn commit_applied(
         &mut self,
         now: Timestamp,
@@ -113,22 +117,20 @@ impl<St: EngineStore> Engine<St> {
         adopted.sort();
         adopted.dedup();
 
-        let merged = match self.pending_merge.take() {
-            Some(pending) if pending.hash == hash => pending,
-            _ => {
-                // The group is the truth even when the engine did not name
-                // this commit: adopt its facts and say so.
-                self.emit(Event::Error {
-                    operation: "commit_applied".to_owned(),
-                    message: format!("merged {hash:?} without a matching merge decision"),
-                });
-                self.epoch = epoch;
-                self.members = adopted;
-                self.round_candidate = None;
-                self.dirty.meta = true;
-                return self.finish();
-            }
+        let pending = self.pending_merge.take();
+        let decided = pending.as_ref().is_some_and(|p| p.hash == hash);
+        let facts = if decided {
+            pending.and_then(|p| p.facts)
+        } else {
+            None
         };
+        if !decided {
+            warn!(
+                conversation = %self.conversation_id,
+                "merged {hash:?} without a matching merge decision: adopting the group's facts"
+            );
+            self.emit(Event::CommitAdopted { hash });
+        }
 
         let delta = MembershipDelta::between(&self.members, &adopted);
         self.members = adopted;
@@ -138,8 +140,8 @@ impl<St: EngineStore> Engine<St> {
 
         // A commit that unseats us ends the conversation here: no steward
         // work applies to a group we are no longer in.
-        let self_removed = merged.facts.as_ref().is_some_and(|f| f.self_removed)
-            || delta.removed.contains(&self.own);
+        let self_removed =
+            facts.as_ref().is_some_and(|f| f.self_removed) || delta.removed.contains(&self.own);
         if self_removed {
             info!(conversation = %self.conversation_id, "commit removed this member");
             self.cancel_all_auto_votes();
@@ -154,8 +156,16 @@ impl<St: EngineStore> Engine<St> {
         self.round_candidate = None;
 
         // The phase follows the list: `Working` when one covers the new
-        // epoch, `Syncing` when an election has to elect one.
-        self.reconcile_list_and_phase();
+        // epoch, `Syncing` when an election has to elect one. While
+        // `Syncing` an adoption keeps the phase: a node with no list would
+        // install one from an incomplete picture.
+        if decided || self.phase != Phase::Syncing {
+            self.reconcile_list_and_phase();
+        }
+
+        if !decided && self.timing.sync_deadline.is_none() {
+            self.broadcast_sync_request();
+        }
 
         self.finish()
     }

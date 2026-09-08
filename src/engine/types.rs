@@ -302,6 +302,10 @@ pub enum Event {
         added: Vec<MemberId>,
         removed: Vec<MemberId>,
     },
+    /// The router merged a commit the engine did not decide: the group's
+    /// facts were adopted without the vote's judgment, and the same
+    /// `Output` asks the stewards for a sync.
+    CommitAdopted { hash: CommitHash },
 }
 
 /// Everything one driving call produced. The router executes it completely,
