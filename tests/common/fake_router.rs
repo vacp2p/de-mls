@@ -38,6 +38,10 @@ pub struct FakeRouter {
     /// `ConversationBlocked` (the engine was `Syncing`) — retried the same
     /// way as `pending_announcements`.
     held_candidates: Vec<(CommitHash, StagedFacts)>,
+    /// Set for the span of `replay`: outbound is dropped and a
+    /// `Decision::BuildCommit` is skipped, since the group decided those
+    /// while this router was away.
+    replaying: bool,
 }
 
 impl FakeRouter {
@@ -96,6 +100,7 @@ impl FakeRouter {
             left: false,
             pending_announcements: Vec::new(),
             held_candidates: Vec::new(),
+            replaying: false,
         }
     }
 
@@ -175,6 +180,33 @@ impl FakeRouter {
         self.engine = engine;
         self.pending_announcements.clear();
         self.drive(now, out);
+    }
+
+    /// Catch-up as the contract describes it: the retained frames in send
+    /// order, every wakeup due before a frame run before it, with the
+    /// frame's time as `now`; outbound and builds dropped, since the group
+    /// decided those while this member was away.
+    pub fn replay(&mut self, frames: Vec<(Timestamp, Frame)>, until: Timestamp) {
+        self.replaying = true;
+        for (t, frame) in frames {
+            self.run_due(t);
+            self.on_frame(t, frame);
+        }
+        self.run_due(until);
+        self.replaying = false;
+        self.outbox.clear();
+    }
+
+    /// Fire every wakeup due at or before `until`, each at its own deadline.
+    fn run_due(&mut self, until: Timestamp) {
+        let mut iterations = 0;
+        while let Some(due) = self.next_wakeup.filter(|&w| w <= until) {
+            self.on_wakeup(due);
+            iterations += 1;
+            if iterations > 1_000 {
+                panic!("replay tick loop did not advance");
+            }
+        }
     }
 
     /// Frames produced since the last call, in order.
@@ -302,6 +334,9 @@ impl FakeRouter {
     }
 
     fn send(&mut self, outbound: Outbound) {
+        if self.replaying {
+            return;
+        }
         let Outbound::Control(bytes) = outbound;
         let sealed = self.mls.seal(Kind::Control, &bytes);
         self.outbox.push(Frame::Sealed(sealed));
@@ -318,22 +353,26 @@ impl FakeRouter {
                 self.engine.key_package_checked(now, proposal_id, valid)
             }
             Decision::BuildCommit { actions } => {
-                let built = self.mls.build_commit(&actions);
-                if let Some(draft) = built.welcome {
-                    self.welcomes.insert(built.hash, draft);
+                if self.replaying {
+                    Ok(Output::default())
+                } else {
+                    let built = self.mls.build_commit(&actions);
+                    if let Some(draft) = built.welcome {
+                        self.welcomes.insert(built.hash, draft);
+                    }
+                    self.outbox.push(Frame::Commit(built.commit));
+                    self.engine.handle_candidate(
+                        now,
+                        built.hash,
+                        StagedFacts {
+                            sender: self.mls.own_id().clone(),
+                            epoch: self.mls.epoch(),
+                            actions: built.actions,
+                            proposal_count: built.proposal_count,
+                            self_removed: false,
+                        },
+                    )
                 }
-                self.outbox.push(Frame::Commit(built.commit));
-                self.engine.handle_candidate(
-                    now,
-                    built.hash,
-                    StagedFacts {
-                        sender: self.mls.own_id().clone(),
-                        epoch: self.mls.epoch(),
-                        actions: built.actions,
-                        proposal_count: built.proposal_count,
-                        self_removed: false,
-                    },
-                )
             }
             Decision::Merge { hash } => match self.merge(hash) {
                 Ok(applied) => {
@@ -416,6 +455,9 @@ pub struct Node {
     pub name: String,
     pub own: MemberId,
     pub router: Option<FakeRouter>,
+    /// Set while the node's process is down: the time it went offline, and
+    /// the cursor `come_back` replays from.
+    pub offline_since: Option<Timestamp>,
 }
 
 /// Several routers on one virtual clock and one network.
@@ -440,6 +482,7 @@ impl Bed {
                 name: creator.to_string(),
                 own,
                 router: Some(router),
+                offline_since: None,
             }],
             conversation_id: conversation_id.to_string(),
             config,
@@ -457,6 +500,7 @@ impl Bed {
             name: name.to_string(),
             own: FakeMls::member_id(name),
             router: None,
+            offline_since: None,
         });
         self.nodes.len() - 1
     }
@@ -573,6 +617,9 @@ impl Bed {
             }
         }
         for node in &mut self.nodes {
+            if node.offline_since.is_some() {
+                continue;
+            }
             if let Some(router) = node.router.as_mut() {
                 router.on_wakeup(now);
             }
@@ -600,6 +647,26 @@ impl Bed {
 
     pub fn unmute(&mut self, node: usize) {
         self.net.unmute(node);
+    }
+
+    /// The member's process is down: it neither sends, receives nor ticks.
+    pub fn take_offline(&mut self, node: usize) {
+        self.mute(node);
+        self.nodes[node].offline_since = Some(self.now);
+    }
+
+    /// Resume, then catch up: restore at the cursor, replay what the group
+    /// published since, rejoin the live network.
+    pub fn come_back(&mut self, node: usize) {
+        let cursor = self.nodes[node]
+            .offline_since
+            .take()
+            .expect("node is not offline");
+        let frames = self.net.since(cursor, node);
+        self.router_mut(node).restart(cursor);
+        let now = self.now;
+        self.router_mut(node).replay(frames, now);
+        self.unmute(node);
     }
 
     /// Every live node is at the same epoch.
