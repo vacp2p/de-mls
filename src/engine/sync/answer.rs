@@ -7,7 +7,9 @@ use tracing::info;
 
 use crate::{
     engine::{consensus::wire::control_bytes, handle::Engine, store::EngineStore},
-    protos::de_mls::messages::v1::{ConversationSync, PeerScore, TimingConfig, control_message},
+    protos::de_mls::messages::v1::{
+        ConversationSync, JoinEpoch, PeerScore, TimingConfig, control_message,
+    },
 };
 
 impl<St: EngineStore> Engine<St> {
@@ -37,13 +39,18 @@ impl<St: EngineStore> Engine<St> {
         // recompute the list order.
         let retry_round = list.retry_round();
 
-        // Members that weren't settled at election time. A joiner uses them to
-        // reconstruct the candidate pool and re-derive the list itself.
-        let unsettled_members: Vec<Vec<u8>> = self
+        // Every join epoch this node holds for a current member. A joiner
+        // rebuilds the candidate pool at election time from them and
+        // re-derives the list itself, and keeps them for later elections.
+        let join_epochs: Vec<JoinEpoch> = self
             .members
             .iter()
-            .filter(|m| !self.queues.is_settled(m, election_epoch))
-            .cloned()
+            .filter_map(|m| {
+                self.queues.join_epoch(m).map(|epoch| JoinEpoch {
+                    member_id: m.clone(),
+                    epoch,
+                })
+            })
             .collect();
 
         let sync = ConversationSync {
@@ -56,7 +63,7 @@ impl<St: EngineStore> Engine<St> {
             timing: Some(TimingConfig::from(&self.config)),
             retry_round,
             liveness_criteria_yes: self.config.liveness_criteria_yes,
-            unsettled_members,
+            join_epochs,
         };
         Some(control_bytes(control_message::Payload::ConversationSync(
             sync,

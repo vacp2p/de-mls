@@ -6,13 +6,14 @@ use super::adopt::{
     first_zero_timing_field, synced_default_peer_score, validate_conversation_sync,
 };
 use crate::{
-    DEFAULT_PEER_SCORE, Decision, Engine, EngineConfig, Event, InMemoryStore,
+    DEFAULT_PEER_SCORE, Decision, Engine, EngineConfig, Event, InMemoryStore, StewardList,
+    StewardListConfig,
     engine::{
         test_support::{creator, founder, id, joiner, member},
         types::{CommitHash, Outbound, Phase, StagedFacts, Timestamp},
     },
     protos::de_mls::messages::v1::{
-        ControlMessage, ConversationSync, TimingConfig, control_message,
+        ControlMessage, ConversationSync, JoinEpoch, TimingConfig, control_message,
     },
 };
 
@@ -27,6 +28,17 @@ fn decode_sync(bytes: &[u8]) -> ConversationSync {
         Some(control_message::Payload::ConversationSync(sync)) => sync,
         other => panic!("expected a ConversationSync payload, got {other:?}"),
     }
+}
+
+fn join_epoch(member_id: &[u8], epoch: u64) -> JoinEpoch {
+    JoinEpoch {
+        member_id: member_id.to_vec(),
+        epoch,
+    }
+}
+
+fn list_config(sn_min: usize, sn_max: usize) -> StewardListConfig {
+    StewardListConfig::new(sn_min, sn_max).expect("list config")
 }
 
 fn nonzero_timing() -> TimingConfig {
@@ -49,7 +61,7 @@ fn valid_sync() -> ConversationSync {
         timing: Some(nonzero_timing()),
         retry_round: 0,
         liveness_criteria_yes: true,
-        unsettled_members: vec![],
+        join_epochs: vec![],
         default_peer_score: 100,
     }
 }
@@ -92,15 +104,16 @@ fn validate_rejects_a_negative_default() {
     }
 }
 
-/// The carried delta reconstructs the pool, so a list naming a member the
-/// delta excludes is rejected even though it is internally well-ordered.
+/// The carried join epochs reconstruct the pool, so a list naming a member
+/// seated at the election epoch is rejected even though it is internally
+/// well-ordered.
 #[test]
 fn validate_verifies_list_against_reconstructed_pool() {
     let members = vec![b"alice".to_vec(), b"bob".to_vec()];
     let mut sync = valid_sync();
     sync.sn_max = 1;
-    // bob is unsettled → excluded → pool = [alice].
-    sync.unsettled_members = vec![b"bob".to_vec()];
+    // bob was seated at the election epoch → unsettled → pool = [alice].
+    sync.join_epochs = vec![join_epoch(b"bob", 0)];
 
     // The list correctly derived from the pool is accepted.
     sync.steward_members = vec![b"alice".to_vec()];
@@ -111,17 +124,34 @@ fn validate_verifies_list_against_reconstructed_pool() {
     assert!(!validate_conversation_sync("g", &sync, 0, &members).unwrap());
 }
 
-/// A fabricated `unsettled_members` id (not in the current set) is
-/// rejected, so a peer can't shrink the reconstructed pool with ids that
-/// aren't members.
+/// A fabricated join epoch for an id not in the current set is rejected,
+/// so a peer can't shape the reconstructed pool with ids that aren't
+/// members.
 #[test]
-fn validate_rejects_unsettled_not_in_members() {
+fn validate_rejects_join_epoch_not_in_members() {
     let members = vec![b"alice".to_vec(), b"bob".to_vec()];
     let mut sync = valid_sync();
     sync.sn_max = 1;
     sync.steward_members = vec![b"alice".to_vec()];
-    sync.unsettled_members = vec![b"ghost".to_vec()];
+    sync.join_epochs = vec![join_epoch(b"ghost", 0)];
     assert!(!validate_conversation_sync("g", &sync, 0, &members).unwrap());
+}
+
+/// A member seated before the election epoch is in the pool: a two-member
+/// list over both is accepted, and it cannot be re-derived from alice
+/// alone, so leaving bob out would reject it.
+#[test]
+fn validate_settles_by_join_epoch_against_election_epoch() {
+    let members = vec![b"alice".to_vec(), b"bob".to_vec()];
+    let mut sync = valid_sync();
+    sync.sn_max = 2;
+    sync.election_epoch = 2;
+    sync.join_epochs = vec![join_epoch(b"bob", 1)];
+    sync.steward_members = StewardList::generate(2, b"g", &members, 2, list_config(1, 2), 0)
+        .expect("list")
+        .members()
+        .to_vec();
+    assert!(validate_conversation_sync("g", &sync, 2, &members).unwrap());
 }
 
 #[test]
