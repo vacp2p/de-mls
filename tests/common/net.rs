@@ -42,6 +42,8 @@ pub struct Net {
     queue: VecDeque<Packet>,
     muted: Vec<bool>,
     delay: Duration,
+    /// Every broadcast that was not from a muted node, in send order.
+    log: Vec<(Timestamp, usize, Frame)>,
 }
 
 impl Net {
@@ -50,6 +52,7 @@ impl Net {
             queue: VecDeque::new(),
             muted: vec![false; nodes],
             delay: Duration::ZERO,
+            log: Vec::new(),
         }
     }
 
@@ -81,6 +84,7 @@ impl Net {
         if self.muted[from] {
             return;
         }
+        self.log.push((now, from, frame.clone()));
         self.queue.push_back(Packet {
             from,
             frame,
@@ -105,5 +109,28 @@ impl Net {
 
     pub fn in_flight(&self) -> usize {
         self.queue.len()
+    }
+
+    /// The retained history a Store node would answer with: what the group
+    /// published at or after `cursor`, for a member that was away — `cursor`
+    /// is the instant it went offline, so a frame sent in that same instant
+    /// by a live node is one the muted node never received.
+    pub fn since(&self, cursor: Timestamp, node: usize) -> Vec<(Timestamp, Frame)> {
+        self.log
+            .iter()
+            .filter(|(t, from, frame)| {
+                *t >= cursor && *from != node && !matches!(frame, Frame::Welcome(_))
+            })
+            .map(|(t, _, frame)| (*t, frame.clone()))
+            .collect()
+    }
+
+    /// How many broadcasts `node` sent at or after `cursor`. A replay sends
+    /// nothing, so this stays zero for a node that was away.
+    pub fn sent_by(&self, node: usize, cursor: Timestamp) -> usize {
+        self.log
+            .iter()
+            .filter(|(t, from, _)| *t >= cursor && *from == node)
+            .count()
     }
 }
