@@ -196,6 +196,14 @@ MUST.
     different epoch state, the next frames fail to open, and the node
     rejoins.
 
+**Liveness**
+
+22. On `CommitMissing` the router first checks whether someone in the
+    group has the epoch steward's commit, and calls `request_recovery`
+    only if nobody does. The commit may exist and have missed this node;
+    a member that has it sends the bytes again, and they enter as any
+    commit (rule 7).
+
 ### 3.1 Why each rule is a must
 
 The rules do not say how to write the router; they say what a router
@@ -219,13 +227,8 @@ and the network. A router written another way should still pass them.
 | 15, 21 | the engine's member set drifts from the group's; a commit merged on the router's own trust is adopted in full and the node follows the next one | `engine_bed_catch_up::a_member_that_missed_only_the_commit_adopts_it_and_follows_the_next` |
 | 17, 18 | a restart loses the vote in flight, or loads the engine before the group and starts from the wrong epoch | `engine_bed_flow::restart_mid_vote_resumes_and_merges`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs` |
 
-Rules 1, 2, 4 and 19 are preconditions the bed satisfies by construction
-(one thread, one clock, a group that reports its failures, one instance
-per node) and have no scenario of their own. The liveness path itself,
-a silent epoch steward skipped by the recovery vote and an emergency
-removal committing alone, is protocol rather than router work:
-`engine_bed_liveness::silent_epoch_steward_is_reported_then_skipped_by_a_recovery_vote`
-and `engine_bed_emergency::score_removal_commits_alone_and_the_batch_waits`.
+Rules 1, 2, 4 and 19 are preconditions the test suite satisfies by construction
+and have no scenario. Rule 22 has none yet.
 
 ## 4. Reference router
 
@@ -313,6 +316,8 @@ impl Router {
                 // re-stage after StewardSkipped or SyncApplied.
                 // CommitAdopted: informational, the sync ask already rides
                 // in this same Output.
+                // CommitMissing: look for the steward's commit before the
+                // app files request_recovery.
                 self.app.notify(e);
             }
             if let Some(d) = out.wakeup { self.timer.arm(d); }
