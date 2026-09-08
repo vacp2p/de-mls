@@ -30,11 +30,18 @@ impl<St: EngineStore> Engine<St> {
         Some(earliest.saturating_duration_since(self.now))
     }
 
+    /// When the current phase next needs a tick. `Working` needs one to
+    /// open a commit round, so it reports none while an election or an
+    /// emergency keeps the round from opening.
     fn phase_deadline(&self) -> Option<Timestamp> {
         let anchor = self.timing.phase_timer.started_at()?;
         match self.phase {
             Phase::Freezing => Some(anchor + self.config.freeze_duration),
-            Phase::Working if self.queues.approved_proposals_count() > 0 => {
+            Phase::Working
+                if self.queues.approved_proposals_count() > 0
+                    && !self.queues.has_election_in_flight()
+                    && !self.queues.has_active_emergency() =>
+            {
                 Some(anchor + self.config.commit_batch_window)
             }
             _ => None,
