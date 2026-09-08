@@ -78,7 +78,9 @@ MUST.
    does. The router never reads, interprets or generates control bytes.
    A frame the group cannot open because it was sealed at a newer epoch is
    the router's cue that this node is behind (rule 20); the engine never
-   sees it.
+   sees it. The cue is not proof, a garbage frame can carry any epoch; what
+   settles it is the commit itself (rules 20 and 21), and a cue with no
+   commit behind it is ignored.
 6. Control traffic is delivered in the order it was sent and before the
    commit of the epoch it belongs to. A node that missed a proposal or an
    emergency outcome cannot judge that epoch's commit, and a sync cannot
@@ -86,7 +88,14 @@ MUST.
    until the router brings the traffic and the commit back.
 7. A candidate on the wire is the raw commit bytes. The router stages it
    and reports the facts through `handle_candidate`; it never ranks or
-   validates candidates, the group rejecting a foreign or stale commit.
+   validates candidates, the group rejecting a foreign or stale commit. A
+   candidate rejected as not the epoch steward's is kept by the router, as
+   bytes, until the epoch merges: after `Event::StewardSkipped` or
+   `Event::SyncApplied` the router stages the same bytes again and reports
+   them again, since the sender may have become the epoch steward; a
+   merged commit earns its sender `SuccessfulCommit`, so an early
+   substitute ends unpenalised. A candidate rejected for its actions is
+   never kept.
 
 **Proposals**
 
@@ -187,6 +196,37 @@ MUST.
     different epoch state, the next frames fail to open, and the node
     rejoins.
 
+### 3.1 Why each rule is a must
+
+The rules do not say how to write the router; they say what a router
+must do for the engine's decisions to hold on every node. Each one has a
+scenario in `tests/` that fails without it, on a fake router over a fake
+group with no cryptography. The scenarios assert only what a router can
+observe: its own group, its engine's events and decisions, its chats,
+and the network. A router written another way should still pass them.
+
+| rule | without it | scenario |
+|---|---|---|
+| 3, 16 | a decision executed out of order or half-way leaves the group and the engine disagreeing on the epoch | `engine_bed_smoke::creator_seats_two_joiners_and_chat_crosses` |
+| 5 | chat reaches the engine, or a vote is counted for a sender the group never authenticated | `engine_bed_smoke::creator_seats_two_joiners_and_chat_crosses` |
+| 6, 20 | a member that missed the traffic cannot judge the commit; replayed in order with the frame's time it merges through the ordinary path | `engine_bed_catch_up::a_member_offline_through_a_commit_catches_up_by_replay` |
+| 7 | a commit from anyone but the epoch steward is applied; or the substitute's commit, rejected a moment before the skip verdict, is lost and the node stays behind | `engine_bed_liveness::foreign_commit_is_discarded_and_scored`, `engine_bed_liveness::a_substitute_commit_that_beats_the_verdict_is_staged_again_after_the_skip` |
+| 8 | an announcement refused while a round is open is never proposed again | `engine_bed_flow::announcement_during_a_round_is_retried_after_it_closes` |
+| 9, 10 | an invite lands without the key package checked, or a rejected one lands anyway | `engine_bed_flow::creator_adds_one_then_a_member_adds_another`, `engine_bed_membership::rejected_invite_never_lands` |
+| 11 | a node with no list guesses the steward; at list exhaustion every node enters `Syncing`, the election lands, work resumes | `engine_bed_membership::five_members_keep_committing`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs` |
+| 12 | a joiner or a restarted node never learns the list; a silent epoch steward leaves the ask unanswered until the backup takes over | `engine_bed_sync::backup_steward_answers_when_the_epoch_steward_is_silent`, `engine_bed_sync::a_working_member_can_ask_and_learns_it_is_current` |
+| 13, 14 | a foreign commit merges, or a discarded one stays staged and merges later | `engine_bed_liveness::foreign_commit_is_discarded_and_scored` |
+| 15, 21 | the engine's member set drifts from the group's; a commit merged on the router's own trust is adopted in full and the node follows the next one | `engine_bed_catch_up::a_member_that_missed_only_the_commit_adopts_it_and_follows_the_next` |
+| 17, 18 | a restart loses the vote in flight, or loads the engine before the group and starts from the wrong epoch | `engine_bed_flow::restart_mid_vote_resumes_and_merges`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs` |
+
+Rules 1, 2, 4 and 19 are preconditions the bed satisfies by construction
+(one thread, one clock, a group that reports its failures, one instance
+per node) and have no scenario of their own. The liveness path itself,
+a silent epoch steward skipped by the recovery vote and an emergency
+removal committing alone, is protocol rather than router work:
+`engine_bed_liveness::silent_epoch_steward_is_reported_then_skipped_by_a_recovery_vote`
+and `engine_bed_emergency::score_removal_commits_alone_and_the_batch_waits`.
+
 ## 4. Reference router
 
 Not a component we ship; an example of the loop the contract describes.
@@ -269,6 +309,8 @@ impl Router {
                 // SyncUnanswered and CandidateRejected: the app decides
                 // whether to call request_sync; a stale list and a
                 // misbehaving committer look the same from here.
+                // CandidateRejected, not the epoch steward: keep the bytes,
+                // re-stage after StewardSkipped or SyncApplied.
                 // CommitAdopted: informational, the sync ask already rides
                 // in this same Output.
                 self.app.notify(e);
