@@ -1,7 +1,8 @@
 //! Catch-up on the fake bed: a member that was offline through a vote and a
 //! commit replays the retained frames and merges the missed commit through
 //! the ordinary path, and a returning steward reaches the group's verdict
-//! on a vote it missed instead of casting its own.
+//! on a vote it missed instead of casting its own, and the survivor of a
+//! two-member group moves it on its own authority.
 
 mod common;
 
@@ -9,8 +10,8 @@ use std::time::Duration;
 
 use common::fake_router::Bed;
 use common::fast_config;
-use common::net::Frame;
-use de_mls::engine::{Decision, Event, Phase, Verdict};
+use common::net::{Frame, Welcome};
+use de_mls::engine::{Action, CommitHash, Decision, Event, Phase, Verdict};
 
 #[test]
 fn a_member_offline_through_a_commit_catches_up_by_replay() {
@@ -295,4 +296,118 @@ fn a_failed_recovery_vote_stays_failed_on_replay() {
         "the replay reached the group's verdict"
     );
     assert_eq!(bed.router(other).mls.members().len(), 3);
+}
+
+// With two members no vote can pass while one is away. The survivor
+// builds the approved work on its own group and reports it as an
+// adoption; the returning steward adopts the same commit.
+#[test]
+fn two_members_survivor_commits_on_its_own_authority() {
+    let mut bed = Bed::new("conv", "alice", fast_config());
+    let bob = bed.seat(0, "bob");
+    let steward = bed.epoch_steward();
+    let survivor = if steward == 0 { bob } else { 0 };
+
+    let carol = bed.add_pending("carol");
+    let key_package = bed.key_package_of(carol);
+    let carol_id = bed.nodes[carol].own.clone();
+    let now = bed.now;
+    bed.router_mut(survivor)
+        .announce(now, carol_id.clone(), key_package.clone());
+    bed.process_until("both approved carol", |b| {
+        [0, bob].iter().all(|&n| {
+            b.router(n).events.iter().any(|e| {
+                matches!(
+                    e,
+                    Event::ConsensusReached {
+                        verdict: Verdict::Approved,
+                        ..
+                    }
+                )
+            })
+        })
+    });
+
+    bed.take_offline(steward);
+    bed.process_until("the miss is reported in Working", |b| {
+        b.router(survivor)
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::CommitMissing { .. }))
+            && b.router(survivor).engine.phase() == Phase::Working
+    });
+
+    let epoch_before = bed.router(survivor).mls.epoch();
+    let now = bed.now;
+    let (bytes, welcome_draft) = {
+        let r = bed.router_mut(survivor);
+        let built = r.mls.build_commit(&[Action::Add {
+            member: carol_id.clone(),
+            key_package: key_package.clone(),
+        }]);
+        r.mls.clear_pending();
+        (built.commit, built.welcome)
+    };
+    bed.router_mut(survivor).adopt_commit(now, bytes.clone());
+
+    assert!(
+        bed.router(survivor)
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::CommitAdopted { .. })),
+        "the survivor reports its own adoption"
+    );
+    assert!(
+        bed.router(survivor).events.iter().any(|e| matches!(
+            e,
+            Event::MembersChanged { added, .. } if added.contains(&carol_id)
+        )),
+        "the survivor reports carol's admission"
+    );
+    assert_eq!(bed.router(survivor).mls.epoch(), epoch_before + 1);
+    assert_eq!(bed.router(survivor).mls.members().len(), 3);
+    assert_eq!(bed.router(survivor).engine.phase(), Phase::Working);
+
+    // The build bypassed the router, so its welcome is delivered by hand.
+    if let Some(draft) = welcome_draft {
+        let hash = CommitHash::of(&bytes);
+        bed.net.broadcast(
+            now,
+            survivor,
+            Frame::Welcome(Welcome {
+                joiners: draft.joiners,
+                for_commit: hash,
+                snapshot: draft.snapshot,
+            }),
+        );
+    }
+    bed.process(Duration::from_millis(50));
+    assert!(
+        bed.is_live(carol),
+        "carol picks up the hand-delivered welcome"
+    );
+
+    bed.come_back(steward);
+    let now = bed.now;
+    bed.router_mut(steward).adopt_commit(now, bytes);
+
+    assert!(
+        bed.router(steward)
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::CommitAdopted { .. })),
+        "the steward reports its own adoption"
+    );
+
+    bed.process_until("the two original members converge", |b| {
+        b.converged()
+            && b.router(0).engine.phase() == Phase::Working
+            && b.router(bob).engine.phase() == Phase::Working
+    });
+
+    assert_eq!(bed.router(steward).mls.members().len(), 3);
+    assert_eq!(
+        bed.router(steward).mls.epoch(),
+        bed.router(survivor).mls.epoch()
+    );
 }
