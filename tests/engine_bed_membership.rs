@@ -1,11 +1,13 @@
-//! Membership changes on the fake bed: a voted removal, a self-leave, a
-//! rejected invite that never lands, and steward-list exhaustion by growth.
+//! Membership changes on the fake bed: a voted removal, a self-leave, the
+//! sole steward leaving, a rejected invite that never lands, and
+//! steward-list exhaustion by growth.
 
 mod common;
 
 use common::fake_router::Bed;
 use common::fast_config;
 use de_mls::engine::{Decision, Event, Phase, Verdict};
+use de_mls::steward_list::StewardListConfig;
 
 #[test]
 fn removal_is_voted_and_the_removed_member_leaves() {
@@ -54,6 +56,68 @@ fn self_leave_lands_in_the_next_commit() {
         bed.router(bob).decisions.last(),
         Some(Decision::Leave)
     ));
+}
+
+// The only steward on a one-member list is on its way out. Nobody eligible
+// is left to commit, so the engine elects a fresh list without the leaver
+// on its own; the new steward commits the removal and every remaining node
+// accepts that commit as the steward's. The router does nothing.
+fn sole_steward_removal_is_committed_by_a_fresh_steward(remove: impl FnOnce(&mut Bed, usize)) {
+    let mut config = fast_config();
+    config.steward_list = StewardListConfig::new(1, 1).expect("one steward");
+    let mut bed = Bed::new("conv", "alice", config);
+    let bob = bed.seat(0, "bob");
+    let carol = bed.seat(0, "carol");
+    let steward = bed.epoch_steward();
+    let others: Vec<usize> = [0, bob, carol]
+        .into_iter()
+        .filter(|&n| n != steward)
+        .collect();
+    let marks: Vec<usize> = others.iter().map(|&n| bed.router(n).events.len()).collect();
+
+    remove(&mut bed, steward);
+
+    bed.process_until("the steward left and the others converge", |b| {
+        b.router(steward).left
+            && b.agree_among(&others)
+            && b.router(others[0]).mls.members().len() == 2
+            && others.iter().all(|&n| b.router(n).engine.is_synced())
+    });
+
+    assert!(matches!(
+        bed.router(steward).decisions.last(),
+        Some(Decision::Leave)
+    ));
+    for (&n, &mark) in others.iter().zip(&marks) {
+        assert!(
+            !bed.router(n).events[mark..]
+                .iter()
+                .any(|e| matches!(e, Event::CandidateRejected { .. })),
+            "the replacement steward's commit is the steward's on every node"
+        );
+    }
+}
+
+#[test]
+fn sole_steward_self_leave_is_committed_by_a_fresh_steward() {
+    sole_steward_removal_is_committed_by_a_fresh_steward(|bed, steward| {
+        let now = bed.now;
+        bed.router_mut(steward)
+            .act(now, |e| e.leave(now))
+            .expect("the steward leaves");
+    });
+}
+
+#[test]
+fn sole_steward_voted_removal_is_committed_by_a_fresh_steward() {
+    sole_steward_removal_is_committed_by_a_fresh_steward(|bed, steward| {
+        let proposer = (0..3).find(|&n| n != steward).expect("another member");
+        let target = bed.nodes[steward].own.clone();
+        let now = bed.now;
+        bed.router_mut(proposer)
+            .act(now, |e| e.propose_remove(now, target))
+            .expect("propose remove the steward");
+    });
 }
 
 // Two NO votes against the filer's bundled YES reject the add; the invite

@@ -78,8 +78,20 @@ impl<St: EngineStore> Engine<St> {
         Ok(StewardListReconcile::Settled)
     }
 
+    /// The members an election at `epoch` may seat: settled, and not already
+    /// voted out. Excluding the departing member is what lets an election
+    /// replace a list whose only steward is leaving — the same epoch over the
+    /// same pool would regenerate the same list.
+    fn election_pool(&self, epoch: u64) -> Vec<Vec<u8>> {
+        self.members
+            .iter()
+            .filter(|m| self.queues.is_settled(m, epoch) && !self.queues.has_approved_removal(m))
+            .cloned()
+            .collect()
+    }
+
     /// Checks that a proposed steward-election list matches what we would
-    /// build from our own settled members at `election_epoch`, rejecting any
+    /// build from our own election pool at `election_epoch`, rejecting any
     /// list that is biased or tampered with. The local view is safe to use:
     /// membership doesn't change during an election.
     pub(crate) fn validate_election_list(
@@ -87,12 +99,7 @@ impl<St: EngineStore> Engine<St> {
         election: &StewardElectionProposal,
     ) -> Result<bool, ConversationError> {
         let epoch = election.election_epoch;
-        let pool: Vec<Vec<u8>> = self
-            .members
-            .iter()
-            .filter(|m| self.queues.is_settled(m, epoch))
-            .cloned()
-            .collect();
+        let pool = self.election_pool(epoch);
         self.steward_list.validate_proposed(
             &election.proposed_stewards,
             epoch,
@@ -115,12 +122,7 @@ impl<St: EngineStore> Engine<St> {
             return Ok(());
         }
         let epoch = self.epoch;
-        let candidate_pool: Vec<Vec<u8>> = self
-            .members
-            .iter()
-            .filter(|m| self.queues.is_settled(m, epoch))
-            .cloned()
-            .collect();
+        let candidate_pool = self.election_pool(epoch);
 
         let (proposed_stewards, election_epoch, retry_round) = {
             let queues = &self.queues;
