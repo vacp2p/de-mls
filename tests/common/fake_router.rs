@@ -5,8 +5,8 @@ use std::{collections::HashMap, time::Duration};
 
 use de_mls::EngineConfig;
 use de_mls::engine::{
-    Action, CommitHash, Decision, DecisionFailure, Engine, Event, InMemoryStore, MemberId,
-    Outbound, Output, Phase, StagedFacts, Timestamp,
+    Action, CandidateRejection, CommitHash, Decision, DecisionFailure, Engine, Event,
+    InMemoryStore, MemberId, Outbound, Output, Phase, StagedFacts, Timestamp,
 };
 
 use crate::common::{
@@ -38,6 +38,12 @@ pub struct FakeRouter {
     /// `ConversationBlocked` (the engine was `Syncing`) — retried the same
     /// way as `pending_announcements`.
     held_candidates: Vec<(CommitHash, StagedFacts)>,
+    /// Bytes of the candidates the engine rejected as not the epoch
+    /// steward's, kept until the epoch merges. After `StewardSkipped` or
+    /// `SyncApplied` the router stages them again: the sender may have
+    /// become the epoch steward. A candidate rejected for its actions is
+    /// never kept.
+    rejected_commits: Vec<(MemberId, Vec<u8>)>,
     /// Set for the span of `replay`: outbound is dropped and a
     /// `Decision::BuildCommit` is skipped, since the group decided those
     /// while this router was away.
@@ -100,6 +106,7 @@ impl FakeRouter {
             left: false,
             pending_announcements: Vec::new(),
             held_candidates: Vec::new(),
+            rejected_commits: Vec::new(),
             replaying: false,
         }
     }
@@ -154,6 +161,52 @@ impl FakeRouter {
             }
         }
         out
+    }
+
+    /// Stage and report every candidate kept in `rejected_commits`: the
+    /// sender may have become the epoch steward since it was rejected. One
+    /// rejected again this round stays in `rejected_commits`; a
+    /// `ConversationBlocked` refusal (the engine is `Syncing`) moves it to
+    /// `held_candidates`; a staging error drops it.
+    fn restage_rejected(&mut self, now: Timestamp) -> Output {
+        let mut out = Output::default();
+        for (sender, bytes) in std::mem::take(&mut self.rejected_commits) {
+            let Ok(facts) = self.mls.stage(&bytes) else {
+                continue;
+            };
+            let hash = CommitHash::of(&bytes);
+            match self.engine.handle_candidate(now, hash, facts.clone()) {
+                Ok(o) => {
+                    let rejected_again = o.events.iter().any(|e| {
+                        matches!(
+                            e,
+                            Event::CandidateRejected {
+                                reason: CandidateRejection::NotEpochSteward,
+                                ..
+                            }
+                        )
+                    });
+                    if rejected_again {
+                        self.rejected_commits.push((sender, bytes));
+                    }
+                    out.merge(o);
+                }
+                Err(de_mls::ConversationError::ConversationBlocked(_)) => {
+                    self.held_candidates.push((hash, facts));
+                }
+                Err(e) => self.events.push(Event::Error {
+                    operation: "handle_candidate".into(),
+                    message: e.to_string(),
+                }),
+            }
+        }
+        out
+    }
+
+    /// How many candidates this router is holding as rejected, waiting for
+    /// their sender to become the epoch steward.
+    pub fn rejected_commits(&self) -> usize {
+        self.rejected_commits.len()
     }
 
     /// Restart from this router's own store: the group is unaffected (the
@@ -267,6 +320,19 @@ impl FakeRouter {
                             self.held_candidates.push((hash, facts));
                             return;
                         }
+                        Ok(out) => {
+                            let rejected_sender = out.events.iter().find_map(|e| match e {
+                                Event::CandidateRejected {
+                                    sender,
+                                    reason: CandidateRejection::NotEpochSteward,
+                                } => Some(sender.clone()),
+                                _ => None,
+                            });
+                            if let Some(sender) = rejected_sender {
+                                self.rejected_commits.push((sender, bytes));
+                            }
+                            Ok(out)
+                        }
                         result => result,
                     }
                 }
@@ -315,10 +381,17 @@ impl FakeRouter {
                 .events
                 .iter()
                 .any(|e| matches!(e, Event::PhaseChange(Phase::Working)));
+            let steward_changed = out
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::StewardSkipped { .. } | Event::SyncApplied));
             self.events.append(&mut out.events);
             if round_closed {
                 next.merge(self.propose_announced(now));
                 next.merge(self.retry_held_candidates(now));
+            }
+            if steward_changed {
+                next.merge(self.restage_rejected(now));
             }
             if let Some(d) = out.wakeup {
                 self.next_wakeup = Some(now + d);
@@ -376,6 +449,7 @@ impl FakeRouter {
             }
             Decision::Merge { hash } => match self.merge(hash) {
                 Ok(applied) => {
+                    self.rejected_commits.clear();
                     let out =
                         self.engine
                             .commit_applied(now, hash, applied.epoch, &applied.members);
@@ -470,6 +544,11 @@ pub struct Node {
     /// Set while the node's process is down: the time it went offline, and
     /// the cursor `come_back` replays from.
     pub offline_since: Option<Timestamp>,
+    /// Set while control frames from some senders are held back: those
+    /// senders and the time the hold releases.
+    control_hold: Option<(Vec<usize>, Timestamp)>,
+    /// Control frames held back by `control_hold`, in arrival order.
+    held_frames: Vec<Frame>,
 }
 
 /// Several routers on one virtual clock and one network.
@@ -495,6 +574,8 @@ impl Bed {
                 own,
                 router: Some(router),
                 offline_since: None,
+                control_hold: None,
+                held_frames: Vec::new(),
             }],
             conversation_id: conversation_id.to_string(),
             config,
@@ -513,6 +594,8 @@ impl Bed {
             own: FakeMls::member_id(name),
             router: None,
             offline_since: None,
+            control_hold: None,
+            held_frames: Vec::new(),
         });
         self.nodes.len() - 1
     }
@@ -600,14 +683,52 @@ impl Bed {
         }
     }
 
+    /// Control frames from `from` reach `node` only at `until`, in send
+    /// order; commits and chat pass. A partition of the control traffic
+    /// alone.
+    pub fn hold_control(&mut self, node: usize, from: &[usize], until: Timestamp) {
+        self.nodes[node].control_hold = Some((from.to_vec(), until));
+    }
+
+    /// Deliver `node`'s held frames, in arrival order, and drop the hold.
+    fn release_held(&mut self, node: usize, now: Timestamp) {
+        self.nodes[node].control_hold = None;
+        let held = std::mem::take(&mut self.nodes[node].held_frames);
+        for frame in held {
+            if let Some(router) = self.nodes[node].router.as_mut() {
+                router.on_frame(now, frame);
+            }
+        }
+    }
+
     /// Advance the clock by `step`, deliver what is due, fire due wakeups.
     pub fn process(&mut self, step: Duration) {
         self.flush();
         self.now = self.now + step;
         let now = self.now;
+        for i in 0..self.nodes.len() {
+            if self.nodes[i]
+                .control_hold
+                .as_ref()
+                .is_some_and(|&(_, until)| until <= now)
+            {
+                self.release_held(i, now);
+            }
+        }
         for (from, frame) in self.net.take_due(now) {
             for i in 0..self.nodes.len() {
                 if i == from || self.net.is_muted(i) {
+                    continue;
+                }
+                let held_back = match &frame {
+                    Frame::Sealed(sealed) if sealed.kind == Kind::Control => self.nodes[i]
+                        .control_hold
+                        .as_ref()
+                        .is_some_and(|(senders, _)| senders.contains(&from)),
+                    _ => false,
+                };
+                if held_back {
+                    self.nodes[i].held_frames.push(frame.clone());
                     continue;
                 }
                 match (&frame, self.nodes[i].router.as_mut()) {
