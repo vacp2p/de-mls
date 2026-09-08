@@ -358,12 +358,18 @@ impl<St: EngineStore> Engine<St> {
     /// voter: a deterministic verdict for a steward election, a
     /// key-package check for an invite (the vote waits for the router's
     /// answer), or an auto-vote for anything else — then the
-    /// consensus-timeout deadline.
+    /// consensus-timeout deadline. During a replay only the timeout is
+    /// armed: the group decided this session without this member, and the
+    /// timeout reproduces its verdict.
     fn arm_local_vote(
         &mut self,
         proposal_id: u32,
         decoded: Option<ConversationUpdateRequest>,
     ) -> Result<(), ConversationError> {
+        if self.is_replaying() {
+            self.register_consensus_timeout(proposal_id, self.config.consensus_timeout);
+            return Ok(());
+        }
         match decoded.as_ref().and_then(|r| r.payload.as_ref()) {
             Some(conversation_update_request::Payload::StewardElection(election)) => {
                 // Recomputed locally, so no vote request reaches the

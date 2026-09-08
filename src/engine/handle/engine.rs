@@ -116,6 +116,9 @@ pub struct Engine<St: EngineStore> {
     /// steward's, once [`Engine::handle_candidate`] accepts it. Ephemeral: a
     /// restart rejoins the next round rather than resuming this one.
     pub(crate) round_candidate: Option<(CommitHash, StagedFacts)>,
+    /// Set by the router after [`Engine::restore`]: a call whose `now` is
+    /// before it replays frames the group already decided on. `None` live.
+    pub(crate) replay_until: Option<Timestamp>,
 }
 
 impl<St: EngineStore> Engine<St> {
@@ -169,6 +172,7 @@ impl<St: EngineStore> Engine<St> {
             out: Output::default(),
             pending_merge: None,
             round_candidate: None,
+            replay_until: None,
         })
     }
 
@@ -207,6 +211,18 @@ impl<St: EngineStore> Engine<St> {
         self.steward_list.is_steward(&self.own)
     }
 
+    /// Calls whose `now` is before `until` replay frames the group already
+    /// decided on: the engine casts no vote and asks for none. Called once
+    /// after [`Engine::restore`], before the first replayed frame.
+    pub fn replay_until(&mut self, until: Timestamp) {
+        self.replay_until = Some(until);
+    }
+
+    /// Whether the current call replays frames the group already decided on.
+    pub(crate) fn is_replaying(&self) -> bool {
+        self.replay_until.is_some_and(|until| self.now < until)
+    }
+
     /// Whether this member is the epoch steward at the current epoch.
     pub fn is_epoch_steward(&self) -> bool {
         let eligible = self.queues.steward_eligibility(&self.members);
@@ -243,6 +259,9 @@ impl<St: EngineStore> Engine<St> {
     /// Start a driving call at `now`.
     pub(crate) fn begin(&mut self, now: Timestamp) {
         self.now = now;
+        if self.replay_until.is_some_and(|until| now >= until) {
+            self.replay_until = None;
+        }
     }
 
     /// End a driving call: drain pending consensus outcomes, compute the

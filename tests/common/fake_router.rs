@@ -237,9 +237,11 @@ impl FakeRouter {
 
     /// Catch-up as the contract describes it: the retained frames in send
     /// order, every wakeup due before a frame run before it, with the
-    /// frame's time as `now`; outbound and builds dropped, since the group
-    /// decided those while this member was away.
+    /// frame's time as `now`; outbound and builds dropped and the engine
+    /// given the horizon so it casts no vote, since the group decided all
+    /// of that while this member was away.
     pub fn replay(&mut self, frames: Vec<(Timestamp, Frame)>, until: Timestamp) {
+        self.engine.replay_until(until);
         self.replaying = true;
         for (t, frame) in frames {
             self.run_due(t);
