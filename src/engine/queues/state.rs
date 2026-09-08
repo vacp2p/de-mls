@@ -165,6 +165,17 @@ impl EngineQueues {
         }
     }
 
+    /// The epoch `member` was seated at, if this node recorded it.
+    pub fn join_epoch(&self, member: &[u8]) -> Option<u64> {
+        self.member_join_epoch.get(member).copied()
+    }
+
+    /// Record `member` as seated at `epoch`: a join epoch a sync carried,
+    /// so this node's view of who is settled matches the steward's.
+    pub fn record_join_epoch(&mut self, member: Vec<u8>, epoch: u64) {
+        self.member_join_epoch.insert(member, epoch);
+    }
+
     /// Settled once the epoch has advanced past the member's join epoch — a
     /// just-joined member can't be a steward or voter until the next epoch. A
     /// member added in any prior epoch counts as settled, as does one this node

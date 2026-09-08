@@ -103,7 +103,7 @@ mod tests {
             timing: Some(TimingConfig::from(engine.config())),
             retry_round: 0,
             liveness_criteria_yes: true,
-            unsettled_members: vec![],
+            join_epochs: vec![],
             default_peer_score: 100,
         };
         let payload = control_bytes(control_message::Payload::ConversationSync(sync));

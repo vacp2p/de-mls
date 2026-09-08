@@ -2,6 +2,8 @@
 //! verifies a steward's answer, and applying the list, timing and peer
 //! scores it carries.
 
+use std::collections::HashSet;
+
 use tracing::{info, warn};
 
 use crate::{
@@ -105,6 +107,13 @@ impl<St: EngineStore> Engine<St> {
             sync.retry_round,
         )?;
         self.dirty.steward_list = true;
+        // The steward's join epochs become ours: a later election pool is
+        // computed from them, and a joiner never saw its own add.
+        for entry in &sync.join_epochs {
+            self.queues
+                .record_join_epoch(entry.member_id.clone(), entry.epoch);
+        }
+        self.dirty.join_epochs = true;
         // Before the snapshot: it rebases members off our assumed default onto
         // the group's, which is exactly the set the sparse `peer_scores` omits.
         self.scoring
@@ -173,21 +182,26 @@ pub(crate) fn validate_conversation_sync(
         .steward_members
         .iter()
         .any(|s| members_set.contains(s.as_slice()));
-    // Only accept unsettled members that actually exist, so fake ids can't
-    // shrink the pool. Full protection needs every member to agree on the
-    // sync's content.
+    // Only accept join epochs of members that actually exist, so fake ids
+    // can't shape the pool. Full protection needs every member to agree on
+    // the sync's content.
     if !sync
-        .unsettled_members
+        .join_epochs
         .iter()
-        .all(|u| members_set.contains(u.as_slice()))
+        .all(|j| members_set.contains(j.member_id.as_slice()))
     {
         info!(
             conversation = conversation_id,
-            "conversation sync rejected: unsettled member is not in the current set"
+            "conversation sync rejected: join epoch of a member not in the current set"
         );
         return Ok(false);
     }
-    let unsettled_set = member_set(&sync.unsettled_members);
+    let unsettled_set: HashSet<&[u8]> = sync
+        .join_epochs
+        .iter()
+        .filter(|j| j.epoch >= sync.election_epoch)
+        .map(|j| j.member_id.as_slice())
+        .collect();
     let pool: Vec<Vec<u8>> = members
         .iter()
         .filter(|m| !unsettled_set.contains(m.as_slice()))
