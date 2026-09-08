@@ -143,8 +143,8 @@ MUST.
     ones; after a merge every remaining staged commit is dropped as stale.
     A loser clears its own pending commit before merging the winner.
 15. After a merge, `commit_applied(now, hash, epoch, members)` is called
-    before any other engine call. A missed report forks the steward
-    election on that node.
+    before any other engine call, one call per merged commit, in merge
+    order. A hash the engine did not decide is an adoption (rule 21).
 16. After `Decision::BuildCommit` the router builds, keeps the commit
     pending, broadcasts the commit bytes, and reports it through
     `handle_candidate` with the facts the build returned. The welcome
@@ -175,6 +175,17 @@ MUST.
     `Decision::Merge`, exactly as live; nothing is adopted without its
     vote, and a member removed while away gets `Decision::Leave` at that
     epoch.
+21. Adoption is the catch-up when the traffic is gone. A router that
+    receives the exact commit the group applied outside the live path (a
+    Store node without the control frames, a member relaying it) may stage
+    and merge it on the group without a decision and report
+    `commit_applied`. The trust is the router's: nothing is judged. The
+    engine adopts the group's facts in full, reports `CommitAdopted`,
+    keeps `Syncing` if it is there, and asks the stewards for a sync in
+    the same `Output`; the router executes that `Output` as any other. A
+    commit other than the one the group applied leaves the node on a
+    different epoch state, the next frames fail to open, and the node
+    rejoins.
 
 ## 4. Reference router
 
@@ -258,6 +269,8 @@ impl Router {
                 // SyncUnanswered and CandidateRejected: the app decides
                 // whether to call request_sync; a stale list and a
                 // misbehaving committer look the same from here.
+                // CommitAdopted: informational, the sync ask already rides
+                // in this same Output.
                 self.app.notify(e);
             }
             if let Some(d) = out.wakeup { self.timer.arm(d); }
