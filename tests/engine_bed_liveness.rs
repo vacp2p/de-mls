@@ -1,12 +1,15 @@
 //! Liveness on the fake bed: a silent epoch steward is reported and then
-//! skipped by a recovery vote, a foreign commit is discarded and scored, and
-//! removing a steward elects a fresh list.
+//! skipped by a recovery vote, a foreign commit is discarded and scored,
+//! removing a steward elects a fresh list, and a candidate rejected as not
+//! the epoch steward's comes back once the skip lands.
 
 mod common;
 
+use std::time::Duration;
+
 use common::fake_router::Bed;
 use common::fast_config;
-use de_mls::engine::{Action, Decision, Event};
+use de_mls::engine::{Action, CandidateRejection, Decision, Event};
 
 #[test]
 fn silent_epoch_steward_is_reported_then_skipped_by_a_recovery_vote() {
@@ -158,4 +161,126 @@ fn removing_a_steward_elects_a_new_list() {
     );
     assert!(bed.agree_among(&remaining));
     assert_eq!(bed.router(remaining[0]).mls.members().len(), 3);
+}
+
+#[test]
+fn a_substitute_commit_that_beats_the_verdict_is_staged_again_after_the_skip() {
+    let mut bed = Bed::new("conv", "alice", fast_config());
+    let bob = bed.seat(0, "bob");
+    let carol = bed.seat(0, "carol");
+    let dave = bed.seat(0, "dave");
+    let erin = bed.seat(0, "erin");
+    let members = [0, bob, carol, dave, erin];
+
+    let es = bed.epoch_steward();
+    let es_id = bed.nodes[es].own.clone();
+    let s = members
+        .into_iter()
+        .find(|&i| bed.router(i).engine.is_steward() && !bed.router(i).engine.is_epoch_steward())
+        .expect("a steward that is not the epoch steward exists among five members");
+    let s_id = bed.nodes[s].own.clone();
+    let pqr: Vec<usize> = members
+        .into_iter()
+        .filter(|&i| !bed.router(i).engine.is_steward())
+        .collect();
+    let (p, q, r) = (pqr[0], pqr[1], pqr[2]);
+
+    bed.mute(es);
+
+    let frank = bed.add_pending("frank");
+    let kp_frank = bed.key_package_of(frank);
+    let frank_id = bed.nodes[frank].own.clone();
+    let now = bed.now;
+    bed.router_mut(p).announce(now, frank_id, kp_frank);
+
+    bed.process_until("p sees a silent epoch steward", |b| {
+        b.router(p).events.iter().any(|e| {
+            matches!(
+                e,
+                Event::CommitMissing {
+                    steward: Some(_),
+                    ..
+                }
+            )
+        })
+    });
+
+    // q still gets p's proposal and casts its own vote, but the votes of s
+    // and r reach it late, so s's commit lands at q before the verdict does.
+    let hold_start = bed.now;
+    let q_events_before = bed.router(q).events.len();
+    let q_decisions_before = bed.router(q).decisions.len();
+    bed.hold_control(q, &[s, r], hold_start + Duration::from_secs(2));
+
+    let now = bed.now;
+    bed.router_mut(p)
+        .act(now, |e| e.request_recovery(now))
+        .expect("request recovery");
+
+    bed.process_until("q rejected the early candidate", |b| {
+        b.router(q).rejected_commits() == 1
+    });
+    assert!(
+        !bed.router(q)
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::StewardSkipped { .. })),
+        "q has not drained the skip yet"
+    );
+    assert!(
+        bed.router(q).events[q_events_before..]
+            .iter()
+            .any(|e| matches!(
+                e,
+                Event::CandidateRejected {
+                    sender,
+                    reason: CandidateRejection::NotEpochSteward,
+                } if *sender == s_id
+            )),
+        "q rejected s's early candidate as not the epoch steward's"
+    );
+
+    bed.process_until("everyone including q seated frank", |b| {
+        b.is_live(frank) && b.agree_among(&[p, q, r, s, frank])
+    });
+
+    assert!(
+        bed.router(q)
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::StewardSkipped { steward, .. } if *steward == es_id))
+    );
+
+    let discard_pos = bed.router(q).decisions[q_decisions_before..]
+        .iter()
+        .position(|d| matches!(d, Decision::Discard { .. }))
+        .expect("q discarded s's early candidate");
+    assert!(
+        bed.router(q).decisions[q_decisions_before + discard_pos + 1..]
+            .iter()
+            .any(|d| matches!(d, Decision::Merge { .. })),
+        "q merged a commit after the rejection"
+    );
+
+    let s_scores: Vec<(i64, i64)> = bed.router(q).events[q_events_before..]
+        .iter()
+        .filter_map(|e| match e {
+            Event::MemberScoreChanged {
+                member,
+                previous,
+                score,
+            } if *member == s_id => Some((*previous, *score)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !s_scores.is_empty(),
+        "q scored s at least once after the rejection"
+    );
+    assert_eq!(
+        s_scores.first().unwrap().0,
+        s_scores.last().unwrap().1,
+        "the rejection penalty and the merge reward for s cancel out"
+    );
+    assert_eq!(bed.router(q).rejected_commits(), 0);
 }
