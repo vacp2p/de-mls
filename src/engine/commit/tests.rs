@@ -11,8 +11,8 @@ use crate::{
         store::{EngineStore, InMemoryStore, keys},
         test_support::{id, joiner, member},
         types::{
-            CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId, Phase,
-            StagedFacts, Timestamp,
+            CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId, Outbound,
+            Phase, StagedFacts, Timestamp,
         },
     },
     protos::de_mls::{
@@ -334,19 +334,84 @@ fn the_own_commit_reported_through_handle_candidate_merges() {
 }
 
 /// A merge report for a commit the engine never decided still moves the
-/// view — the group is the truth — but says so.
+/// view in full — the group is the truth — and reports the adoption along
+/// with the membership change it carried, asking for a sync in the same
+/// output so a newer list and scores arrive.
 #[test]
-fn an_unexpected_merge_is_adopted_and_reported() {
+fn an_unexpected_merge_is_adopted_in_full() {
     let mut e = engine(&["alice", "bob"]);
-    let out = e
-        .commit_applied(at(0), CommitHash::of(b"surprise"), 4, &[id("alice")])
-        .unwrap();
+    e.queues.insert_approved_proposal(7, invite("carol"));
+    let hash = CommitHash::of(b"surprise");
+    let out = e.commit_applied(at(0), hash, 4, &[id("alice")]).unwrap();
     assert_eq!(e.epoch(), 4);
     assert_eq!(e.members(), vec![id("alice")]);
-    assert!(out.events.iter().any(|ev| matches!(
-        ev,
-        Event::Error { operation, .. } if operation == "commit_applied"
-    )));
+    assert!(
+        out.events.contains(&Event::CommitAdopted {
+            hash: CommitHash::of(b"surprise")
+        }),
+        "the adoption is reported"
+    );
+    assert!(
+        out.events.contains(&Event::MembersChanged {
+            added: Vec::new(),
+            removed: vec![id("bob")],
+        }),
+        "the membership change is reported"
+    );
+    assert!(
+        !out.events
+            .iter()
+            .any(|ev| matches!(ev, Event::Error { .. })),
+        "an adoption is not an error"
+    );
+    assert_eq!(
+        e.queues.approved_proposals_count(),
+        0,
+        "the committed batch leaves the queue"
+    );
+    assert_eq!(
+        out.outbound
+            .iter()
+            .filter(|o| matches!(o, Outbound::Control(_)))
+            .count(),
+        1,
+        "the adoption asks the stewards for a sync"
+    );
+    assert_eq!(e.phase(), Phase::Working);
+}
+
+/// While `Syncing`, an adoption moves epoch and members in full but keeps
+/// the phase — a node with no list would install one from an incomplete
+/// picture — and asks no second sync while one is already pending.
+#[test]
+fn an_adoption_while_syncing_keeps_the_phase_and_asks_once() {
+    let mut e = joiner();
+    assert_eq!(e.phase(), Phase::Syncing);
+    assert!(e.timing.sync_deadline.is_some(), "join arms the ask");
+
+    let hash = CommitHash::of(b"relayed");
+    let out = e
+        .commit_applied(
+            at(1),
+            hash,
+            e.epoch() + 1,
+            &[id("alice"), id("bob"), id("carol")],
+        )
+        .unwrap();
+
+    assert_eq!(e.phase(), Phase::Syncing);
+    assert_eq!(e.epoch(), 2);
+    assert_eq!(e.members(), vec![id("alice"), id("bob"), id("carol")]);
+    assert!(
+        out.events.contains(&Event::CommitAdopted { hash }),
+        "the adoption is reported"
+    );
+    assert!(
+        !out.outbound
+            .iter()
+            .any(|o| matches!(o, Outbound::Control(_))),
+        "the ask is already pending"
+    );
 }
 
 /// A commit that unseats us ends the conversation: no steward work, one
