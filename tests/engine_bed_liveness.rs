@@ -1,7 +1,8 @@
 //! Liveness on the fake bed: a silent epoch steward is reported and then
 //! skipped by a recovery vote, a foreign commit is discarded and scored,
-//! removing a steward elects a fresh list, and a candidate rejected as not
-//! the epoch steward's comes back once the skip lands.
+//! removing a steward elects a fresh list, a candidate rejected as not
+//! the epoch steward's comes back once the skip lands, and a steward
+//! skipped while away follows the substitute's commit on its return.
 
 mod common;
 
@@ -9,7 +10,7 @@ use std::time::Duration;
 
 use common::fake_router::Bed;
 use common::fast_config;
-use de_mls::engine::{Action, CandidateRejection, Decision, Event};
+use de_mls::engine::{Action, CandidateRejection, Decision, Event, Verdict};
 
 #[test]
 fn silent_epoch_steward_is_reported_then_skipped_by_a_recovery_vote() {
@@ -283,4 +284,114 @@ fn a_substitute_commit_that_beats_the_verdict_is_staged_again_after_the_skip() {
         "the rejection penalty and the merge reward for s cancel out"
     );
     assert_eq!(bed.router(q).rejected_commits(), 0);
+}
+
+// A steward that goes offline before building is skipped by a recovery
+// vote it never sees. On its return it replays the vote and the
+// substitute's commit and merges it through the ordinary path.
+#[test]
+fn a_skipped_steward_that_comes_back_follows_the_substitute() {
+    let mut bed = Bed::new("conv", "alice", fast_config());
+    let bob = bed.seat(0, "bob");
+    let carol = bed.seat(0, "carol");
+    let members = [0, bob, carol];
+
+    let es = bed.epoch_steward();
+    let es_id = bed.nodes[es].own.clone();
+    let others: Vec<usize> = members.into_iter().filter(|&i| i != es).collect();
+    let p = others[0];
+
+    let dave = bed.add_pending("dave");
+    let kp_dave = bed.key_package_of(dave);
+    let dave_id = bed.nodes[dave].own.clone();
+    let now = bed.now;
+    bed.router_mut(p).announce(now, dave_id, kp_dave);
+
+    bed.process_until("all three approve dave's add", |b| {
+        members.iter().all(|&i| {
+            b.router(i).events.iter().any(|e| {
+                matches!(
+                    e,
+                    Event::ConsensusReached {
+                        verdict: Verdict::Approved,
+                        ..
+                    }
+                )
+            })
+        })
+    });
+
+    bed.take_offline(es);
+
+    bed.process_until("p sees a silent epoch steward", |b| {
+        b.router(p).events.iter().any(|e| {
+            matches!(
+                e,
+                Event::CommitMissing {
+                    steward: Some(_),
+                    ..
+                }
+            )
+        })
+    });
+
+    let now = bed.now;
+    bed.router_mut(p)
+        .act(now, |e| e.request_recovery(now))
+        .expect("request recovery");
+
+    bed.process_until("dave seated among the two remaining members", |b| {
+        b.is_live(dave) && b.agree_among(&others)
+    });
+    assert!(
+        bed.router(p)
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::StewardSkipped { steward, .. } if *steward == es_id))
+    );
+
+    let es_events_mark = bed.router(es).events.len();
+    let es_decisions_mark = bed.router(es).decisions.len();
+
+    bed.come_back(es);
+
+    // The replay runs the steward's stale round, whose build the router
+    // drops; the live check starts after it.
+    let es_decisions_after_replay = bed.router(es).decisions.len();
+
+    bed.process_until("the steward converges with dave seated", |b| {
+        b.converged() && b.is_live(dave)
+    });
+
+    assert_eq!(bed.router(es).mls.members().len(), 4);
+    assert!(
+        bed.router(es).events[es_events_mark..]
+            .iter()
+            .any(|e| matches!(e, Event::StewardSkipped { steward, .. } if *steward == es_id)),
+        "the steward replays its own skip"
+    );
+    assert!(
+        bed.router(es).decisions[es_decisions_mark..]
+            .iter()
+            .any(|d| matches!(d, Decision::Merge { .. })),
+        "the steward merges the substitute's commit through the ordinary path"
+    );
+    assert!(
+        !bed.router(es).decisions[es_decisions_after_replay..]
+            .iter()
+            .any(|d| matches!(d, Decision::BuildCommit { .. })),
+        "the steward builds nothing once it is back on the live path"
+    );
+    assert!(
+        !bed.router(es).events[es_events_mark..]
+            .iter()
+            .any(|e| matches!(e, Event::CommitAdopted { .. })),
+        "the commit merges through a decision, not adoption"
+    );
+    assert!(
+        !bed.router(es).events[es_events_mark..]
+            .iter()
+            .any(|e| matches!(e, Event::CandidateRejected { .. })),
+        "the steward does not reject the substitute's replayed candidate"
+    );
 }
