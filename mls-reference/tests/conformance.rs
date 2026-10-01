@@ -529,3 +529,30 @@ fn case_delete_is_idempotent<S: Suite>() {
 fn delete_is_idempotent() {
     case_delete_is_idempotent::<ReferenceSuite>();
 }
+
+// ══════════════════════════════════════════════════════════════
+// (j) a commit is staged once
+// ══════════════════════════════════════════════════════════════
+
+fn case_stage_once<S: Suite>() {
+    let mut nodes = group_of::<S>(&["bob", "carol"]);
+    let built = nodes[1].build_commit(&[]).expect("bob builds");
+
+    nodes[0].stage(&built.commit).expect("alice stages");
+    assert!(
+        nodes[0].stage(&built.commit).is_err(),
+        "the same bytes do not stage a second time"
+    );
+    nodes[2].stage(&built.commit).expect("carol stages");
+
+    // The refusal costs the first staging nothing.
+    nodes[0].merge(built.hash).expect("alice merges");
+    nodes[1].merge(built.hash).expect("bob merges");
+    nodes[2].merge(built.hash).expect("carol merges");
+    assert_converged::<S>(&nodes);
+}
+
+#[test]
+fn a_commit_stages_once() {
+    case_stage_once::<ReferenceSuite>();
+}
