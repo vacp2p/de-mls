@@ -5,7 +5,11 @@
 use tracing::info;
 
 use crate::{
-    engine::{queues::EngineQueues, types::Verdict},
+    engine::{
+        proposal_kind::change_of,
+        queues::EngineQueues,
+        types::{ActionKind, Verdict},
+    },
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, ViolationEvidence, ViolationType,
         conversation_update_request,
@@ -107,14 +111,13 @@ pub(crate) fn apply_outcome(
     // sponsored join) with key packages the group won't collapse into one.
     // Drop the duplicate, like removals above, or the whole batch is rejected.
     if approved
-        && let Some(conversation_update_request::Payload::MemberInvite(invite)) =
-            request.payload.as_ref()
-        && !invite.member_id.is_empty()
-        && queues.has_approved_invite(&invite.member_id)
+        && let Some((ActionKind::Add, member_id)) = change_of(request)
+        && !member_id.is_empty()
+        && queues.has_approved_invite(member_id)
     {
         info!(
             proposal_id,
-            target = ?invite.member_id,
+            target = ?member_id,
             "invite proposal deduped — target already queued for admission"
         );
         return ApplyOutcome::NoAction;
@@ -232,8 +235,8 @@ fn pending_removal_target(
     if is_emergency {
         return None;
     }
-    match request.payload.as_ref() {
-        Some(conversation_update_request::Payload::RemoveMember(r)) => Some(r.member_id.clone()),
+    match change_of(request) {
+        Some((ActionKind::Remove, id)) => Some(id.to_vec()),
         _ => None,
     }
 }

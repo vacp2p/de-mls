@@ -118,10 +118,16 @@ impl<St: EngineStore> Engine<St> {
 
         let pending = self.pending_merge.take();
         let decided = pending.as_ref().is_some_and(|p| p.hash == hash);
-        let facts = if decided {
-            pending.and_then(|p| p.facts)
+        let facts = match pending {
+            Some(p) if decided => p.facts,
+            _ => None,
+        };
+        // Matching is exact: a decided, non-urgent merge landed every approved
+        // update.
+        let updated = if decided && self.queues.urgent_commit_target().is_none() {
+            self.queues.approved_update_members()
         } else {
-            None
+            Vec::new()
         };
         if !decided {
             warn!(
@@ -136,6 +142,11 @@ impl<St: EngineStore> Engine<St> {
         self.epoch = epoch;
         self.finalize_committed_batch(epoch, &delta);
         self.reconcile_membership_after_commit(&delta)?;
+        for member in updated {
+            self.emit(Event::MemberUpdated {
+                member: MemberId::from(member),
+            });
+        }
 
         // A commit that unseats us ends the conversation here: no steward
         // work applies to a group we are no longer in.
@@ -177,6 +188,7 @@ impl<St: EngineStore> Engine<St> {
         if let Some(target) = self.queues.take_urgent_commit_target() {
             // Urgent commit: the rest of the queue waits for the next cycle.
             self.queues.drop_approved_removals_for(&target);
+            self.queues.drop_approved_updates();
         } else {
             self.queues.drain_approved_proposals();
         }
@@ -238,7 +250,8 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// The router could not execute a decision. A failed merge closes the
-    /// round with no commit; anything else is reported and dropped.
+    /// round with no commit; a failed update check takes the approved update out;
+    /// anything else is reported and dropped.
     pub fn decision_failed(
         &mut self,
         now: Timestamp,
@@ -255,6 +268,11 @@ impl<St: EngineStore> Engine<St> {
             Decision::Discard { .. } => "discard",
             Decision::Leave => "leave",
             Decision::ValidateKeyPackage { .. } => "validate_key_package",
+            Decision::ValidateUpdate { proposal_id, .. } => {
+                // An update nobody checked is not committed.
+                self.drop_unchecked_update(*proposal_id);
+                "validate_update"
+            }
         };
         self.emit(Event::Error {
             operation: operation.to_owned(),

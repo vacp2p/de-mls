@@ -341,10 +341,13 @@ fn two_members_survivor_commits_on_its_own_authority() {
     let now = bed.now;
     let (bytes, welcome_draft) = {
         let r = bed.router_mut(survivor);
-        let built = r.mls.build_commit(&[Action::Add {
-            member: carol_id.clone(),
-            key_package: key_package.clone(),
-        }]);
+        let built = r
+            .mls
+            .build_commit(&[Action::Add {
+                member: carol_id.clone(),
+                key_package: key_package.clone(),
+            }])
+            .expect("build the commit");
         r.mls.clear_pending();
         (built.commit, built.welcome)
     };

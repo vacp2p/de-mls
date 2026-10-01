@@ -87,13 +87,35 @@ pub enum Action {
     },
     /// Unseat `member`.
     Remove { member: MemberId },
+    /// Replace `member`'s leaf with the update it proposed.
+    Update { member: MemberId },
+}
+
+/// The kind of change an [`Action`] or an approved request makes, without
+/// its payload: what the engine compares a commit against the vote by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ActionKind {
+    Add,
+    Remove,
+    Update,
 }
 
 impl Action {
+    /// The kind of change this action makes.
+    pub(crate) fn kind(&self) -> ActionKind {
+        match self {
+            Action::Add { .. } => ActionKind::Add,
+            Action::Remove { .. } => ActionKind::Remove,
+            Action::Update { .. } => ActionKind::Update,
+        }
+    }
+
     /// The member this action is about.
     pub fn member(&self) -> &MemberId {
         match self {
-            Action::Add { member, .. } | Action::Remove { member } => member,
+            Action::Add { member, .. } | Action::Remove { member } | Action::Update { member } => {
+                member
+            }
         }
     }
 }
@@ -136,9 +158,9 @@ pub struct StagedFacts {
     pub sender: MemberId,
     /// The epoch the commit was built for.
     pub epoch: u64,
-    /// The proposals the commit carries inline, in commit order.
+    /// The adds, removes and updates the commit carries, in commit order.
     pub actions: Vec<Action>,
-    /// Every proposal the commit carries, adds and removes included. When
+    /// Every proposal the commit carries, adds, removes and updates included. When
     /// this exceeds `actions.len()` the commit carries proposal kinds the
     /// engine has no vocabulary for, and the round rejects it.
     pub proposal_count: u32,
@@ -157,6 +179,14 @@ pub enum Decision {
         proposal_id: u32,
         member: MemberId,
         key_package: Vec<u8>,
+    },
+    /// A peer proposed an update of its own leaf. Check that `update` is a
+    /// valid Update proposal from `member` for the current epoch, then report
+    /// [`super::Engine::update_checked`]; a failed check takes the update out.
+    ValidateUpdate {
+        proposal_id: u32,
+        member: MemberId,
+        update: Vec<u8>,
     },
     /// This member is the epoch steward for the round: build a commit
     /// carrying exactly `actions`, keep it pending, broadcast the commit
@@ -302,6 +332,8 @@ pub enum Event {
         added: Vec<MemberId>,
         removed: Vec<MemberId>,
     },
+    /// A merged commit replaced `member`'s leaf.
+    MemberUpdated { member: MemberId },
     /// The router merged a commit the engine did not decide: the group's
     /// facts were adopted without the vote's judgment, and the same
     /// `Output` asks the stewards for a sync.

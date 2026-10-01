@@ -371,6 +371,10 @@ mod tests {
         engine
             .queues
             .insert_approved_proposal(7, invite_request(&member(9)));
+        engine.queues.insert_approved_proposal(
+            8,
+            ConversationUpdateRequest::leaf_update(member(3), b"upd".to_vec()),
+        );
         engine.queues.set_urgent_commit_target(member(2));
         engine.queues.member_join_epoch.insert(member(9), 3);
         engine.queues.skip_steward(member(3));
@@ -428,6 +432,10 @@ mod tests {
                 .keys()
                 .collect::<Vec<_>>(),
             "approved ids in order"
+        );
+        assert!(
+            restored.queues.has_approved_update(&member(3)),
+            "approved update"
         );
         assert_eq!(
             restored.queues.urgent_commit_target(),

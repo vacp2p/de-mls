@@ -8,11 +8,12 @@ use indexmap::IndexMap;
 
 use crate::{
     engine::{
-        proposal_kind::ProposalKind,
+        proposal_kind::{ProposalKind, change_of, in_flight_target, target_member_id_of},
         queues::{EngineQueues, ProposalId, VotingMeta},
-        util::{in_flight_target, self_leave_proposal_id, target_member_id_of},
+        types::ActionKind,
+        util::single_voter_proposal_id,
     },
-    protos::de_mls::messages::v1::{ConversationUpdateRequest, conversation_update_request},
+    protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
 impl EngineQueues {
@@ -48,7 +49,7 @@ impl EngineQueues {
     pub fn has_approved_removal(&self, member_id: &[u8]) -> bool {
         self.approved_proposals
             .values()
-            .any(|req| removes_member(req, member_id))
+            .any(|req| change_of(req) == Some((ActionKind::Remove, member_id)))
     }
 
     /// True iff `approved_proposals` already admits `member_id`. Mirrors
@@ -59,17 +60,51 @@ impl EngineQueues {
     pub fn has_approved_invite(&self, member_id: &[u8]) -> bool {
         self.approved_proposals
             .values()
-            .any(|req| invites_member(req, member_id))
+            .any(|req| change_of(req) == Some((ActionKind::Add, member_id)))
     }
 
     /// True if `member_id` has a self-leave waiting for the next commit —
     /// an approved `RemoveMember(member_id)` under the deterministic
     /// self-leave ID. Used by live rotation to skip the leaver.
     pub fn is_pending_self_leave(&self, member_id: &[u8]) -> bool {
-        let pid = self_leave_proposal_id(member_id);
+        let pid = single_voter_proposal_id(member_id);
         self.approved_proposals
             .get(&pid)
-            .is_some_and(|req| removes_member(req, member_id))
+            .is_some_and(|req| change_of(req) == Some((ActionKind::Remove, member_id)))
+    }
+
+    /// True iff `approved_proposals` carries a `LeafUpdate` owned by
+    /// `member_id`.
+    pub fn has_approved_update(&self, member_id: &[u8]) -> bool {
+        self.approved_proposals
+            .values()
+            .any(|req| change_of(req) == Some((ActionKind::Update, member_id)))
+    }
+
+    /// Owners of the approved `LeafUpdate`s, in approval order.
+    pub fn approved_update_members(&self) -> Vec<Vec<u8>> {
+        self.approved_proposals
+            .values()
+            .filter_map(change_of)
+            .filter(|(kind, _)| *kind == ActionKind::Update)
+            .map(|(_, member)| member.to_vec())
+            .collect()
+    }
+
+    /// Remove the approved entry `proposal_id` when it is a `LeafUpdate`;
+    /// `true` when one was removed.
+    pub fn drop_approved_update(&mut self, proposal_id: ProposalId) -> bool {
+        let is_update = self
+            .approved_proposals
+            .get(&proposal_id)
+            .is_some_and(|req| matches!(change_of(req), Some((ActionKind::Update, _))));
+        is_update && self.approved_proposals.shift_remove(&proposal_id).is_some()
+    }
+
+    /// Drop every approved `LeafUpdate`; other approvals stay queued.
+    pub fn drop_approved_updates(&mut self) {
+        self.approved_proposals
+            .retain(|_pid, req| !matches!(change_of(req), Some((ActionKind::Update, _))));
     }
 
     /// Insert a proposal straight into the approved queue, staged for commit.
@@ -95,7 +130,7 @@ impl EngineQueues {
     /// queued for the next normal cycle.
     pub fn drop_approved_removals_for(&mut self, target: &[u8]) {
         self.approved_proposals
-            .retain(|_pid, req| !removes_member(req, target));
+            .retain(|_pid, req| change_of(req) != Some((ActionKind::Remove, target)));
     }
 
     // ─────────────────────────── Voting Proposals ───────────────────────────
@@ -150,20 +185,4 @@ impl EngineQueues {
     pub fn partial_freeze_blocks(&self, kind: ProposalKind) -> bool {
         self.has_active_emergency() && kind < ProposalKind::Emergency
     }
-}
-
-/// True iff `req` is a `RemoveMember` targeting `member_id`.
-fn removes_member(req: &ConversationUpdateRequest, member_id: &[u8]) -> bool {
-    matches!(
-        req.payload.as_ref(),
-        Some(conversation_update_request::Payload::RemoveMember(r)) if r.member_id == member_id
-    )
-}
-
-/// True when `req` admits `member_id`, whatever key package it carries.
-fn invites_member(req: &ConversationUpdateRequest, member_id: &[u8]) -> bool {
-    matches!(
-        req.payload.as_ref(),
-        Some(conversation_update_request::Payload::MemberInvite(_))
-    ) && target_member_id_of(req).is_some_and(|target| target == member_id)
 }

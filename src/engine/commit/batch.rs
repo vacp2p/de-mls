@@ -59,7 +59,11 @@ impl<St: EngineStore> Engine<St> {
         }
 
         let actions = self.batch_actions()?;
-        if actions.is_empty() {
+        // Our own update rides the commit itself, so a batch holding only it
+        // still builds, with no actions.
+        let carries_own_update = self.queues.urgent_commit_target().is_none()
+            && self.queues.has_approved_update(&self.own);
+        if actions.is_empty() && !carries_own_update {
             return Ok(false);
         }
         info!(
@@ -74,7 +78,8 @@ impl<St: EngineStore> Engine<St> {
 
     /// The approved queue projected to commit actions, in FIFO order. An
     /// urgent (emergency-driven) freeze narrows the batch to the target's
-    /// removal alone.
+    /// removal alone. This member's own update is not an action: the commit
+    /// carries it.
     fn batch_actions(&self) -> Result<Vec<Action>, ConversationError> {
         let urgent = self.queues.urgent_commit_target();
         let approved = self.queues.approved_proposals();
@@ -98,6 +103,14 @@ impl<St: EngineStore> Engine<St> {
                     }
                     actions.push(Action::Remove {
                         member: MemberId::from(remove.member_id.as_slice()),
+                    });
+                }
+                Some(Payload::LeafUpdate(update)) => {
+                    if urgent.is_some() || update.member_id == self.own {
+                        continue;
+                    }
+                    actions.push(Action::Update {
+                        member: MemberId::from(update.member_id.as_slice()),
                     });
                 }
                 _ => return Err(ConversationError::InvalidConversationUpdateRequest),

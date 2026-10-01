@@ -49,6 +49,9 @@ pub struct FakeRouter {
     rejected_commits: Vec<(MemberId, CommitHash, StagedFacts)>,
     /// Commits staged this epoch; a frame that repeats one is ignored.
     staged_hashes: HashSet<CommitHash>,
+    /// Set until this member's own leaf update is reported as landed; filed
+    /// again when a round closes.
+    pending_update: bool,
     /// Set for the span of `replay`: outbound is dropped and a
     /// `Decision::BuildCommit` is skipped, since the group decided those
     /// while this router was away.
@@ -113,6 +116,7 @@ impl FakeRouter {
             held_candidates: Vec::new(),
             rejected_commits: Vec::new(),
             staged_hashes: HashSet::new(),
+            pending_update: false,
             replaying: false,
         }
     }
@@ -129,6 +133,33 @@ impl FakeRouter {
         self.pending_announcements.push((member, key_package));
         let out = self.propose_announced(now);
         self.drive(now, out);
+    }
+
+    /// Change this member's own leaf: sign the update on the group and file
+    /// it. It stays pending until a merge reports it.
+    pub fn update_leaf(&mut self, now: Timestamp) {
+        self.pending_update = true;
+        let out = self.file_update(now);
+        self.drive(now, out);
+    }
+
+    /// File the pending update, if there is one.
+    fn file_update(&mut self, now: Timestamp) -> Output {
+        if !self.pending_update {
+            return Output::default();
+        }
+        let update = self.mls.propose_update();
+        match self.engine.propose_update(now, update) {
+            Ok(out) => out,
+            Err(de_mls::ConversationError::ConversationBlocked(_)) => Output::default(),
+            Err(e) => {
+                self.events.push(Event::Error {
+                    operation: "propose_update".into(),
+                    message: e.to_string(),
+                });
+                Output::default()
+            }
+        }
     }
 
     /// `propose_add` for every held announcement; one refused because a
@@ -271,6 +302,7 @@ impl FakeRouter {
         self.pending_announcements.clear();
         self.rejected_commits.clear();
         self.staged_hashes.clear();
+        self.pending_update = false;
         self.drive(now, out);
     }
 
@@ -404,8 +436,16 @@ impl FakeRouter {
                 .events
                 .iter()
                 .any(|e| matches!(e, Event::StewardSkipped { .. } | Event::SyncApplied));
+            if out.events.iter().any(
+                |e| matches!(e, Event::MemberUpdated { member } if member == self.mls.own_id()),
+            ) {
+                self.pending_update = false;
+            }
             self.events.append(&mut out.events);
             if round_closed {
+                if !self.replaying {
+                    next.merge(self.file_update(now));
+                }
                 next.merge(self.propose_announced(now));
                 next.merge(self.retry_held_candidates(now));
             }
@@ -444,11 +484,27 @@ impl FakeRouter {
                 let valid = FakeMls::key_package_identity(&key_package).as_ref() == Some(&member);
                 self.engine.key_package_checked(now, proposal_id, valid)
             }
+            Decision::ValidateUpdate {
+                proposal_id,
+                member,
+                update,
+            } => {
+                let valid = self.mls.validate_update(&update).as_ref() == Some(&member);
+                self.engine.update_checked(now, proposal_id, valid)
+            }
             Decision::BuildCommit { actions } => {
                 if self.replaying {
                     Ok(Output::default())
                 } else {
-                    let built = self.mls.build_commit(&actions);
+                    let built = match self.mls.build_commit(&actions) {
+                        Ok(built) => built,
+                        Err(reason) => {
+                            return self
+                                .engine
+                                .decision_failed(now, DecisionFailure { decision, reason })
+                                .unwrap_or_default();
+                        }
+                    };
                     if let Some(draft) = built.welcome {
                         self.welcomes.insert(built.hash, draft);
                     }
@@ -550,7 +606,10 @@ impl FakeRouter {
     /// router's own state is unaffected. Never reported to its own engine —
     /// only peers that receive the frame see it, and discard it.
     pub fn broadcast_foreign_commit(&mut self, actions: &[Action]) {
-        let built = self.mls.build_commit(actions);
+        let built = self
+            .mls
+            .build_commit(actions)
+            .expect("build the foreign commit");
         self.outbox.push(Frame::Commit(built.commit));
         self.mls.clear_pending();
     }
@@ -674,7 +733,7 @@ impl Bed {
             .collect();
         let now = self.now;
         let creator = self.router_mut(0);
-        let built = creator.mls.build_commit(&actions);
+        let built = creator.mls.build_commit(&actions).expect("seed build");
         let hash = built.hash;
         if let Some(draft) = built.welcome {
             creator.welcomes.insert(hash, draft);

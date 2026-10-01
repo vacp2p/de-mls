@@ -23,6 +23,7 @@ message ConversationUpdateRequest {
     RemoveMember remove_member = 2;
     EmergencyCriteriaProposal emergency_criteria = 3;
     StewardElectionProposal steward_election = 4;
+    LeafUpdate leaf_update = 5;
   }
 }
 
@@ -67,6 +68,13 @@ message MemberInvite {
 
 message RemoveMember {
   bytes member_id = 1;
+}
+
+// A member changes its own leaf. `update_bytes` is the MLS Update proposal the
+// member signed; `member_id` is its owner.
+message LeafUpdate {
+  bytes member_id = 1;
+  bytes update_bytes = 2;
 }
 
 message ConversationSync {

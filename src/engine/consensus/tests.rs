@@ -4,15 +4,18 @@ use hashgraph_like_consensus::{
     protos::consensus::v1::{Proposal, Vote},
     storage::ConsensusStorage,
     types::ConsensusEvent,
+    utils::build_vote,
 };
 use prost::Message;
 
 use crate::{
     engine::{
         config::EngineConfig,
+        consensus::{MemberSigner, wire::authorize_fast_path_proposal},
         handle::Engine,
         store::InMemoryStore,
-        types::{Decision, Event, MemberId, Outbound, Output, Timestamp, Verdict},
+        types::{Decision, DecisionFailure, Event, MemberId, Outbound, Output, Timestamp, Verdict},
+        util::single_voter_proposal_id,
     },
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, MemberInvite, ViolationEvidence, conversation_update_request,
@@ -723,4 +726,136 @@ mod outcome_application {
         e.drive_sync_request();
         assert!(!e.out.events.contains(&Event::SyncUnanswered));
     }
+}
+
+// ── leaf updates ────────────────────────────────────────────────────
+
+/// A peer's leaf-update proposal as it arrives on the wire: one voter, the
+/// owner's YES bundled.
+fn update_proposal(owner: &[u8], member_id: &[u8], update: &[u8]) -> Proposal {
+    let request = ConversationUpdateRequest::leaf_update(member_id.to_vec(), update.to_vec());
+    let mut proposal = peer_proposal(owner, single_voter_proposal_id(update), &request, 1);
+    let vote = build_vote(&proposal, true, &MemberSigner::new(owner.to_vec()), 0).unwrap();
+    proposal.votes.push(vote);
+    proposal
+}
+
+#[test]
+fn fast_path_admits_a_leaf_update_of_the_sender_only() {
+    let own = update_proposal(&member(2), &member(2), b"upd");
+    assert!(authorize_fast_path_proposal(&own, &member(2)));
+
+    let other = update_proposal(&member(2), &member(3), b"upd");
+    assert!(!authorize_fast_path_proposal(&other, &member(2)));
+
+    assert!(!authorize_fast_path_proposal(&own, &member(3)));
+}
+
+/// A peer's update is approved on arrival and asks the router for a check.
+#[test]
+fn incoming_update_is_approved_and_asks_for_a_check() {
+    let mut engine = engine();
+    let proposal = update_proposal(&member(2), &member(2), b"upd");
+    let id = proposal.proposal_id;
+
+    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    let out = engine.finish().unwrap();
+
+    assert!(matches!(
+        out.decisions.as_slice(),
+        [Decision::ValidateUpdate { proposal_id, member: who, update }]
+            if *proposal_id == id && *who == MemberId::from(member(2)) && update == b"upd"
+    ));
+    assert!(engine.queues.has_approved_update(&member(2)));
+    assert!(out.events.iter().any(|e| matches!(
+        e,
+        Event::ConsensusReached { proposal_id, verdict: Verdict::Approved, .. } if *proposal_id == id
+    )));
+}
+
+#[test]
+fn a_passed_update_check_leaves_the_update_approved() {
+    let mut engine = engine();
+    let proposal = update_proposal(&member(2), &member(2), b"upd");
+    let id = proposal.proposal_id;
+    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    engine.finish().unwrap();
+
+    let out = engine.update_checked(Timestamp::ZERO, id, true).unwrap();
+
+    assert!(engine.queues.has_approved_update(&member(2)));
+    assert!(out.is_empty());
+}
+
+#[test]
+fn a_failed_update_check_takes_the_update_out() {
+    let mut engine = engine();
+    let proposal = update_proposal(&member(2), &member(2), b"upd");
+    let id = proposal.proposal_id;
+    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    engine.finish().unwrap();
+
+    let out = engine.update_checked(Timestamp::ZERO, id, false).unwrap();
+
+    assert!(!engine.queues.has_approved_update(&member(2)));
+    assert!(out.decisions.is_empty());
+}
+
+#[test]
+fn a_second_update_from_the_same_member_is_dropped() {
+    let mut engine = engine();
+    let first = update_proposal(&member(2), &member(2), b"first");
+    engine.on_incoming_proposal(&member(2), first).unwrap();
+    engine.finish().unwrap();
+
+    let second = update_proposal(&member(2), &member(2), b"second");
+    engine.on_incoming_proposal(&member(2), second).unwrap();
+    let out = engine.finish().unwrap();
+
+    assert!(out.decisions.is_empty());
+    assert_eq!(engine.queues.approved_update_members(), vec![member(2)]);
+}
+
+/// A check the router could not run takes the update out: its owner can
+/// file again this epoch.
+#[test]
+fn a_failed_update_decision_lets_the_member_file_again() {
+    let mut engine = engine();
+    let first = update_proposal(&member(2), &member(2), b"first");
+    engine.on_incoming_proposal(&member(2), first).unwrap();
+    let out = engine.finish().unwrap();
+    let decision = out.decisions[0].clone();
+
+    engine
+        .decision_failed(
+            Timestamp::ZERO,
+            DecisionFailure {
+                decision,
+                reason: "group unavailable".to_owned(),
+            },
+        )
+        .unwrap();
+    assert!(!engine.queues.has_approved_update(&member(2)));
+
+    let second = update_proposal(&member(2), &member(2), b"second");
+    engine.on_incoming_proposal(&member(2), second).unwrap();
+    let out = engine.finish().unwrap();
+    assert!(matches!(
+        out.decisions.as_slice(),
+        [Decision::ValidateUpdate { .. }]
+    ));
+    assert!(engine.queues.has_approved_update(&member(2)));
+}
+
+#[test]
+fn a_multi_voter_leaf_update_is_dropped() {
+    let mut engine = engine();
+    let request = ConversationUpdateRequest::leaf_update(member(2), b"upd".to_vec());
+    let proposal = peer_proposal(&member(2), 31, &request, 4);
+
+    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+
+    assert!(engine.out.decisions.is_empty());
+    assert!(!engine.queues.has_approved_update(&member(2)));
+    assert!(!engine.queues.is_voting(31));
 }

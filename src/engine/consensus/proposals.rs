@@ -26,10 +26,9 @@ use crate::{
             ProposalParams, authorize_fast_path_proposal, control_proposal, control_vote,
         },
         handle::Engine,
-        proposal_kind::ProposalKind,
+        proposal_kind::{ProposalKind, in_flight_target},
         store::EngineStore,
         types::{Decision, Event, MemberId, Output, Phase, Timestamp},
-        util::in_flight_target,
     },
     protos::de_mls::messages::v1::{ConversationUpdateRequest, conversation_update_request},
 };
@@ -69,7 +68,8 @@ impl<St: EngineStore> Engine<St> {
         }
 
         let kind = ProposalKind::of(&request);
-        let expected_voters = self.check_proposal_allowed(kind)?;
+        self.check_proposal_allowed(kind)?;
+        let expected_voters = self.members.len() as u32;
 
         let liveness_criteria_yes = self.config.liveness_criteria_yes;
         let consensus_timeout = self.config.consensus_timeout;
@@ -260,6 +260,24 @@ impl<St: EngineStore> Engine<St> {
             return Ok(());
         }
 
+        let update = match decoded.as_ref().and_then(|r| r.payload.as_ref()) {
+            Some(conversation_update_request::Payload::LeafUpdate(update)) => Some(update),
+            _ => None,
+        };
+        // One update per member per epoch, with exactly one voter.
+        if let Some(update) = update
+            && (proposal.expected_voters_count != 1
+                || self.queues.has_approved_update(&update.member_id))
+        {
+            debug!(
+                conversation = %self.conversation_id,
+                proposal_id = proposal.proposal_id,
+                member = ?update.member_id,
+                "update proposal dropped: not single-voter, or its owner already has one"
+            );
+            return Ok(());
+        }
+
         let proposal_id = proposal.proposal_id;
         let expected_voters = proposal.expected_voters_count;
         let expiration_timestamp = proposal.expiration_timestamp;
@@ -291,10 +309,47 @@ impl<St: EngineStore> Engine<St> {
             self.queues.track_voting_proposal(proposal_id, req);
         }
 
+        // The router checks an accepted update before a commit can carry it.
+        if let Some(update) = update {
+            self.decide(Decision::ValidateUpdate {
+                proposal_id,
+                member: MemberId::from(update.member_id.clone()),
+                update: update.update_bytes.clone(),
+            });
+        }
+
         if expected_voters > 1 {
             self.arm_local_vote(proposal_id, decoded)?;
         }
         Ok(())
+    }
+
+    /// The router checked the update of the proposal `proposal_id`. The
+    /// update is approved on arrival, so a pass has nothing to do; a failure
+    /// takes it out of the approved queue, without a score.
+    pub fn update_checked(
+        &mut self,
+        now: Timestamp,
+        proposal_id: u32,
+        valid: bool,
+    ) -> Result<Output, ConversationError> {
+        self.begin(now);
+        if !valid {
+            self.drop_unchecked_update(proposal_id);
+        }
+        self.finish()
+    }
+
+    /// Take the approved leaf update `proposal_id` out of the queue: the
+    /// router did not vouch for it, so no commit may carry it.
+    pub(crate) fn drop_unchecked_update(&mut self, proposal_id: u32) {
+        if self.queues.drop_approved_update(proposal_id) {
+            self.dirty.proposals = true;
+            info!(
+                conversation = %self.conversation_id,
+                proposal_id, "update dropped: it failed validation"
+            );
+        }
     }
 
     /// Replay a persisted consensus session on restore: feed the bundled
@@ -458,11 +513,13 @@ impl<St: EngineStore> Engine<St> {
 
     // ── private ──────────────────────────────────────────────────────
 
-    /// Whether this proposal can be opened right now, and how many voters it
-    /// expects. Nothing opens outside `Working`, except the steward election
-    /// that ends `Syncing`; an active emergency also blocks lower-priority
-    /// proposals.
-    fn check_proposal_allowed(&self, kind: ProposalKind) -> Result<u32, ConversationError> {
+    /// Refuse a proposal that cannot be opened right now. Nothing opens
+    /// outside `Working`, except the steward election that ends `Syncing`; an
+    /// active emergency also blocks lower-priority proposals.
+    pub(crate) fn check_proposal_allowed(
+        &self,
+        kind: ProposalKind,
+    ) -> Result<(), ConversationError> {
         let state = self.phase;
         let allowed_here =
             state == Phase::Working || (state == Phase::Syncing && kind.is_steward_election());
@@ -472,6 +529,6 @@ impl<St: EngineStore> Engine<St> {
         if self.queues.partial_freeze_blocks(kind) {
             return Err(ConversationError::PartialFreeze);
         }
-        Ok(self.members.len() as u32)
+        Ok(())
     }
 }

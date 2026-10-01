@@ -162,6 +162,7 @@ fn duplicate_approvals_of_one_change_match_a_single_action() {
     e.queues.insert_approved_proposal(8, invite("carol"));
     assert!(actions_match_voted(
         &e.queues,
+        &member("alice"),
         &[Action::Add {
             member: id("carol"),
             key_package: b"kp:carol".to_vec(),
@@ -180,12 +181,14 @@ fn an_urgent_candidate_matches_the_target_removal_alone() {
 
     assert!(actions_match_voted(
         &e.queues,
+        &member("alice"),
         &[Action::Remove {
             member: id("carol")
         }]
     ));
     assert!(!actions_match_voted(
         &e.queues,
+        &member("alice"),
         &[
             Action::Add {
                 member: id("dave"),
@@ -200,6 +203,7 @@ fn an_urgent_candidate_matches_the_target_removal_alone() {
     e.queues.take_urgent_commit_target();
     assert!(actions_match_voted(
         &e.queues,
+        &member("alice"),
         &[
             Action::Add {
                 member: id("dave"),
@@ -581,4 +585,185 @@ fn a_failed_merge_closes_the_round_without_a_commit() {
         1,
         "the approved batch stays queued for the next round"
     );
+}
+
+// ── leaf updates ────────────────────────────────────────────────────
+
+fn update(owner: &str) -> ConversationUpdateRequest {
+    ConversationUpdateRequest::leaf_update(member(owner), format!("upd:{owner}").into_bytes())
+}
+
+/// A two-member engine whose epoch steward is this node.
+fn steward_engine() -> Engine<InMemoryStore> {
+    let e = engine(&["alice", "bob"]);
+    if e.expected_steward().unwrap() == e.own {
+        return e;
+    }
+    engine(&["bob", "alice"])
+}
+
+/// A peer's approved update alone opens a build, and the action names it.
+#[test]
+fn an_update_only_batch_builds_an_update_action() {
+    let mut e = steward_engine();
+    let peer = if e.own == member("alice") {
+        "bob"
+    } else {
+        "alice"
+    };
+    e.queues.insert_approved_proposal(7, update(peer));
+    e.begin(at(0));
+
+    assert!(e.request_own_candidate().unwrap());
+    assert_eq!(
+        e.finish().unwrap().decisions,
+        vec![Decision::BuildCommit {
+            actions: vec![Action::Update { member: id(peer) }],
+        }]
+    );
+}
+
+/// The steward's own update rides the commit itself: the build has no
+/// actions but still happens.
+#[test]
+fn an_own_update_only_batch_builds_with_no_actions() {
+    let mut e = steward_engine();
+    let own = if e.own == member("alice") {
+        "alice"
+    } else {
+        "bob"
+    };
+    e.queues.insert_approved_proposal(7, update(own));
+    e.begin(at(0));
+
+    assert!(e.request_own_candidate().unwrap());
+    assert_eq!(
+        e.finish().unwrap().decisions,
+        vec![Decision::BuildCommit {
+            actions: Vec::new(),
+        }]
+    );
+}
+
+#[test]
+fn a_commit_matching_the_approved_updates_is_valid() {
+    let mut e = engine(&["alice", "bob"]);
+    e.queues.insert_approved_proposal(7, update("bob"));
+    e.queues.insert_approved_proposal(8, invite("carol"));
+    assert!(actions_match_voted(
+        &e.queues,
+        &member("alice"),
+        &[
+            Action::Update { member: id("bob") },
+            Action::Add {
+                member: id("carol"),
+                key_package: b"kp:carol".to_vec(),
+            },
+        ]
+    ));
+}
+
+#[test]
+fn a_commit_missing_an_approved_update_is_a_mismatch() {
+    let mut e = engine(&["alice", "bob"]);
+    e.queues.insert_approved_proposal(7, update("bob"));
+    e.queues.insert_approved_proposal(8, invite("carol"));
+    assert!(!actions_match_voted(
+        &e.queues,
+        &member("alice"),
+        &[Action::Add {
+            member: id("carol"),
+            key_package: b"kp:carol".to_vec(),
+        }]
+    ));
+}
+
+#[test]
+fn a_commit_carrying_an_unapproved_update_is_a_mismatch() {
+    let mut e = engine(&["alice", "bob"]);
+    e.queues.insert_approved_proposal(8, invite("carol"));
+    assert!(!actions_match_voted(
+        &e.queues,
+        &member("alice"),
+        &[
+            Action::Update { member: id("bob") },
+            Action::Add {
+                member: id("carol"),
+                key_package: b"kp:carol".to_vec(),
+            },
+        ]
+    ));
+}
+
+/// An approved update owned by the commit's sender is carried by the commit
+/// itself, so it is not expected as an action; for any other sender it is.
+#[test]
+fn the_senders_own_update_is_not_expected_as_an_action() {
+    let mut e = engine(&["alice", "bob"]);
+    e.queues.insert_approved_proposal(7, update("alice"));
+    assert!(actions_match_voted(&e.queues, &member("alice"), &[]));
+    assert!(!actions_match_voted(&e.queues, &member("bob"), &[]));
+}
+
+#[test]
+fn an_urgent_round_with_an_update_is_a_mismatch() {
+    let mut e = engine(&["alice", "bob", "carol"]);
+    e.queues.insert_approved_proposal(7, removal("carol"));
+    e.queues.set_urgent_commit_target(member("carol"));
+    assert!(!actions_match_voted(
+        &e.queues,
+        &member("alice"),
+        &[
+            Action::Update { member: id("bob") },
+            Action::Remove {
+                member: id("carol")
+            },
+        ]
+    ));
+}
+
+/// A decided merge reports each landed update and leaves no update in the
+/// queue, on the plain branch and on the urgent one.
+#[test]
+fn a_merge_reports_the_landed_updates_and_empties_the_queue() {
+    let mut e = engine(&["alice", "bob", "carol"]);
+    e.queues.insert_approved_proposal(7, update("bob"));
+    e.queues.insert_approved_proposal(8, update("carol"));
+    let hash = CommitHash::of(b"commit");
+    e.pending_merge = Some(PendingMerge { hash, facts: None });
+    let out = e
+        .commit_applied(at(0), hash, 1, &[id("alice"), id("bob"), id("carol")])
+        .unwrap();
+
+    let reported: Vec<&Event> = out
+        .events
+        .iter()
+        .filter(|ev| matches!(ev, Event::MemberUpdated { .. }))
+        .collect();
+    assert_eq!(
+        reported,
+        vec![
+            &Event::MemberUpdated { member: id("bob") },
+            &Event::MemberUpdated {
+                member: id("carol")
+            },
+        ]
+    );
+    assert!(e.queues.approved_update_members().is_empty());
+
+    let mut e = engine(&["alice", "bob", "carol"]);
+    e.queues.insert_approved_proposal(7, update("bob"));
+    e.queues.insert_approved_proposal(8, removal("carol"));
+    e.queues.set_urgent_commit_target(member("carol"));
+    let hash = CommitHash::of(b"urgent");
+    e.pending_merge = Some(PendingMerge { hash, facts: None });
+    let out = e
+        .commit_applied(at(0), hash, 1, &[id("alice"), id("bob")])
+        .unwrap();
+    assert!(
+        !out.events
+            .iter()
+            .any(|ev| matches!(ev, Event::MemberUpdated { .. }))
+    );
+    assert!(e.queues.approved_update_members().is_empty());
 }
