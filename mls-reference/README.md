@@ -40,9 +40,11 @@ application's builder last so they always win.
 | `open(ciphertext)` | `{sender, epoch, plaintext}` or drop | MUST return the sender from the MLS signature, never from the payload; MUST drop group-id mismatch, epochs newer than current, older than `current - past_window`, and older than own join; MUST NOT process commit or proposal content here |
 | `key_package_identity(bytes)` | member id (the leaf's signature key) | parse only; the same value the member has after seating |
 | `validate_key_package(bytes)` | ok / error | full MLS validation |
-| `build_commit(actions)` | `{hash, actions, proposal_count, commit_bytes, welcome?}` | proposals MUST be inline, in the given order; MUST force a self-update; MUST validate every key package; MUST stay pending and MUST NOT merge; removes of non-members MUST be skipped and reported |
-| `stage(commit_bytes)` | `{sender, epoch, actions, proposal_count, self_removed}` | MUST NOT apply; the same bytes stage once; MUST hold several staged commits at once; MUST reject group-id mismatch and past epochs; `actions` lists adds and removes by member id in commit order |
-| `merge(hash)` | `{epoch, members}` | own pending commit MUST be cleared before merging a remote one; MUST persist before returning |
+| `propose_update(params)` | update bytes | MUST build an Update proposal for our own leaf and hold it outside the proposal store, a non-empty store blocks `seal`; never the signature key |
+| `validate_update(bytes)` | the sender's member id, or error | the same bytes validate once; MUST fail unless they are an Update proposal for this group and the current epoch; MUST hold it outside the proposal store |
+| `build_commit(actions)` | `{hash, actions, proposal_count, commit_bytes, welcome?}` | adds and removes MUST be inline, held updates ride by reference; MUST force a self-update; MUST validate every key package; MUST stay pending and MUST NOT merge; removes of non-members MUST be skipped and reported; an update nobody holds MUST fail the build; our own held update rides in the commit itself, not as an action; `actions` reports the commit's own order |
+| `stage(commit_bytes)` | `{sender, epoch, actions, proposal_count, self_removed}` | MUST NOT apply; the same bytes stage once; MUST hold several staged commits at once; MUST reject group-id mismatch and past epochs; `actions` lists adds, removes and updates by member id in commit order; a commit that refers to an update this node does not hold MUST fail with a distinct error |
+| `merge(hash)` | `{epoch, members}` | own pending commit MUST be cleared before merging a remote one; MUST persist before returning; MUST drop every held update |
 | `discard(hash)`, `clear_pending()` | | |
 | `commit_hash(bytes)` | hash | one function, same on every node |
 | `delete()` | | idempotent teardown after `Decision::Leave` |
@@ -109,17 +111,25 @@ MUST.
    `Event::PhaseChange(Phase::Working)`. The engine keeps no announcement
    and no re-propose memory; any member may propose, and the engine dedups
    a proposal whose target a peer's proposal or an approval already covers.
+   A member's own leaf update is filed the same way: `propose_update` on
+   the group, then `propose_update(now, bytes)` on the engine, kept and
+   filed again after the same refusal.
 9. An invite proposal carries the joiner's id as the proposer read it from
    the key package. Every member executes `Decision::ValidateKeyPackage`
    (full validation plus identity equals the claimed id) and reports
    `key_package_checked` before its vote proceeds; the engine never parses
-   a key package.
+   a key package. A peer's leaf update is checked the same way:
+   `Decision::ValidateUpdate`, `validate_update` (the id it returns
+   equals the member named), `update_checked`; a failed check takes the
+   update out before a commit can carry it.
 10. `Event::ConsensusReached` carries a verdict. `Rejected` is the group's
     decision: the router does not file the same request again this epoch.
     `Failed` is no decision (the timeout passed with neither side at
     threshold): filing again is the router's call, and the engine treats
     the new filing like a first one. `Approved` work lands in a later
-    commit; `MembersChanged` reports what landed.
+    commit; `MembersChanged` reports what landed, `MemberUpdated` for a
+    leaf update. An update that did not land is gone with its epoch: the
+    owner files a fresh one.
 
 **Sync**
 
@@ -245,6 +255,7 @@ struct Router {
     staged: HashMap<CommitHash, StagedCommit>,
     announced: Vec<(MemberId, Vec<u8>)>,   // wanted joiners, not yet proposed
     held: Vec<(CommitHash, StagedFacts)>,  // candidates refused while Syncing
+    update: Option<LeafParams>,            // own leaf change filed, not yet seen landing
 }
 
 impl Router {
@@ -301,6 +312,17 @@ impl Router {
         out
     }
 
+    // The update is wanted until `MemberUpdated` names us; a merge drops
+    // the filed one, landed or not, so the next `Working` files it again.
+    fn propose_update(&mut self, now: Timestamp) -> Output {
+        let Some(params) = self.update.clone() else { return Output::default() };
+        let Ok(bytes) = self.mls.propose_update(params) else { return Output::default() };
+        match self.engine.propose_update(now, bytes) {
+            Ok(out) => out,
+            Err(_) => Output::default(),                             // blocked: next `Working`
+        }
+    }
+
     fn drive(&mut self, now: Timestamp, mut out: Output) {
         loop {
             for o in out.outbound.drain(..) { self.send(o); }       // sealed at current epoch
@@ -309,7 +331,11 @@ impl Router {
                 next.merge(self.execute(now, d));                    // report calls return Output
             }
             for e in out.events.drain(..) {
+                if matches!(&e, Event::MemberUpdated { member } if *member == self.mls.own_id()) {
+                    self.update = None;                              // it landed
+                }
                 if matches!(e, Event::PhaseChange(Phase::Working)) {
+                    next.merge(self.propose_update(now));            // refused or dropped by a merge
                     next.merge(self.propose_announced(now));         // refused proposals
                     next.merge(self.retry_held_candidates(now));     // refused candidates
                 }
@@ -357,6 +383,10 @@ impl Router {
                 let ok = self.mls.validate_key_package(&key_package).is_ok()
                     && MlsService::key_package_identity(&key_package) == Ok(member);
                 self.engine.key_package_checked(now, proposal_id, ok)
+            }
+            Decision::ValidateUpdate { proposal_id, member, update } => {
+                let ok = self.mls.validate_update(&update) == Ok(member);
+                self.engine.update_checked(now, proposal_id, ok)
             }
             Decision::Leave => { self.mls.delete(); Output::default() }
         }
