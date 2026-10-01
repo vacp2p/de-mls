@@ -1,7 +1,10 @@
 //! The reference router from the design, over the fake group, plus the
 //! multi-node bed that drives several of them on virtual time.
 
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use de_mls::EngineConfig;
 use de_mls::engine::{
@@ -38,12 +41,14 @@ pub struct FakeRouter {
     /// `ConversationBlocked` (the engine was `Syncing`) — retried the same
     /// way as `pending_announcements`.
     held_candidates: Vec<(CommitHash, StagedFacts)>,
-    /// Bytes of the candidates the engine rejected as not the epoch
-    /// steward's, kept until the epoch merges. After `StewardSkipped` or
-    /// `SyncApplied` the router stages them again: the sender may have
+    /// The candidates the engine rejected as not the epoch steward's, kept
+    /// staged until the epoch merges. After `StewardSkipped` or
+    /// `SyncApplied` the router reports them again: the sender may have
     /// become the epoch steward. A candidate rejected for its actions is
     /// never kept.
-    rejected_commits: Vec<(MemberId, Vec<u8>)>,
+    rejected_commits: Vec<(MemberId, CommitHash, StagedFacts)>,
+    /// Commits staged this epoch; a frame that repeats one is ignored.
+    staged_hashes: HashSet<CommitHash>,
     /// Set for the span of `replay`: outbound is dropped and a
     /// `Decision::BuildCommit` is skipped, since the group decided those
     /// while this router was away.
@@ -107,6 +112,7 @@ impl FakeRouter {
             pending_announcements: Vec::new(),
             held_candidates: Vec::new(),
             rejected_commits: Vec::new(),
+            staged_hashes: HashSet::new(),
             replaying: false,
         }
     }
@@ -163,18 +169,14 @@ impl FakeRouter {
         out
     }
 
-    /// Stage and report every candidate kept in `rejected_commits`: the
+    /// Report again every candidate kept in `rejected_commits`: the
     /// sender may have become the epoch steward since it was rejected. One
     /// rejected again this round stays in `rejected_commits`; a
     /// `ConversationBlocked` refusal (the engine is `Syncing`) moves it to
-    /// `held_candidates`; a staging error drops it.
-    fn restage_rejected(&mut self, now: Timestamp) -> Output {
+    /// `held_candidates`.
+    fn report_rejected_again(&mut self, now: Timestamp) -> Output {
         let mut out = Output::default();
-        for (sender, bytes) in std::mem::take(&mut self.rejected_commits) {
-            let Ok(facts) = self.mls.stage(&bytes) else {
-                continue;
-            };
-            let hash = CommitHash::of(&bytes);
+        for (sender, hash, facts) in std::mem::take(&mut self.rejected_commits) {
             match self.engine.handle_candidate(now, hash, facts.clone()) {
                 Ok(o) => {
                     let rejected_again = o.events.iter().any(|e| {
@@ -187,7 +189,7 @@ impl FakeRouter {
                         )
                     });
                     if rejected_again {
-                        self.rejected_commits.push((sender, bytes));
+                        self.rejected_commits.push((sender, hash, facts));
                     }
                     out.merge(o);
                 }
@@ -201,6 +203,41 @@ impl FakeRouter {
             }
         }
         out
+    }
+
+    /// Stage a commit off the wire and hand it to the engine. `None` when
+    /// there is nothing to drive.
+    fn receive_commit(
+        &mut self,
+        now: Timestamp,
+        bytes: Vec<u8>,
+    ) -> Option<Result<Output, de_mls::ConversationError>> {
+        let hash = CommitHash::of(&bytes);
+        if self.staged_hashes.contains(&hash) {
+            return None;
+        }
+        let facts = self.mls.stage(&bytes).ok()?;
+        self.staged_hashes.insert(hash);
+        match self.engine.handle_candidate(now, hash, facts.clone()) {
+            Err(de_mls::ConversationError::ConversationBlocked(_)) => {
+                self.held_candidates.push((hash, facts));
+                None
+            }
+            Ok(out) => {
+                let rejected_sender = out.events.iter().find_map(|e| match e {
+                    Event::CandidateRejected {
+                        sender,
+                        reason: CandidateRejection::NotEpochSteward,
+                    } => Some(sender.clone()),
+                    _ => None,
+                });
+                if let Some(sender) = rejected_sender {
+                    self.rejected_commits.push((sender, hash, facts));
+                }
+                Some(Ok(out))
+            }
+            result => Some(result),
+        }
     }
 
     /// How many candidates this router is holding as rejected, waiting for
@@ -232,6 +269,8 @@ impl FakeRouter {
         .expect("engine restore");
         self.engine = engine;
         self.pending_announcements.clear();
+        self.rejected_commits.clear();
+        self.staged_hashes.clear();
         self.drive(now, out);
     }
 
@@ -314,31 +353,9 @@ impl FakeRouter {
                     ),
                 }
             }
-            Frame::Commit(bytes) => match self.mls.stage(&bytes) {
-                Ok(facts) => {
-                    let hash = CommitHash::of(&bytes);
-                    match self.engine.handle_candidate(now, hash, facts.clone()) {
-                        Err(de_mls::ConversationError::ConversationBlocked(_)) => {
-                            self.held_candidates.push((hash, facts));
-                            return;
-                        }
-                        Ok(out) => {
-                            let rejected_sender = out.events.iter().find_map(|e| match e {
-                                Event::CandidateRejected {
-                                    sender,
-                                    reason: CandidateRejection::NotEpochSteward,
-                                } => Some(sender.clone()),
-                                _ => None,
-                            });
-                            if let Some(sender) = rejected_sender {
-                                self.rejected_commits.push((sender, bytes));
-                            }
-                            Ok(out)
-                        }
-                        result => result,
-                    }
-                }
-                Err(_) => return,
+            Frame::Commit(bytes) => match self.receive_commit(now, bytes) {
+                Some(result) => result,
+                None => return,
             },
             Frame::Welcome(_) => return,
         };
@@ -393,7 +410,7 @@ impl FakeRouter {
                 next.merge(self.retry_held_candidates(now));
             }
             if steward_changed {
-                next.merge(self.restage_rejected(now));
+                next.merge(self.report_rejected_again(now));
             }
             if let Some(d) = out.wakeup {
                 self.next_wakeup = Some(now + d);
@@ -452,6 +469,7 @@ impl FakeRouter {
             Decision::Merge { hash } => match self.merge(hash) {
                 Ok(applied) => {
                     self.rejected_commits.clear();
+                    self.staged_hashes.clear();
                     let out =
                         self.engine
                             .commit_applied(now, hash, applied.epoch, &applied.members);
