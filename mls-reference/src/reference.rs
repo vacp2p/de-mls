@@ -15,17 +15,20 @@
 use std::collections::HashMap;
 use std::error::Error as StdError;
 
+use openmls::ciphersuite::hash_ref::ProposalRef;
 use openmls::credentials::CredentialWithKey;
 use openmls::group::{
-    GroupId, MlsGroup, MlsGroupCreateConfigBuilder, MlsGroupJoinConfigBuilder, StagedCommit,
-    StagedWelcome, WelcomeError,
+    CommitMessageBundle, GroupId, MlsGroup, MlsGroupCreateConfigBuilder, MlsGroupJoinConfigBuilder,
+    StagedCommit, StagedWelcome, WelcomeError,
 };
 use openmls::key_packages::{KeyPackage, KeyPackageIn};
 use openmls::prelude::tls_codec::Serialize as TlsSerialize;
 use openmls::prelude::{
     ContentType, DeserializeBytes, LeafNodeIndex, MlsMessageBodyIn, MlsMessageIn,
-    ProcessedMessageContent, ProtocolMessage, ProtocolVersion, Sender,
+    ProcessMessageError, ProcessedMessageContent, Proposal, ProtocolMessage, ProtocolVersion,
+    QueuedProposal, Sender, StageCommitError,
 };
+use openmls::treesync::LeafNodeParameters;
 use openmls_traits::storage::StorageProvider;
 use openmls_traits::{OpenMlsProvider, signatures::Signer};
 use sha2::{Digest, Sha256};
@@ -89,6 +92,12 @@ pub struct Reference<Pr, S> {
     /// The epoch this member entered the group at; the decrypt gate floors
     /// here, since earlier epochs used keys we never held.
     first_epoch: u64,
+    /// Update proposals by proposer, ours included, held outside the group's
+    /// proposal store: a non-empty store blocks `seal`. Dropped at every merge.
+    held_updates: HashMap<Vec<u8>, QueuedProposal>,
+    /// The parameters of our own held update: our own commit applies them
+    /// through its leaf, never by reference.
+    own_update: Option<LeafNodeParameters>,
 }
 
 impl<Pr, S> Reference<Pr, S>
@@ -128,6 +137,8 @@ where
             signer,
             staged: HashMap::new(),
             pending: None,
+            held_updates: HashMap::new(),
+            own_update: None,
         })
     }
 
@@ -169,6 +180,8 @@ where
             signer,
             staged: HashMap::new(),
             pending: None,
+            held_updates: HashMap::new(),
+            own_update: None,
         }))
     }
 
@@ -197,6 +210,8 @@ where
             staged: HashMap::new(),
             pending: None,
             first_epoch: join_epoch,
+            held_updates: HashMap::new(),
+            own_update: None,
         }))
     }
 
@@ -256,27 +271,91 @@ where
         Ok(())
     }
 
-    /// The adds and removes a staged commit performs, in commit order. Removes
-    /// resolve to a member id here, before the merge — once the commit
-    /// applies, the leaf is blank and the id is gone.
+    /// The adds, removes and updates a staged commit performs, in commit
+    /// order. Removes resolve to a member id here, before the merge — once
+    /// the commit applies, the leaf is blank and the id is gone.
     fn actions_of(&self, staged: &StagedCommit) -> Result<Vec<Action>, Error> {
         let mut actions = Vec::new();
-        for add in staged.add_proposals() {
-            let key_package = add.add_proposal().key_package();
-            actions.push(Action::Add {
-                member: key_package.leaf_node().signature_key().as_slice().to_vec(),
-                key_package: key_package
-                    .tls_serialize_detached()
-                    .map_err(Error::KeyPackageTls)?,
-            });
-        }
-        for remove in staged.remove_proposals() {
-            let leaf = remove.remove_proposal().removed();
-            if let Some(member) = self.id_at(leaf) {
-                actions.push(Action::Remove { member });
+        for queued in staged.queued_proposals() {
+            match queued.proposal() {
+                Proposal::Add(add) => {
+                    let key_package = add.key_package();
+                    actions.push(Action::Add {
+                        member: key_package.leaf_node().signature_key().as_slice().to_vec(),
+                        key_package: key_package
+                            .tls_serialize_detached()
+                            .map_err(Error::KeyPackageTls)?,
+                    });
+                }
+                Proposal::Remove(remove) => {
+                    if let Some(member) = self.id_at(remove.removed()) {
+                        actions.push(Action::Remove { member });
+                    }
+                }
+                Proposal::Update(_) => {
+                    if let Sender::Member(leaf) = queued.sender()
+                        && let Some(member) = self.id_at(*leaf)
+                    {
+                        actions.push(Action::Update { member });
+                    }
+                }
+                _ => {}
             }
         }
         Ok(actions)
+    }
+
+    /// Put the held updates of `members`, or all of them, into the group's
+    /// proposal store for a build or a stage.
+    fn load_updates(&mut self, members: Option<&[Vec<u8>]>) -> Result<Vec<ProposalRef>, Error> {
+        let mut loaded = Vec::new();
+        for (member, queued) in &self.held_updates {
+            if members.is_some_and(|m| !m.contains(member)) {
+                continue;
+            }
+            self.group
+                .store_pending_proposal(self.provider.storage(), queued.clone())
+                .map_err(Error::storage)?;
+            loaded.push(queued.proposal_reference_ref().clone());
+        }
+        Ok(loaded)
+    }
+
+    /// Take the proposals [`Self::load_updates`] stored out again.
+    fn unload_updates(&mut self, loaded: Vec<ProposalRef>) -> Result<(), Error> {
+        for reference in loaded {
+            self.group
+                .remove_pending_proposal(self.provider.storage(), &reference)
+                .map_err(Error::storage)?;
+        }
+        Ok(())
+    }
+
+    /// Build and stage a commit over the inline adds and removes and whatever
+    /// the proposal store holds. `force_self_update(true)`: an UpdatePath
+    /// (fresh entropy) even on add-only commits, which MLS would otherwise
+    /// let skip it.
+    fn commit_bundle(
+        &mut self,
+        adds: Vec<KeyPackage>,
+        removals: Vec<LeafNodeIndex>,
+    ) -> Result<CommitMessageBundle, Error> {
+        Ok(self
+            .group
+            .commit_builder()
+            .consume_proposal_store(true)
+            .force_self_update(true)
+            .leaf_node_parameters(self.own_update.clone().unwrap_or_default())
+            .propose_adds(adds)
+            .propose_removals(removals)
+            .load_psks(self.provider.storage())?
+            .build(
+                self.provider.rand(),
+                self.provider.crypto(),
+                &self.signer,
+                |_| true,
+            )?
+            .stage_commit(&self.provider)?)
     }
 }
 
@@ -287,6 +366,7 @@ where
     S: Signer,
 {
     type Error = Error;
+    type LeafParams = LeafNodeParameters;
 
     fn conversation_id(&self) -> &str {
         &self.conversation_id
@@ -377,10 +457,72 @@ where
         validate_key_package(&self.provider, bytes).map(|_| ())
     }
 
+    fn propose_update(&mut self, params: LeafNodeParameters) -> Result<Vec<u8>, Error> {
+        let (message, reference) =
+            self.group
+                .propose_self_update(&self.provider, &self.signer, params.clone())?;
+        // `propose_self_update` queues the proposal in our own store.
+        let queued = self
+            .group
+            .pending_proposals()
+            .find(|queued| queued.proposal_reference_ref() == &reference)
+            .cloned()
+            .ok_or(Error::MissingProposal)?;
+        self.group
+            .remove_pending_proposal(self.provider.storage(), &reference)
+            .map_err(Error::storage)?;
+        let bytes = message.to_bytes()?;
+        self.held_updates.insert(self.own_id(), queued);
+        self.own_update = Some(params);
+        Ok(bytes)
+    }
+
+    fn validate_update(&mut self, bytes: &[u8]) -> Result<Vec<u8>, Error> {
+        let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(bytes)?;
+        let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
+
+        let expected = self.group.group_id().as_slice();
+        if protocol_message.group_id().as_slice() != expected {
+            return Err(Error::WrongGroup {
+                expected: expected.to_vec(),
+                found: protocol_message.group_id().as_slice().to_vec(),
+            });
+        }
+        if protocol_message.epoch() != self.group.epoch() {
+            return Err(Error::StaleUpdate {
+                update: protocol_message.epoch().as_u64(),
+                current: self.group.epoch().as_u64(),
+            });
+        }
+        if protocol_message.content_type() != ContentType::Proposal {
+            return Err(Error::NotAnUpdate);
+        }
+
+        let processed = self
+            .group
+            .process_message(&self.provider, protocol_message)?;
+        let member = match processed.sender() {
+            Sender::Member(leaf) => self
+                .id_at(*leaf)
+                .ok_or(Error::UnknownLeafIndex(leaf.u32()))?,
+            _ => return Err(Error::UnauthenticatedSender),
+        };
+        match processed.into_content() {
+            ProcessedMessageContent::ProposalMessage(queued)
+                if matches!(queued.proposal(), Proposal::Update(_)) =>
+            {
+                self.held_updates.insert(member.clone(), *queued);
+                Ok(member)
+            }
+            _ => Err(Error::NotAnUpdate),
+        }
+    }
+
     fn build_commit(&mut self, actions: &[Action]) -> Result<Built, Error> {
+        let own = self.own_id();
         let mut adds: Vec<KeyPackage> = Vec::new();
         let mut removals: Vec<LeafNodeIndex> = Vec::new();
-        let mut kept: Vec<Action> = Vec::new();
+        let mut updated: Vec<Vec<u8>> = Vec::new();
 
         for action in actions {
             match action {
@@ -397,7 +539,6 @@ where
                         });
                     }
                     adds.push(validated);
-                    kept.push(action.clone());
                 }
                 // A remove of somebody who already left is skipped, not an
                 // error: two stewards can propose the same removal, and the
@@ -405,33 +546,27 @@ where
                 Action::Remove { member } => {
                     if let Some(leaf) = self.leaf_of(member) {
                         removals.push(leaf);
-                        kept.push(action.clone());
                     }
+                }
+                // Our own update rides in the commit's leaf parameters.
+                Action::Update { member } => {
+                    if *member == own {
+                        continue;
+                    }
+                    if !self.held_updates.contains_key(member) {
+                        return Err(Error::MissingProposal);
+                    }
+                    updated.push(member.clone());
                 }
             }
         }
-        let proposal_count = (adds.len() + removals.len()) as u32;
 
-        // Proposals ride inline, never through the proposal store — a
-        // non-empty store blocks `create_message`, muting the sender for the
-        // round. `consume_proposal_store(false)`: commit exactly this batch;
-        // `force_self_update(true)`: an UpdatePath (fresh entropy) even on
-        // add-only commits, which MLS would otherwise let skip it.
-        let bundle = self
-            .group
-            .commit_builder()
-            .consume_proposal_store(false)
-            .force_self_update(true)
-            .propose_adds(adds)
-            .propose_removals(removals)
-            .load_psks(self.provider.storage())?
-            .build(
-                self.provider.rand(),
-                self.provider.crypto(),
-                &self.signer,
-                |_| true,
-            )?
-            .stage_commit(&self.provider)?;
+        // The updates this commit refers to are in the store only for the
+        // build.
+        let loaded = self.load_updates(Some(&updated))?;
+        let built = self.commit_bundle(adds, removals);
+        self.unload_updates(loaded)?;
+        let bundle = built?;
 
         let welcome = match bundle.to_welcome_msg() {
             Some(w) => Some(w.to_bytes()?),
@@ -442,10 +577,13 @@ where
         let hash = commit_hash(&commit);
         self.pending = Some(hash);
 
+        let pending = self.group.pending_commit().ok_or(Error::UnknownCommit)?;
+        let kept = self.actions_of(pending)?;
+
         Ok(Built {
             hash,
+            proposal_count: kept.len() as u32,
             actions: kept,
-            proposal_count,
             commit,
             welcome,
         })
@@ -463,9 +601,16 @@ where
 
         // Staging processes the commit without applying it, and leaves our own
         // pending commit alone — OpenMLS clears that only on a merge.
-        let processed = self
-            .group
-            .process_message(&self.provider, protocol_message)?;
+        // The held updates are in the store only for the processing.
+        let loaded = self.load_updates(None)?;
+        let processed = self.group.process_message(&self.provider, protocol_message);
+        self.unload_updates(loaded)?;
+        let processed = processed.map_err(|e| match e {
+            ProcessMessageError::InvalidCommit(StageCommitError::MissingProposal) => {
+                Error::MissingProposal
+            }
+            e => e.into(),
+        })?;
         let sender = match processed.sender() {
             Sender::Member(leaf) => self.id_at(*leaf).ok_or(Error::UnauthenticatedSender)?,
             _ => return Err(Error::UnauthenticatedSender),
@@ -501,8 +646,11 @@ where
             self.clear_pending()?;
             self.group.merge_staged_commit(&self.provider, staged)?;
         }
-        // Everything else was staged against the epoch we just left.
+        // Everything else was staged against the epoch we just left, and
+        // updates are bound to their epoch.
         self.staged.clear();
+        self.held_updates.clear();
+        self.own_update = None;
         Ok(self.applied())
     }
 
@@ -524,6 +672,8 @@ where
 
     fn delete(&mut self) -> Result<(), Error> {
         self.staged.clear();
+        self.held_updates.clear();
+        self.own_update = None;
         self.pending = None;
         self.group
             .delete(self.provider.storage())

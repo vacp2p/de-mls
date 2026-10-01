@@ -8,7 +8,10 @@ use std::error::Error as StdError;
 
 use openmls::prelude::tls_codec::Error as TlsCodecError;
 use openmls::{
-    group::{CommitBuilderStageError, CreateCommitError, NewGroupError, WelcomeError},
+    group::{
+        CommitBuilderStageError, CreateCommitError, NewGroupError, ProposeSelfUpdateError,
+        WelcomeError,
+    },
     prelude::{CreateMessageError, MergeCommitError, MergePendingCommitError, ProcessMessageError},
 };
 
@@ -55,6 +58,9 @@ pub enum Error {
     BuildCommit(BoxedError),
 
     #[error(transparent)]
+    ProposeUpdate(BoxedError),
+
+    #[error(transparent)]
     NewGroup(BoxedError),
 
     #[error(transparent)]
@@ -73,6 +79,15 @@ pub enum Error {
 
     #[error("the bytes staged are not a commit")]
     NotACommit,
+
+    #[error("the bytes are not an Update proposal")]
+    NotAnUpdate,
+
+    #[error("update is from epoch {update}, the group is at {current}")]
+    StaleUpdate { update: u64, current: u64 },
+
+    #[error("the commit refers to an update this node does not hold")]
+    MissingProposal,
 
     #[error("commit sender is not a group member")]
     UnauthenticatedSender,
@@ -129,6 +144,12 @@ impl From<CreateCommitError> for Error {
 impl<E: StdError + Send + Sync + 'static> From<CommitBuilderStageError<E>> for Error {
     fn from(e: CommitBuilderStageError<E>) -> Self {
         Error::BuildCommit(Box::new(e))
+    }
+}
+
+impl<E: StdError + Send + Sync + 'static> From<ProposeSelfUpdateError<E>> for Error {
+    fn from(e: ProposeSelfUpdateError<E>) -> Self {
+        Error::ProposeUpdate(Box::new(e))
     }
 }
 
