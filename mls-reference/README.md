@@ -41,7 +41,7 @@ application's builder last so they always win.
 | `key_package_identity(bytes)` | member id (the leaf's signature key) | parse only; the same value the member has after seating |
 | `validate_key_package(bytes)` | ok / error | full MLS validation |
 | `build_commit(actions)` | `{hash, actions, proposal_count, commit_bytes, welcome?}` | proposals MUST be inline, in the given order; MUST force a self-update; MUST validate every key package; MUST stay pending and MUST NOT merge; removes of non-members MUST be skipped and reported |
-| `stage(commit_bytes)` | `{sender, epoch, actions, proposal_count, self_removed}` | MUST NOT apply; MUST hold several staged commits at once; MUST reject group-id mismatch and past epochs; `actions` lists adds and removes by member id in commit order |
+| `stage(commit_bytes)` | `{sender, epoch, actions, proposal_count, self_removed}` | MUST NOT apply; the same bytes stage once; MUST hold several staged commits at once; MUST reject group-id mismatch and past epochs; `actions` lists adds and removes by member id in commit order |
 | `merge(hash)` | `{epoch, members}` | own pending commit MUST be cleared before merging a remote one; MUST persist before returning |
 | `discard(hash)`, `clear_pending()` | | |
 | `commit_hash(bytes)` | hash | one function, same on every node |
@@ -84,15 +84,15 @@ MUST.
 6. Control traffic is delivered in the order it was sent and before the
    commit of the epoch it belongs to. A node that missed a proposal or an
    emergency outcome cannot judge that epoch's commit, and a sync cannot
-   restore what it missed: it rejects the commit and stays at its epoch
-   until the router brings the traffic and the commit back.
+   restore what it missed: it rejects the commit and stays at its epoch.
+   A discarded commit cannot be staged again.
 7. A candidate on the wire is the raw commit bytes. The router stages it
    and reports the facts through `handle_candidate`; it never ranks or
    validates candidates, the group rejecting a foreign or stale commit. A
-   candidate rejected as not the epoch steward's is kept by the router, as
-   bytes, until the epoch merges: after `Event::StewardSkipped` or
-   `Event::SyncApplied` the router stages the same bytes again and reports
-   them again, since the sender may have become the epoch steward; a
+   candidate rejected as not the epoch steward's stays staged until the
+   epoch merges: after `Event::StewardSkipped` or `Event::SyncApplied` the
+   router reports its facts again, since the sender may have become the
+   epoch steward; a
    merged commit earns its sender `SuccessfulCommit`, so an early
    substitute ends unpenalised. A candidate rejected for its actions is
    never kept.
@@ -204,8 +204,8 @@ MUST.
 22. On `CommitMissing` the router first checks whether someone in the
     group has the epoch steward's commit, and calls `request_recovery`
     only if nobody does. The commit may exist and have missed this node;
-    a member that has it sends the bytes again, and they enter as any
-    commit (rule 7).
+    a member that has it sends the bytes again, and unless already
+    staged they enter as any commit (rule 7).
 
 ### 3.1 Why each rule is a must
 
@@ -221,12 +221,12 @@ and the network. A router written another way should still pass them.
 | 3, 16 | a decision executed out of order or half-way leaves the group and the engine disagreeing on the epoch | `engine_bed_smoke::creator_seats_two_joiners_and_chat_crosses` |
 | 5 | chat reaches the engine, or a vote is counted for a sender the group never authenticated | `engine_bed_smoke::creator_seats_two_joiners_and_chat_crosses` |
 | 6, 20 | a member that missed the traffic cannot judge the commit; replayed in order with the frame's time it merges through the ordinary path | `engine_bed_catch_up::a_member_offline_through_a_commit_catches_up_by_replay`, `engine_bed_catch_up::a_failed_recovery_vote_stays_failed_on_replay`, `engine_bed_liveness::a_skipped_steward_that_comes_back_follows_the_substitute` |
-| 7 | a commit from anyone but the epoch steward is applied; or the substitute's commit, rejected a moment before the skip verdict, is lost and the node stays behind | `engine_bed_liveness::foreign_commit_is_discarded_and_scored`, `engine_bed_liveness::a_substitute_commit_that_beats_the_verdict_is_staged_again_after_the_skip` |
+| 7 | a commit from anyone but the epoch steward is applied; or the substitute's commit, rejected a moment before the skip verdict, is lost and the node stays behind | `engine_bed_liveness::foreign_commit_is_rejected_and_scored`, `engine_bed_liveness::a_substitute_commit_that_beats_the_verdict_is_reported_again_after_the_skip` |
 | 8 | an announcement refused while a round is open is never proposed again | `engine_bed_flow::announcement_during_a_round_is_retried_after_it_closes` |
 | 9, 10 | an invite lands without the key package checked, or a rejected one lands anyway | `engine_bed_flow::creator_adds_one_then_a_member_adds_another`, `engine_bed_membership::rejected_invite_never_lands` |
 | 11 | a node with no list guesses the steward; at list exhaustion every node enters `Syncing`, the election lands, work resumes | `engine_bed_membership::five_members_keep_committing`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs` |
 | 12 | a joiner or a restarted node never learns the list; a silent epoch steward leaves the ask unanswered until the backup takes over | `engine_bed_sync::backup_steward_answers_when_the_epoch_steward_is_silent`, `engine_bed_sync::a_working_member_can_ask_and_learns_it_is_current` |
-| 13, 14 | a foreign commit merges, or a discarded one stays staged and merges later | `engine_bed_liveness::foreign_commit_is_discarded_and_scored` |
+| 13, 14 | a foreign commit merges, or a discarded one stays staged and merges later | `engine_bed_liveness::foreign_commit_is_rejected_and_scored` |
 | 15, 21 | the engine's member set drifts from the group's; a commit merged on the router's own trust is adopted in full and the node follows the next one | `engine_bed_catch_up::a_member_that_missed_only_the_commit_adopts_it_and_follows_the_next`, `engine_bed_catch_up::two_members_survivor_commits_on_its_own_authority` |
 | 17, 18 | a restart loses the vote in flight, or loads the engine before the group and starts from the wrong epoch | `engine_bed_flow::restart_mid_vote_resumes_and_merges`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs` |
 
@@ -259,8 +259,9 @@ impl Router {
                 }
             }
             Frame::Commit(bytes) => {
-                let Ok(facts) = self.mls.stage(&bytes) else { return };   // authenticates
                 let hash = CommitHash::of(&bytes);
+                if self.staged.contains_key(&hash) { return }             // staged once
+                let Ok(facts) = self.mls.stage(&bytes) else { return };   // authenticates
                 self.staged.insert(hash, facts.staged);
                 self.engine.handle_candidate(now, hash, facts)
             }
@@ -315,8 +316,8 @@ impl Router {
                 // SyncUnanswered and CandidateRejected: the app decides
                 // whether to call request_sync; a stale list and a
                 // misbehaving committer look the same from here.
-                // CandidateRejected, not the epoch steward: keep the bytes,
-                // re-stage after StewardSkipped or SyncApplied.
+                // CandidateRejected, not the epoch steward: keep it staged,
+                // report it again after StewardSkipped or SyncApplied.
                 // CommitAdopted: informational, the sync ask already rides
                 // in this same Output.
                 // CommitMissing: look for the steward's commit before the
