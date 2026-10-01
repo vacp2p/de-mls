@@ -117,11 +117,11 @@ fn a_stale_epoch_candidate_is_discarded_without_a_score() {
     assert_eq!(before, after, "staleness alone scores nothing");
 }
 
-/// A candidate from anyone but the epoch steward is discarded on sight,
+/// A candidate from anyone but the epoch steward is rejected on sight,
 /// its sender scored `MisbehavingCommit`, and reported through
 /// `Event::CandidateRejected` so the router has a cue to `request_sync`.
 #[test]
-fn a_non_epoch_steward_candidate_is_discarded_and_scored() {
+fn a_non_epoch_steward_candidate_is_rejected_and_scored() {
     let mut e = engine(&["alice", "bob", "carol"]);
     let es = e.expected_steward().unwrap();
     let impostor = ["alice", "bob", "carol"]
@@ -144,10 +144,7 @@ fn a_non_epoch_steward_candidate_is_discarded_and_scored() {
             },
         )
         .unwrap();
-    assert_eq!(
-        out.decisions,
-        vec![Decision::Discard { hashes: vec![hash] }]
-    );
+    assert!(out.decisions.is_empty(), "the candidate stays staged");
     let after = e.scoring.score_for(&member(impostor)).unwrap();
     assert!(after < before, "the impostor is penalised");
     assert!(out.events.contains(&Event::CandidateRejected {

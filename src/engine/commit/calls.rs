@@ -25,7 +25,7 @@ use crate::{
 
 impl<St: EngineStore> Engine<St> {
     /// Handles a candidate commit staged by the router. Only the epoch steward's
-    /// candidate is kept per round; others are immediately discarded and scored.
+    /// candidate is kept per round; others are scored and rejected, and stay staged.
     /// Validation happens at round close. If `Syncing`, the call is refused until
     /// `Working`.
     pub fn handle_candidate(
@@ -59,9 +59,8 @@ impl<St: EngineStore> Engine<St> {
             debug!(
                 conversation = %self.conversation_id,
                 sender = ?facts.sender,
-                "candidate discarded: not the epoch steward"
+                "candidate rejected: not the epoch steward"
             );
-            self.decide(Decision::Discard { hashes: vec![hash] });
             self.apply_score_ops(&[penalty(
                 facts.sender.as_bytes(),
                 ScoreEvent::MisbehavingCommit,

@@ -2,7 +2,7 @@
 //! the MLS-service contract makes the real group enforce. The router drives
 //! it exactly as it would drive the real one.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use de_mls::engine::{Action, CommitHash, MemberId, StagedFacts};
 use sha2::{Digest, Sha256};
@@ -184,6 +184,8 @@ pub struct FakeMls {
     seq: u64,
     pending: Option<(CommitHash, Commit)>,
     staged: HashMap<CommitHash, Commit>,
+    /// Commits `stage` has seen this epoch: the bytes stage once.
+    consumed: HashSet<CommitHash>,
 }
 
 impl FakeMls {
@@ -217,6 +219,7 @@ impl FakeMls {
             seq: 0,
             pending: None,
             staged: HashMap::new(),
+            consumed: HashSet::new(),
         }
     }
 
@@ -233,6 +236,7 @@ impl FakeMls {
             seq: 0,
             pending: None,
             staged: HashMap::new(),
+            consumed: HashSet::new(),
         }
     }
 
@@ -345,9 +349,14 @@ impl FakeMls {
         self.pending.as_ref().map(|(h, _)| *h)
     }
 
-    /// Stage a remote commit without applying it. Several may be held.
+    /// Stage a remote commit without applying it. Several may be held; the
+    /// same bytes stage once.
     pub fn stage(&mut self, bytes: &[u8]) -> Result<StagedFacts, String> {
         let commit = Commit::decode(bytes).ok_or("malformed commit")?;
+        let hash = CommitHash::of(bytes);
+        if self.consumed.contains(&hash) {
+            return Err("commit bytes already used".into());
+        }
         if commit.conversation_id != self.conversation_id {
             return Err("group id mismatch".into());
         }
@@ -360,6 +369,7 @@ impl FakeMls {
         if !self.members.contains(&commit.sender) {
             return Err("sender is not a member".into());
         }
+        self.consumed.insert(hash);
         let facts = StagedFacts {
             sender: commit.sender.clone(),
             epoch: commit.epoch,
@@ -370,7 +380,7 @@ impl FakeMls {
                 .iter()
                 .any(|a| matches!(a, Action::Remove { member } if *member == self.own)),
         };
-        self.staged.insert(CommitHash::of(bytes), commit);
+        self.staged.insert(hash, commit);
         Ok(facts)
     }
 
@@ -386,6 +396,7 @@ impl FakeMls {
             }
         };
         self.staged.clear();
+        self.consumed.clear();
         self.apply(&commit, hash);
         Ok(Applied {
             epoch: self.epoch,
@@ -409,6 +420,7 @@ impl FakeMls {
         self.active = false;
         self.pending = None;
         self.staged.clear();
+        self.consumed.clear();
     }
 
     fn apply(&mut self, commit: &Commit, hash: CommitHash) {

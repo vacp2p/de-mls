@@ -72,7 +72,7 @@ fn silent_epoch_steward_is_reported_then_skipped_by_a_recovery_vote() {
 }
 
 #[test]
-fn foreign_commit_is_discarded_and_scored() {
+fn foreign_commit_is_rejected_and_scored() {
     let mut bed = Bed::new("conv", "alice", fast_config());
     let bob = bed.seat(0, "bob");
     let carol = bed.seat(0, "carol");
@@ -99,11 +99,16 @@ fn foreign_commit_is_discarded_and_scored() {
         }
         let since = before.iter().find(|&&(n, _)| n == node).unwrap().1;
         assert!(
-            bed.router(node)
+            !bed.router(node)
                 .decisions
                 .iter()
                 .any(|d| matches!(d, Decision::Discard { .. })),
-            "node {node} discarded the foreign commit"
+            "node {node} did not discard the foreign commit"
+        );
+        assert_eq!(
+            bed.router(node).mls.staged_count(),
+            1,
+            "node {node} still holds the foreign commit staged"
         );
         let scored = bed.router(node).events[since..]
             .iter()
@@ -165,7 +170,7 @@ fn removing_a_steward_elects_a_new_list() {
 }
 
 #[test]
-fn a_substitute_commit_that_beats_the_verdict_is_staged_again_after_the_skip() {
+fn a_substitute_commit_that_beats_the_verdict_is_reported_again_after_the_skip() {
     let mut bed = Bed::new("conv", "alice", fast_config());
     let bob = bed.seat(0, "bob");
     let carol = bed.seat(0, "carol");
@@ -252,12 +257,14 @@ fn a_substitute_commit_that_beats_the_verdict_is_staged_again_after_the_skip() {
             .any(|e| matches!(e, Event::StewardSkipped { steward, .. } if *steward == es_id))
     );
 
-    let discard_pos = bed.router(q).decisions[q_decisions_before..]
-        .iter()
-        .position(|d| matches!(d, Decision::Discard { .. }))
-        .expect("q discarded s's early candidate");
     assert!(
-        bed.router(q).decisions[q_decisions_before + discard_pos + 1..]
+        !bed.router(q).decisions[q_decisions_before..]
+            .iter()
+            .any(|d| matches!(d, Decision::Discard { .. })),
+        "q kept s's early candidate staged"
+    );
+    assert!(
+        bed.router(q).decisions[q_decisions_before..]
             .iter()
             .any(|d| matches!(d, Decision::Merge { .. })),
         "q merged a commit after the rejection"

@@ -280,7 +280,7 @@ pub enum Event {
         epoch: u64,
         steward: Option<MemberId>,
     },
-    /// A candidate from `sender` was discarded. The router cannot tell a
+    /// A candidate from `sender` was rejected. The router cannot tell a
     /// misbehaving committer from its own stale picture; a `request_sync`
     /// settles it.
     CandidateRejected {
