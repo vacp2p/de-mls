@@ -25,7 +25,7 @@ pub mod de_mls {
 }
 
 use de_mls::messages::v1::{
-    ConversationUpdateRequest, EmergencyCriteriaProposal, MemberInvite, RemoveMember,
+    ConversationUpdateRequest, EmergencyCriteriaProposal, LeafUpdate, MemberInvite, RemoveMember,
     StewardElectionProposal, ViolationEvidence, ViolationType,
     conversation_update_request::Payload,
 };
@@ -46,6 +46,16 @@ impl ConversationUpdateRequest {
     pub fn member_invite(invite: MemberInvite) -> Self {
         Self {
             payload: Some(Payload::MemberInvite(invite)),
+        }
+    }
+
+    /// `LeafUpdate` request: `member_id` replaces its own leaf with `update_bytes`.
+    pub fn leaf_update(member_id: impl Into<Vec<u8>>, update_bytes: impl Into<Vec<u8>>) -> Self {
+        Self {
+            payload: Some(Payload::LeafUpdate(LeafUpdate {
+                member_id: member_id.into(),
+                update_bytes: update_bytes.into(),
+            })),
         }
     }
 

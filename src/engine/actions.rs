@@ -1,5 +1,6 @@
 //! What the application asks of the conversation: proposing a member in or
-//! out, voting, leaving, and the two recovery-side requests.
+//! out, updating its own leaf, voting, leaving, and the two recovery-side
+//! requests.
 //!
 //! Each action begins the driving call, does its work, and returns the
 //! [`Output`] it produced. A refusal is an `Err` and leaves the engine
@@ -89,6 +90,20 @@ impl<St: EngineStore> Engine<St> {
     pub fn leave(&mut self, now: Timestamp) -> Result<Output, ConversationError> {
         self.begin(now);
         self.initiate_self_leave()?;
+        self.finish()
+    }
+
+    /// File `update`, the MLS Update proposal this member signed for its own
+    /// leaf. It is approved at once and rides the epoch steward's next
+    /// commit; a second call in the epoch is a no-op. Refused and retried
+    /// like [`Self::propose_add`] while a round is open.
+    pub fn propose_update(
+        &mut self,
+        now: Timestamp,
+        update: Vec<u8>,
+    ) -> Result<Output, ConversationError> {
+        self.begin(now);
+        self.initiate_leaf_update(update)?;
         self.finish()
     }
 
@@ -186,6 +201,38 @@ mod tests {
             Err(ConversationError::ConversationBlocked(_))
         ));
         assert_eq!(engine.phase(), Phase::Freezing);
+        assert_eq!(engine.queues.approved_proposals_count(), 0);
+        assert!(engine.out.outbound.is_empty());
+    }
+
+    /// An own update lands in the approved queue at once, with one control
+    /// message out; a second call in the epoch is a no-op.
+    #[test]
+    fn propose_update_lands_approved_and_repeats_as_a_no_op() {
+        let mut engine = creator();
+        let out = engine
+            .propose_update(Timestamp::ZERO, b"upd".to_vec())
+            .expect("propose update");
+        assert!(matches!(out.outbound.as_slice(), [Outbound::Control(_)]));
+        assert!(engine.queues.has_approved_update(engine.own.as_slice()));
+
+        let out = engine
+            .propose_update(Timestamp::ZERO, b"other".to_vec())
+            .expect("repeat");
+        assert!(out.outbound.is_empty());
+        assert_eq!(engine.queues.approved_proposals_count(), 1);
+    }
+
+    /// A round in progress blocks an update; nothing moves.
+    #[test]
+    fn propose_update_refuses_while_freezing() {
+        let mut engine = creator();
+        engine.begin(Timestamp::ZERO);
+        engine.start_freezing();
+        assert!(matches!(
+            engine.propose_update(Timestamp::ZERO, b"upd".to_vec()),
+            Err(ConversationError::ConversationBlocked(_))
+        ));
         assert_eq!(engine.queues.approved_proposals_count(), 0);
         assert!(engine.out.outbound.is_empty());
     }

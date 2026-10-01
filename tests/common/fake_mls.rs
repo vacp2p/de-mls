@@ -78,6 +78,9 @@ struct Commit {
     seq: u64,
     sender: MemberId,
     actions: Vec<Action>,
+    /// The committer's own leaf update rides the commit itself, never as an
+    /// action.
+    own_update: bool,
 }
 
 impl Commit {
@@ -102,8 +105,13 @@ impl Commit {
                     out.push(1);
                     put_bytes(&mut out, member.as_bytes());
                 }
+                Action::Update { member } => {
+                    out.push(2);
+                    put_bytes(&mut out, member.as_bytes());
+                }
             }
         }
+        out.push(u8::from(self.own_update));
         out
     }
 
@@ -124,15 +132,18 @@ impl Commit {
                     key_package: cursor.bytes()?,
                 },
                 1 => Action::Remove { member },
+                2 => Action::Update { member },
                 _ => return None,
             });
         }
+        let own_update = cursor.u8()? != 0;
         Some(Self {
             conversation_id,
             epoch,
             seq,
             sender,
             actions,
+            own_update,
         })
     }
 }
@@ -186,6 +197,12 @@ pub struct FakeMls {
     staged: HashMap<CommitHash, Commit>,
     /// Commits `stage` has seen this epoch: the bytes stage once.
     consumed: HashSet<CommitHash>,
+    /// The update this member proposed for its own leaf, held until a merge.
+    own_update: Option<Vec<u8>>,
+    /// Peers' validated updates, by owner, held until a merge.
+    held_updates: HashMap<MemberId, Vec<u8>>,
+    /// Merged leaf updates per member.
+    leaf_versions: HashMap<MemberId, u64>,
 }
 
 impl FakeMls {
@@ -220,6 +237,9 @@ impl FakeMls {
             pending: None,
             staged: HashMap::new(),
             consumed: HashSet::new(),
+            own_update: None,
+            held_updates: HashMap::new(),
+            leaf_versions: HashMap::new(),
         }
     }
 
@@ -237,6 +257,9 @@ impl FakeMls {
             pending: None,
             staged: HashMap::new(),
             consumed: HashSet::new(),
+            own_update: None,
+            held_updates: HashMap::new(),
+            leaf_versions: HashMap::new(),
         }
     }
 
@@ -264,6 +287,44 @@ impl FakeMls {
 
     pub fn is_active(&self) -> bool {
         self.active
+    }
+
+    /// How many merged commits replaced `member`'s leaf.
+    pub fn leaf_version(&self, member: &MemberId) -> u64 {
+        self.leaf_versions.get(member).copied().unwrap_or(0)
+    }
+
+    /// Sign an update of this member's own leaf for the current epoch and
+    /// hold it.
+    pub fn propose_update(&mut self) -> Vec<u8> {
+        let mut bytes = format!("upd:{}:", self.epoch).into_bytes();
+        bytes.extend_from_slice(self.own.as_bytes());
+        self.own_update = Some(bytes.clone());
+        bytes
+    }
+
+    /// Whether the proposal of `member`'s update is held: a peer's after its
+    /// check, this member's own after it signed it.
+    fn update_held(&self, member: &MemberId) -> bool {
+        if *member == self.own {
+            self.own_update.is_some()
+        } else {
+            self.held_updates.contains_key(member)
+        }
+    }
+
+    /// Check a peer's update: well formed, from a member, for the current
+    /// epoch. A valid one is held for the commit that carries it.
+    pub fn validate_update(&mut self, bytes: &[u8]) -> Option<MemberId> {
+        let rest = bytes.strip_prefix(b"upd:")?;
+        let colon = rest.iter().position(|&b| b == b':')?;
+        let epoch: u64 = std::str::from_utf8(&rest[..colon]).ok()?.parse().ok()?;
+        let member = MemberId::from(rest[colon + 1..].to_vec());
+        if epoch != self.epoch || !self.members.contains(&member) {
+            return None;
+        }
+        self.held_updates.insert(member.clone(), bytes.to_vec());
+        Some(member)
     }
 
     pub fn seal(&self, kind: Kind, plaintext: &[u8]) -> Sealed {
@@ -301,13 +362,21 @@ impl FakeMls {
     }
 
     /// Build a commit for the current epoch and keep it pending. Removes of
-    /// non-members are skipped, as the contract requires.
-    pub fn build_commit(&mut self, actions: &[Action]) -> Built {
+    /// non-members are skipped, as the contract requires; an update whose
+    /// proposal is not held fails the build. The commit carries this member's
+    /// own held update itself.
+    pub fn build_commit(&mut self, actions: &[Action]) -> Result<Built, String> {
+        if let Some(missing) = actions.iter().find(|a| match a {
+            Action::Update { member } => !self.update_held(member),
+            _ => false,
+        }) {
+            return Err(format!("update of {:?} is not held", missing.member()));
+        }
         let actions: Vec<Action> = actions
             .iter()
             .filter(|a| match a {
                 Action::Remove { member } => self.members.contains(member),
-                Action::Add { .. } => true,
+                Action::Add { .. } | Action::Update { .. } => true,
             })
             .cloned()
             .collect();
@@ -318,6 +387,7 @@ impl FakeMls {
             seq: self.seq,
             sender: self.own.clone(),
             actions,
+            own_update: self.own_update.is_some(),
         };
         let bytes = commit.encode();
         let hash = CommitHash::of(&bytes);
@@ -326,7 +396,7 @@ impl FakeMls {
             .iter()
             .filter_map(|a| match a {
                 Action::Add { member, .. } => Some(member.clone()),
-                Action::Remove { .. } => None,
+                Action::Remove { .. } | Action::Update { .. } => None,
             })
             .collect();
         let welcome = (!joiners.is_empty()).then(|| WelcomeDraft {
@@ -336,13 +406,13 @@ impl FakeMls {
         let proposal_count = commit.actions.len() as u32;
         let actions = commit.actions.clone();
         self.pending = Some((hash, commit));
-        Built {
+        Ok(Built {
             hash,
             proposal_count,
             actions,
             commit: bytes,
             welcome,
-        }
+        })
     }
 
     pub fn pending_hash(&self) -> Option<CommitHash> {
@@ -370,6 +440,13 @@ impl FakeMls {
             return Err("sender is not a member".into());
         }
         self.consumed.insert(hash);
+        let actions_held = commit.actions.iter().all(|a| match a {
+            Action::Update { member } => self.update_held(member),
+            _ => true,
+        });
+        if !actions_held {
+            return Err("update proposal not held".into());
+        }
         let facts = StagedFacts {
             sender: commit.sender.clone(),
             epoch: commit.epoch,
@@ -398,6 +475,8 @@ impl FakeMls {
         self.staged.clear();
         self.consumed.clear();
         self.apply(&commit, hash);
+        self.own_update = None;
+        self.held_updates.clear();
         Ok(Applied {
             epoch: self.epoch,
             members: self.members(),
@@ -435,7 +514,13 @@ impl FakeMls {
                         self.active = false;
                     }
                 }
+                Action::Update { member } => {
+                    *self.leaf_versions.entry(member.clone()).or_default() += 1;
+                }
             }
+        }
+        if commit.own_update {
+            *self.leaf_versions.entry(commit.sender.clone()).or_default() += 1;
         }
         self.epoch += 1;
         self.authenticator = chain(self.authenticator, hash);
@@ -451,6 +536,7 @@ impl FakeMls {
                 Action::Remove { member } => {
                     members.remove(member);
                 }
+                Action::Update { .. } => {}
             }
         }
         Snapshot {

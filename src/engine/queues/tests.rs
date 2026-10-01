@@ -89,6 +89,55 @@ fn test_approved_proposals_preserve_fifo_across_mutations() {
     assert!(queues.approved_proposals().is_empty());
 }
 
+fn update_request(owner: &[u8]) -> ConversationUpdateRequest {
+    ConversationUpdateRequest::leaf_update(owner.to_vec(), b"update".to_vec())
+}
+
+#[test]
+fn has_approved_update_matches_the_owner_only() {
+    let mut queues = EngineQueues::new();
+    queues.insert_approved_proposal(1, update_request(&member(2)));
+    insert_remove_member(&mut queues, &member(3), 2);
+
+    assert!(queues.has_approved_update(&member(2)));
+    assert!(!queues.has_approved_update(&member(3)));
+}
+
+#[test]
+fn approved_update_members_lists_owners_in_approval_order() {
+    let mut queues = EngineQueues::new();
+    queues.insert_approved_proposal(9, update_request(&member(4)));
+    insert_remove_member(&mut queues, &member(3), 2);
+    queues.insert_approved_proposal(1, update_request(&member(2)));
+
+    assert_eq!(queues.approved_update_members(), vec![member(4), member(2)]);
+}
+
+#[test]
+fn drop_approved_update_removes_only_an_update() {
+    let mut queues = EngineQueues::new();
+    queues.insert_approved_proposal(1, update_request(&member(2)));
+    insert_remove_member(&mut queues, &member(3), 2);
+
+    assert!(!queues.drop_approved_update(2));
+    assert!(!queues.drop_approved_update(9));
+    assert!(queues.drop_approved_update(1));
+    assert!(!queues.has_approved_update(&member(2)));
+    assert_eq!(queues.approved_proposals().len(), 1);
+}
+
+#[test]
+fn drop_approved_updates_keeps_other_approvals() {
+    let mut queues = EngineQueues::new();
+    queues.insert_approved_proposal(1, update_request(&member(2)));
+    insert_remove_member(&mut queues, &member(3), 2);
+
+    queues.drop_approved_updates();
+
+    assert_eq!(queues.approved_proposals_count(), 1);
+    assert!(queues.approved_proposals().contains_key(&2));
+}
+
 #[test]
 fn test_urgent_commit_target_set_take_clears() {
     let mut queues = EngineQueues::new();

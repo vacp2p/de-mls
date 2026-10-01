@@ -10,21 +10,12 @@ use crate::{
     ConversationError, ScoreEvent, ScoreOp,
     engine::{
         handle::{Engine, PendingMerge},
+        proposal_kind::change_of,
         queues::EngineQueues,
         store::EngineStore,
-        types::{Action, CandidateRejection, Decision, Event, MemberId},
-    },
-    protos::de_mls::messages::v1::{
-        ConversationUpdateRequest, conversation_update_request::Payload,
+        types::{Action, ActionKind, CandidateRejection, Decision, Event, MemberId},
     },
 };
-
-/// The membership change an action performs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum ActionKind {
-    Add,
-    Remove,
-}
 
 impl<St: EngineStore> Engine<St> {
     /// The eligibility-filtered epoch steward for the current epoch — the
@@ -48,7 +39,7 @@ impl<St: EngineStore> Engine<St> {
         };
         let sender = facts.sender.as_bytes().to_vec();
         let valid = facts.proposal_count as usize == facts.actions.len()
-            && actions_match_voted(&self.queues, &facts.actions);
+            && actions_match_voted(&self.queues, &sender, &facts.actions);
         if !valid {
             self.apply_score_ops(&[penalty(&sender, ScoreEvent::BrokenMlsProposal)]);
             self.decide(Decision::Discard { hashes: vec![hash] });
@@ -105,43 +96,34 @@ pub(crate) fn penalty(member_id: &[u8], event: ScoreEvent) -> ScoreOp {
 }
 
 /// Checks if a commit's actions match the allowed membership changes this round:
-/// either all approved adds/removals, or just the urgent removal target.
+/// either all approved adds/removals/updates, or just the urgent removal
+/// target. An approved update owned by `sender` is not expected as an action:
+/// the commit carries it itself.
 ///
 /// Compares sorted, deduped `(kind, member)` pairs; duplicate approvals collapse
 /// to one commit action.
-pub(crate) fn actions_match_voted(queues: &EngineQueues, actions: &[Action]) -> bool {
+pub(crate) fn actions_match_voted(
+    queues: &EngineQueues,
+    sender: &[u8],
+    actions: &[Action],
+) -> bool {
     let mut expected: Vec<(ActionKind, Vec<u8>)> = match queues.urgent_commit_target() {
         Some(target) => vec![(ActionKind::Remove, target.to_vec())],
         None => queues
             .approved_proposals()
             .values()
-            .filter_map(voted_projection)
+            .filter_map(change_of)
+            .map(|(kind, member)| (kind, member.to_vec()))
+            .filter(|(kind, member)| !(*kind == ActionKind::Update && member == sender))
             .collect(),
     };
-    let mut actual: Vec<(ActionKind, Vec<u8>)> = actions.iter().map(staged_projection).collect();
+    let mut actual: Vec<(ActionKind, Vec<u8>)> = actions
+        .iter()
+        .map(|a| (a.kind(), a.member().as_bytes().to_vec()))
+        .collect();
     expected.sort();
     expected.dedup();
     actual.sort();
     actual.dedup();
     expected == actual
-}
-
-/// `(kind, member)` projection of an approved request: an add keys on the
-/// joiner's id as the proposer read it from the key package, a remove on its
-/// target. `None` for governance payloads, which never reach a commit.
-fn voted_projection(req: &ConversationUpdateRequest) -> Option<(ActionKind, Vec<u8>)> {
-    match req.payload.as_ref()? {
-        Payload::MemberInvite(invite) => Some((ActionKind::Add, invite.member_id.clone())),
-        Payload::RemoveMember(remove) => Some((ActionKind::Remove, remove.member_id.clone())),
-        _ => None,
-    }
-}
-
-/// `(kind, member)` projection of a staged action, matching
-/// [`voted_projection`]: one key space before and after a member is seated.
-fn staged_projection(action: &Action) -> (ActionKind, Vec<u8>) {
-    match action {
-        Action::Add { member, .. } => (ActionKind::Add, member.as_bytes().to_vec()),
-        Action::Remove { member } => (ActionKind::Remove, member.as_bytes().to_vec()),
-    }
 }

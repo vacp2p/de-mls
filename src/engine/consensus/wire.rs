@@ -1,5 +1,5 @@
 //! Wire-level proposal construction: consensus-session parameters, the
-//! control-message encoders, opening a session (regular and self-leave), and
+//! control-message encoders, opening a session (regular and single-voter), and
 //! the fast-path authorization check for single-voter proposals.
 
 use hashgraph_like_consensus::{
@@ -16,7 +16,10 @@ use std::time::Duration;
 
 use crate::{
     ConversationError,
-    engine::{handle::Engine, store::EngineStore, util::self_leave_proposal_id},
+    engine::{
+        handle::Engine, proposal_kind::ProposalKind, store::EngineStore,
+        util::single_voter_proposal_id,
+    },
     protos::de_mls::messages::v1::{
         ControlMessage, ConversationUpdateRequest, control_message, conversation_update_request,
     },
@@ -55,8 +58,9 @@ pub(crate) fn control_vote(vote: Vote) -> Vec<u8> {
 }
 
 /// Fast-path proposals (`expected_voters_count == 1`) bypass peer voting, so
-/// they are restricted to self-removal. Requiring the MLS-authenticated
-/// `sender` to be both the owner and the `RemoveMember` target closes the
+/// they are restricted to self-removal and a member's own leaf update.
+/// Requiring the MLS-authenticated `sender` to be both the owner and the
+/// `RemoveMember` target (or the `LeafUpdate` member) closes the
 /// unilateral-removal vector an otherwise-free `expected_voters == 1` opens.
 ///
 /// `true` when the proposal is allowed. A mismatch — different target, wrong
@@ -71,10 +75,11 @@ pub(crate) fn authorize_fast_path_proposal(proposal: &Proposal, sender: &[u8]) -
     let Ok(request) = ConversationUpdateRequest::decode(proposal.payload.as_slice()) else {
         return false;
     };
-    matches!(
-        request.payload,
-        Some(conversation_update_request::Payload::RemoveMember(ref r)) if r.member_id == sender
-    )
+    match request.payload {
+        Some(conversation_update_request::Payload::RemoveMember(ref r)) => r.member_id == sender,
+        Some(conversation_update_request::Payload::LeafUpdate(ref u)) => u.member_id == sender,
+        _ => false,
+    }
 }
 
 impl<St: EngineStore> Engine<St> {
@@ -83,7 +88,7 @@ impl<St: EngineStore> Engine<St> {
     /// in the approved queue for the next steward commit.
     ///
     /// Safe to repeat: the pending-leave check catches local duplicates, and
-    /// the deterministic [`self_leave_proposal_id`] dedupes retransmits
+    /// the deterministic [`single_voter_proposal_id`] dedupes retransmits
     /// inside the consensus library.
     pub(crate) fn initiate_self_leave(&mut self) -> Result<(), ConversationError> {
         if self.queues.is_pending_self_leave(&self.own) {
@@ -95,18 +100,44 @@ impl<St: EngineStore> Engine<St> {
         }
 
         let request = ConversationUpdateRequest::remove_member(self.own.clone());
-        let proposal_id = self_leave_proposal_id(&self.own);
+        let proposal_id = single_voter_proposal_id(&self.own);
+        self.open_single_voter(&request, proposal_id, format!("self-leave:{proposal_id}"))
+    }
 
+    /// Open a leaf-update round like a self-leave: `LeafUpdate(self)` with
+    /// one expected voter and the owner's YES bundled. Gated like any
+    /// membership proposal; a repeat while ours is approved is a no-op.
+    pub(crate) fn initiate_leaf_update(
+        &mut self,
+        update: Vec<u8>,
+    ) -> Result<(), ConversationError> {
+        self.check_proposal_allowed(ProposalKind::Commit)?;
+        if self.queues.has_approved_update(&self.own) {
+            info!(
+                conversation = %self.conversation_id,
+                "leaf update already approved this epoch, ignoring duplicate"
+            );
+            return Ok(());
+        }
+
+        let proposal_id = single_voter_proposal_id(&update);
+        let request = ConversationUpdateRequest::leaf_update(self.own.clone(), update);
+        self.open_single_voter(&request, proposal_id, format!("leaf-update:{proposal_id}"))
+    }
+
+    /// Track `request` under `proposal_id`, open its single-voter session and
+    /// broadcast the proposal.
+    fn open_single_voter(
+        &mut self,
+        request: &ConversationUpdateRequest,
+        proposal_id: u32,
+        name: String,
+    ) -> Result<(), ConversationError> {
         // Track before the session opens: the bundled YES fires the outcome
         // synchronously.
-        self.queues.track_voting_proposal(proposal_id, &request);
+        self.queues.track_voting_proposal(proposal_id, request);
 
-        let submitted = self.submit_self_leave_proposal(ProposalParams {
-            expected_voters: 1,
-            proposal_expiration: self.config.proposal_expiration,
-            consensus_timeout: self.config.consensus_timeout,
-            liveness_criteria_yes: true,
-        })?;
+        let submitted = self.submit_single_voter_proposal(request, proposal_id, name)?;
 
         // `None`: an earlier submit is already driving this proposal id; our
         // voting entry resolves on that session.
@@ -154,34 +185,33 @@ impl<St: EngineStore> Engine<St> {
         Ok((proposal_id, proposal))
     }
 
-    /// Open a self-leave session: a hand-crafted `Proposal` carrying the
-    /// deterministic [`self_leave_proposal_id`] and the leaver's YES, so the
-    /// single-voter session resolves on arrival.
+    /// Open a single-voter session: a hand-crafted `Proposal` carrying
+    /// `proposal_id` and the owner's YES, so the session resolves on arrival.
     ///
     /// The fixed id makes retransmits collide as `ProposalAlreadyExist`,
     /// returned as `Ok(None)` — nothing to broadcast.
-    fn submit_self_leave_proposal(
+    fn submit_single_voter_proposal(
         &self,
-        params: ProposalParams,
+        request: &ConversationUpdateRequest,
+        proposal_id: u32,
+        name: String,
     ) -> Result<Option<Proposal>, ConversationError> {
-        let request = ConversationUpdateRequest::remove_member(self.own.clone());
         let payload = request.encode_to_vec();
 
         let now = self.now.as_secs();
-        let expiration = now.saturating_add(params.proposal_expiration.as_secs());
+        let expiration = now.saturating_add(self.config.proposal_expiration.as_secs());
 
-        let proposal_id = self_leave_proposal_id(&self.own);
         let mut proposal = Proposal {
-            name: format!("self-leave:{proposal_id}"),
+            name,
             payload,
             proposal_id,
             proposal_owner: self.own.clone(),
             votes: Vec::new(),
-            expected_voters_count: params.expected_voters,
+            expected_voters_count: 1,
             round: 1,
             timestamp: now,
             expiration_timestamp: expiration,
-            liveness_criteria_yes: params.liveness_criteria_yes,
+            liveness_criteria_yes: true,
         };
 
         let yes_vote = build_vote(&proposal, true, self.consensus.signer(), now)?;
@@ -195,14 +225,14 @@ impl<St: EngineStore> Engine<St> {
             Ok(()) => {
                 info!(
                     conversation = %self.conversation_id,
-                    proposal_id, "self-leave proposal opened (expected_voters=1, bundled YES)"
+                    proposal_id, "single-voter proposal opened (expected_voters=1, bundled YES)"
                 );
                 Ok(Some(proposal))
             }
             Err(ConsensusError::ProposalAlreadyExist) => {
                 info!(
                     conversation = %self.conversation_id,
-                    proposal_id, "self-leave already in flight, skipping retransmit"
+                    proposal_id, "single-voter proposal already in flight, skipping retransmit"
                 );
                 Ok(None)
             }
