@@ -8,17 +8,21 @@
 
 use std::collections::BTreeSet;
 
-use mls_reference::{Action, GroupOps, Reference};
+use mls_reference::{Action, Error, GroupOps, Reference};
 use openmls::credentials::{BasicCredential, CredentialWithKey};
 use openmls::group::{MlsGroupCreateConfig, MlsGroupJoinConfig};
 use openmls::key_packages::KeyPackage;
-use openmls::prelude::Ciphersuite;
 use openmls::prelude::tls_codec::Serialize as _;
+use openmls::prelude::{Capabilities, Ciphersuite, ExtensionType};
+use openmls::treesync::LeafNodeParameters;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 
 const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 const CONVERSATION: &str = "conformance-conversation";
+/// A capability the update cases set on a leaf, so a landed update can be told
+/// from the fresh key every commit brings.
+const UPDATE_MARKER: u16 = 0xF001;
 
 // ══════════════════════════════════════════════════════════════
 // What the suite needs beyond the trait
@@ -44,6 +48,14 @@ trait Suite {
     /// A value two nodes at the same epoch of the same group agree on and
     /// nobody else can produce — the convergence check.
     fn authenticator(group: &Self::Group) -> Vec<u8>;
+    /// The parameters of a leaf update: whatever the application changes on
+    /// its own leaf.
+    fn leaf_params() -> <Self::Group as GroupOps>::LeafParams;
+    /// The public key other members encrypt to for `member`, as this node
+    /// sees it. It changes when the member's leaf is replaced.
+    fn leaf_key(group: &Self::Group, member: &[u8]) -> Vec<u8>;
+    /// Whether this node's own leaf carries what [`Suite::leaf_params`] sets.
+    fn leaf_has_params(group: &Self::Group) -> bool;
 }
 
 /// The reference implementation, over the in-memory OpenMLS provider and
@@ -114,6 +126,35 @@ impl Suite for ReferenceSuite {
 
     fn authenticator(group: &Self::Group) -> Vec<u8> {
         group.epoch_authenticator()
+    }
+
+    fn leaf_params() -> LeafNodeParameters {
+        LeafNodeParameters::builder()
+            .with_capabilities(
+                Capabilities::builder()
+                    .extensions(vec![ExtensionType::Unknown(UPDATE_MARKER)])
+                    .build(),
+            )
+            .build()
+    }
+
+    fn leaf_has_params(group: &Self::Group) -> bool {
+        group
+            .group()
+            .own_leaf_node()
+            .expect("the leaf is seated")
+            .capabilities()
+            .extensions()
+            .contains(&ExtensionType::Unknown(UPDATE_MARKER))
+    }
+
+    fn leaf_key(group: &Self::Group, member: &[u8]) -> Vec<u8> {
+        group
+            .group()
+            .members()
+            .find(|m| m.signature_key == member)
+            .expect("the member is in the group")
+            .encryption_key
     }
 }
 
@@ -555,4 +596,238 @@ fn case_stage_once<S: Suite>() {
 #[test]
 fn a_commit_stages_once() {
     case_stage_once::<ReferenceSuite>();
+}
+
+// ══════════════════════════════════════════════════════════════
+// (k) a member's leaf update lands through the committer's commit
+// ══════════════════════════════════════════════════════════════
+
+fn case_update_lands<S: Suite>() {
+    let mut nodes = group_of::<S>(&["bob", "carol"]);
+    let alice_id = nodes[0].own_id();
+    let bob_id = nodes[1].own_id();
+    let before = S::leaf_key(&nodes[0], &bob_id);
+    assert!(!S::leaf_has_params(&nodes[1]));
+
+    let update = nodes[1]
+        .propose_update(S::leaf_params())
+        .expect("bob proposes");
+    assert_eq!(
+        nodes[0].validate_update(&update).expect("alice validates"),
+        bob_id,
+        "the sender is the member the update names"
+    );
+    assert_eq!(
+        nodes[2].validate_update(&update).expect("carol validates"),
+        bob_id
+    );
+
+    let built = nodes[0]
+        .build_commit(&[Action::Update {
+            member: bob_id.clone(),
+        }])
+        .expect("alice builds");
+    assert_eq!(
+        built.actions,
+        vec![Action::Update {
+            member: bob_id.clone()
+        }]
+    );
+    assert_eq!(built.proposal_count, 1);
+
+    // The owner stages the commit that replaces its own leaf, and so does a
+    // bystander; both read the same facts.
+    for i in [1, 2] {
+        let facts = nodes[i].stage(&built.commit).expect("stage the commit");
+        assert_eq!(facts.sender, alice_id);
+        assert_eq!(facts.actions, built.actions);
+        assert_eq!(facts.proposal_count, 1);
+    }
+    for node in nodes.iter_mut() {
+        node.merge(built.hash).expect("merge the commit");
+    }
+
+    assert_converged::<S>(&nodes);
+    let after = S::leaf_key(&nodes[0], &bob_id);
+    assert_ne!(before, after, "bob's leaf was replaced");
+    for node in &nodes {
+        assert_eq!(S::leaf_key(node, &bob_id), after);
+    }
+    assert!(S::leaf_has_params(&nodes[1]), "with bob's parameters");
+
+    // The owner still decrypts at the new epoch, and the next round runs.
+    let sealed = nodes[1].seal(b"after the update").expect("bob seals");
+    let opened = nodes[2].open(&sealed).expect("open").expect("not dropped");
+    assert_eq!(opened.plaintext, b"after the update");
+    advance::<S>(&mut nodes, 2);
+
+    // Nothing is held after the merge: a build for the same update fails.
+    assert!(
+        nodes[0]
+            .build_commit(&[Action::Update { member: bob_id }])
+            .is_err(),
+        "a merge drops the held update"
+    );
+}
+
+#[test]
+fn an_update_lands_on_three_nodes() {
+    case_update_lands::<ReferenceSuite>();
+}
+
+// ══════════════════════════════════════════════════════════════
+// (l) a held update does not mute the sender
+// ══════════════════════════════════════════════════════════════
+
+fn case_seal_with_held_update<S: Suite>() {
+    let mut nodes = group_of::<S>(&["bob"]);
+
+    let update = nodes[1]
+        .propose_update(S::leaf_params())
+        .expect("bob proposes");
+    nodes[0].validate_update(&update).expect("alice validates");
+
+    for (from, to) in [(0, 1), (1, 0)] {
+        let sealed = nodes[from]
+            .seal(b"chat while an update is held")
+            .expect("seal works with an update held");
+        let opened = nodes[to].open(&sealed).expect("open").expect("not dropped");
+        assert_eq!(opened.plaintext, b"chat while an update is held");
+    }
+}
+
+#[test]
+fn seal_works_while_an_update_is_held() {
+    case_seal_with_held_update::<ReferenceSuite>();
+}
+
+// ══════════════════════════════════════════════════════════════
+// (m) the committer's own update lands through its commit
+// ══════════════════════════════════════════════════════════════
+
+fn case_own_update_lands<S: Suite>() {
+    let mut nodes = group_of::<S>(&["bob", "carol"]);
+    let alice_id = nodes[0].own_id();
+    let before = S::leaf_key(&nodes[1], &alice_id);
+    assert!(!S::leaf_has_params(&nodes[0]));
+
+    let update = nodes[0]
+        .propose_update(S::leaf_params())
+        .expect("alice proposes");
+    // The peers hold alice's update, as they do for anyone's.
+    for i in [1, 2] {
+        nodes[i].validate_update(&update).expect("validate");
+    }
+    let built = nodes[0].build_commit(&[]).expect("alice builds");
+    assert!(
+        built.actions.is_empty(),
+        "the committer's own update is not an action"
+    );
+
+    for i in [1, 2] {
+        let facts = nodes[i].stage(&built.commit).expect("stage the commit");
+        assert!(facts.actions.is_empty());
+    }
+    for node in nodes.iter_mut() {
+        node.merge(built.hash).expect("merge the commit");
+    }
+
+    assert_converged::<S>(&nodes);
+    assert_ne!(
+        S::leaf_key(&nodes[1], &alice_id),
+        before,
+        "alice's leaf was replaced"
+    );
+    assert_eq!(
+        S::leaf_key(&nodes[1], &alice_id),
+        S::leaf_key(&nodes[0], &alice_id)
+    );
+    assert!(S::leaf_has_params(&nodes[0]), "with alice's parameters");
+}
+
+#[test]
+fn the_committers_own_update_lands() {
+    case_own_update_lands::<ReferenceSuite>();
+}
+
+// ══════════════════════════════════════════════════════════════
+// (n) an update is bound to its epoch and must be an update
+// ══════════════════════════════════════════════════════════════
+
+fn case_update_validation_rejects<S: Suite>() {
+    let mut nodes = group_of::<S>(&["bob"]);
+
+    let update = nodes[1]
+        .propose_update(S::leaf_params())
+        .expect("bob proposes");
+    advance::<S>(&mut nodes, 0);
+    assert!(
+        nodes[0].validate_update(&update).is_err(),
+        "an update from a past epoch fails validation"
+    );
+
+    let sealed = nodes[1].seal(b"chat").expect("seal");
+    assert!(
+        nodes[0].validate_update(&sealed).is_err(),
+        "application traffic is not an update"
+    );
+
+    let built = nodes[1].build_commit(&[]).expect("bob builds");
+    assert!(
+        nodes[0].validate_update(&built.commit).is_err(),
+        "a commit is not an update"
+    );
+}
+
+#[test]
+fn a_stale_update_fails_validation() {
+    case_update_validation_rejects::<ReferenceSuite>();
+}
+
+// ══════════════════════════════════════════════════════════════
+// (o) a commit that refers to an update this node lacks fails to stage
+// ══════════════════════════════════════════════════════════════
+
+fn case_stage_without_update<S: Suite>() -> <S::Group as GroupOps>::Error {
+    let mut nodes = group_of::<S>(&["bob", "carol"]);
+    let bob_id = nodes[1].own_id();
+    let carol_id = nodes[2].own_id();
+    let epoch = nodes[2].epoch();
+
+    let update = nodes[1]
+        .propose_update(S::leaf_params())
+        .expect("bob proposes");
+    nodes[0].validate_update(&update).expect("alice validates");
+    assert!(
+        nodes[0]
+            .build_commit(&[Action::Update { member: carol_id }])
+            .is_err(),
+        "a build for an update nobody holds fails"
+    );
+    let built = nodes[0]
+        .build_commit(&[Action::Update { member: bob_id }])
+        .expect("alice builds");
+
+    let refused = nodes[2]
+        .stage(&built.commit)
+        .expect_err("carol holds no update");
+
+    // The refusal leaves the node at its epoch with nothing muted, while the
+    // nodes that hold the update apply the commit.
+    assert_eq!(nodes[2].epoch(), epoch);
+    nodes[2].seal(b"still able to chat").expect("carol seals");
+    nodes[1].stage(&built.commit).expect("bob stages");
+    nodes[0].merge(built.hash).expect("alice merges");
+    nodes[1].merge(built.hash).expect("bob merges");
+    assert_converged::<S>(&nodes[..2]);
+    refused
+}
+
+#[test]
+fn staging_without_the_update_fails() {
+    let refused = case_stage_without_update::<ReferenceSuite>();
+    assert!(
+        matches!(refused, Error::MissingProposal),
+        "the failure is distinguishable: {refused:?}"
+    );
 }

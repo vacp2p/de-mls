@@ -29,6 +29,9 @@ pub enum Action {
     },
     /// Unseat a current member by its id.
     Remove { member: Vec<u8> },
+    /// Replace `member`'s leaf with the update it proposed, which the service
+    /// holds. The committer's own update is not an action.
+    Update { member: Vec<u8> },
 }
 
 /// What staging a peer's commit revealed about it, without applying it.
@@ -39,9 +42,9 @@ pub struct StagedFacts {
     pub sender: Vec<u8>,
     /// The epoch the commit was built at.
     pub epoch: u64,
-    /// The adds and removes it performs, in commit order.
+    /// The adds, removes and updates it performs, in commit order.
     pub actions: Vec<Action>,
-    /// Every proposal it carries, adds and removes included. Above
+    /// Every proposal it carries, adds, removes and updates included. Above
     /// `actions.len()` it carries kinds the engine does not know, and the
     /// round rejects it.
     pub proposal_count: u32,
@@ -95,6 +98,10 @@ pub struct Applied {
 pub trait GroupOps {
     type Error: std::error::Error;
 
+    /// What the application chooses for its own leaf: credential, capabilities,
+    /// leaf extensions. Never the signature key.
+    type LeafParams;
+
     /// The conversation this group belongs to.
     fn conversation_id(&self) -> &str;
 
@@ -137,14 +144,32 @@ pub trait GroupOps {
     /// a bad key package fails at the caller rather than at commit time.
     fn validate_key_package(&self, bytes: &[u8]) -> Result<(), Self::Error>;
 
+    /// Build an Update proposal for our own leaf, hold it, and return its
+    /// bytes. A second call replaces the first.
+    ///
+    /// The proposal MUST NOT stay in the proposal store: a non-empty store
+    /// blocks [`GroupOps::seal`].
+    fn propose_update(&mut self, params: Self::LeafParams) -> Result<Vec<u8>, Self::Error>;
+
+    /// Check a peer's Update proposal and hold it for the commit. Returns the
+    /// member id of its sender, taken from the MLS framing.
+    ///
+    /// The bytes MUST be an Update proposal for this group and the current
+    /// epoch, and validate once. The proposal MUST NOT enter the proposal
+    /// store.
+    fn validate_update(&mut self, bytes: &[u8]) -> Result<Vec<u8>, Self::Error>;
+
     /// Build a commit carrying `actions`.
     ///
-    /// The proposals MUST ride inline in the commit, in the given order, and
-    /// MUST NOT go through the proposal store. The commit MUST force a
-    /// self-update, so every commit brings fresh entropy. Every key package
+    /// The adds and removes MUST ride inline in the commit and MUST NOT go
+    /// through the proposal store; held updates ride by reference.
+    /// [`Built::actions`] reports the order the commit gave them. The commit
+    /// MUST force a self-update, so every commit brings fresh entropy. Every
+    /// key package
     /// MUST be validated. A remove of somebody who is not a member MUST be
     /// skipped rather than failing the commit; the skip shows in
-    /// [`Built::proposal_count`].
+    /// [`Built::proposal_count`]. An update nobody holds MUST fail the build.
+    /// Our own held update rides in the commit itself.
     ///
     /// The commit stays pending: the epoch does not move and
     /// [`GroupOps::pending_hash`] starts returning its hash. Exactly one
@@ -160,7 +185,9 @@ pub trait GroupOps {
     /// Several commits MUST be stageable at once, keyed by hash, and staging
     /// MUST NOT disturb our own pending commit; a commit round routinely has a
     /// node holding its own candidate and two rivals. A commit for another
-    /// group or for a past epoch MUST be rejected.
+    /// group or for a past epoch MUST be rejected. A commit that refers to an
+    /// update this node does not hold MUST fail with a distinct error. The
+    /// same bytes stage once.
     fn stage(&mut self, commit: &[u8]) -> Result<StagedFacts, Self::Error>;
 
     /// Apply a commit, advancing the epoch, and persist before returning.
@@ -168,7 +195,7 @@ pub trait GroupOps {
     /// `hash` names either our own pending commit or one held by
     /// [`GroupOps::stage`]. Merging a peer's commit MUST clear our own pending
     /// commit first. Every commit still staged afterwards is stale and MUST be
-    /// dropped.
+    /// dropped, and so is every held update.
     fn merge(&mut self, hash: [u8; 32]) -> Result<Applied, Self::Error>;
 
     /// Drop one staged commit. A hash that is not held is not an error.
