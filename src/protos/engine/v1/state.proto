@@ -4,7 +4,6 @@ syntax = "proto3";
 
 package de_mls.engine.v1;
 
-import "hashgraph-like-consensus/v1/consensus.proto";
 import "messages/v1/application.proto";
 
 // Engine state under the store keys (`engine::store::keys`). A local
@@ -18,14 +17,9 @@ message StewardListState {
   uint32 sn_max = 5;
 }
 
-message ApprovedProposal {
-  uint32 proposal_id = 1;
-  de_mls.messages.v1.ConversationUpdateRequest request = 2;
-}
-
 message ProposalsState {
-  repeated ApprovedProposal approved = 1; // FIFO order
-  bytes urgent_commit_target = 2;         // empty when none
+  repeated de_mls.messages.v1.ApprovedProposal approved = 1; // FIFO order
+  bytes urgent_commit_target = 2;                           // empty when none
 }
 
 message JoinEpoch {
@@ -45,13 +39,8 @@ message ScoresState {
   repeated de_mls.messages.v1.PeerScore scores = 1;
 }
 
-message SessionState {
-  consensus.v1.Proposal proposal = 1; // votes = every vote seen
-  uint64 created_at = 2;              // seconds
-}
-
 message ConsensusState {
-  repeated SessionState sessions = 1;
+  repeated de_mls.messages.v1.VotingSession sessions = 1;
 }
 
 message MetaState {

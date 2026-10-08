@@ -11,6 +11,7 @@ use crate::{
     StewardListConfig,
     engine::{
         handle::Engine,
+        queues::Admission,
         store::EngineStore,
         types::{Decision, Event, Phase},
         util::member_set,
@@ -146,7 +147,30 @@ impl<St: EngineStore> Engine<St> {
             self.config.voting_delay = clamped;
         }
         self.dirty.meta = true;
+        self.adopt_pending_work(sync);
         Ok(())
+    }
+
+    /// Take over the answerer's pending work: its approved proposals,
+    /// admitted by the rule a vote that ends here follows, then its open
+    /// sessions, each admitted as a live frame would be, under the holder's
+    /// deadline.
+    fn adopt_pending_work(&mut self, sync: &ConversationSync) {
+        for approved in &sync.approved_proposals {
+            if let Some(request) = &approved.request
+                && self
+                    .queues
+                    .admit_approved(&self.members, approved.proposal_id, request.clone())
+                    == Admission::Queued
+            {
+                self.dirty.proposals = true;
+            }
+        }
+
+        if !sync.voting_sessions.is_empty() {
+            self.dirty.consensus = true;
+            self.admit_sessions(sync.voting_sessions.clone());
+        }
     }
 }
 
@@ -157,7 +181,7 @@ impl<St: EngineStore> Engine<St> {
 /// (removed since the list was elected) are tolerated as long as at least one
 /// listed steward is still present.
 ///
-/// The starting score is adopted, not judged: where the group puts it is the
+/// The starting score is adopted, not validated: where the group puts it is the
 /// integrator's choice. It goes through [`ScoringConfig::validate`] — the
 /// same rule a locally built config passes at construction — which asks only
 /// that it be positive.

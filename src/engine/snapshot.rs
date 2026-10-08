@@ -3,24 +3,21 @@
 
 use std::time::Duration;
 
-use hashgraph_like_consensus::storage::ConsensusStorage;
 use prost::Message;
-use tracing::warn;
 
 use crate::{
     ConversationError, ScoringConfig, StewardList, StewardListConfig,
     engine::{
         config::EngineConfig,
         handle::Engine,
-        proposal_kind::ProposalKind,
         store::{Dirty, EngineStore, keys},
     },
     protos::de_mls::{
         engine::v1::{
-            ApprovedProposal, ConsensusState, JoinEpoch, JoinEpochsState, MetaState,
-            ProposalsState, ScoresState, SessionState, SkippedStewardsState, StewardListState,
+            ConsensusState, JoinEpoch, JoinEpochsState, MetaState, ProposalsState, ScoresState,
+            SkippedStewardsState, StewardListState,
         },
-        messages::v1::{ConversationUpdateRequest, PeerScore, TimingConfig},
+        messages::v1::{PeerScore, TimingConfig},
     },
 };
 
@@ -107,17 +104,8 @@ impl<St: EngineStore> Engine<St> {
     }
 
     fn proposals_state(&self) -> ProposalsState {
-        let approved = self
-            .queues
-            .approved_proposals()
-            .iter()
-            .map(|(&proposal_id, request)| ApprovedProposal {
-                proposal_id,
-                request: Some(request.clone()),
-            })
-            .collect();
         ProposalsState {
-            approved,
+            approved: self.queues.approved_as_wire(),
             urgent_commit_target: self
                 .queues
                 .urgent_commit_target()
@@ -158,23 +146,9 @@ impl<St: EngineStore> Engine<St> {
     }
 
     fn consensus_state(&self) -> Result<ConsensusState, ConversationError> {
-        let scope = self.conversation_id.clone();
-        let sessions = self
-            .consensus
-            .storage()
-            .list_scope_sessions(&scope)?
-            .unwrap_or_default()
-            .into_iter()
-            .map(|session| {
-                let mut proposal = session.proposal;
-                proposal.votes = session.votes.into_values().collect();
-                SessionState {
-                    proposal: Some(proposal),
-                    created_at: session.created_at,
-                }
-            })
-            .collect();
-        Ok(ConsensusState { sessions })
+        Ok(ConsensusState {
+            sessions: self.voting_sessions()?,
+        })
     }
 
     fn meta_state(&self) -> MetaState {
@@ -258,43 +232,13 @@ impl<St: EngineStore> Engine<St> {
         Ok(())
     }
 
-    /// Replay every persisted consensus session, lowest `ProposalKind`
-    /// first so an emergency's partial freeze can never block the replay of
-    /// a lower-priority session that was already open before the restart.
-    /// A session that fails to replay is logged and dropped rather than
-    /// failing the whole restore.
+    /// Replay every persisted consensus session, arming this member's vote
+    /// where it has not voted yet.
     pub(crate) fn restore_sessions(&mut self, bytes: &[u8]) -> Result<(), ConversationError> {
         let state = ConsensusState::decode(bytes)?;
-        let mut sessions = state.sessions;
-        sessions.sort_by_key(session_kind);
-        for session in sessions {
-            let Some(proposal) = session.proposal else {
-                continue;
-            };
-            let proposal_id = proposal.proposal_id;
-            if let Err(e) = self.replay_session(proposal, session.created_at) {
-                warn!(
-                    conversation = %self.conversation_id,
-                    proposal_id,
-                    error = %e,
-                    "consensus session replay failed; dropped"
-                );
-            }
-        }
+        self.admit_sessions(state.sessions);
         Ok(())
     }
-}
-
-/// The `ProposalKind` a persisted session's payload decodes to, `Commit`
-/// (the lowest) for one that fails to decode.
-fn session_kind(session: &SessionState) -> ProposalKind {
-    session
-        .proposal
-        .as_ref()
-        .and_then(|p| ConversationUpdateRequest::decode(p.payload.as_slice()).ok())
-        .as_ref()
-        .map(ProposalKind::of)
-        .unwrap_or(ProposalKind::Commit)
 }
 
 #[cfg(test)]
@@ -303,12 +247,14 @@ mod tests {
 
     use super::*;
     use crate::{
-        ScoreEvent, ScoreOp,
+        Decision, Event, ScoreEvent, ScoreOp,
         engine::{
             store::InMemoryStore,
-            types::{MemberId, Timestamp},
+            types::{ActionKind, MemberId, Timestamp},
         },
-        protos::de_mls::messages::v1::{MemberInvite, conversation_update_request},
+        protos::de_mls::messages::v1::{
+            ConversationUpdateRequest, MemberInvite, ViolationEvidence, conversation_update_request,
+        },
     };
 
     fn member(id: u8) -> Vec<u8> {
@@ -352,9 +298,12 @@ mod tests {
     /// steward list, the approved queue and its urgent target, a join
     /// epoch, a skipped steward, a moved score, and an open consensus
     /// session (recomputed via `on_incoming_proposal`, matching the path
-    /// `replay_session` also drives).
+    /// `admit_sessions` also drives) whose deadline, armed off the whole
+    /// second, survives a restore at a later `now` unchanged. A session this
+    /// engine already voted on is not armed for a vote again on restore.
     #[test]
     fn each_key_round_trips() {
+        let opened = Timestamp::from_duration_since_epoch(Duration::from_millis(250));
         let members: Vec<MemberId> = (1..=4).map(|i| MemberId::from(member(i))).collect();
         let (mut engine, _) = Engine::create(
             Timestamp::ZERO,
@@ -366,7 +315,7 @@ mod tests {
             InMemoryStore::default(),
         )
         .expect("create");
-        engine.begin(Timestamp::ZERO);
+        engine.begin(opened);
 
         engine
             .queues
@@ -385,7 +334,10 @@ mod tests {
 
         let request = ConversationUpdateRequest::remove_member(member(4));
         let proposal = peer_proposal(&member(2), 11, &request, members.len() as u32);
-        engine.on_incoming_proposal(&member(2), proposal).unwrap();
+        engine
+            .on_incoming_proposal(&member(2), proposal, engine.epoch())
+            .unwrap();
+        engine.cast_local_vote(11, true).expect("own vote");
 
         // The state above was built by direct queue/scoring calls, not the
         // marked driving-call paths, so mark every key dirty before the
@@ -394,8 +346,8 @@ mod tests {
         engine.flush().expect("flush");
 
         let store = engine.store().clone();
-        let (restored, _) = Engine::restore(
-            Timestamp::ZERO,
+        let (restored, out) = Engine::restore(
+            Timestamp::from_duration_since_epoch(Duration::from_secs(3)),
             "conv",
             members[0].clone(),
             0,
@@ -434,7 +386,9 @@ mod tests {
             "approved ids in order"
         );
         assert!(
-            restored.queues.has_approved_update(&member(3)),
+            restored
+                .queues
+                .has_approved_change(ActionKind::Update, &member(3)),
             "approved update"
         );
         assert_eq!(
@@ -457,9 +411,81 @@ mod tests {
             "moved score"
         );
         assert!(restored.queues.is_voting(11), "session replayed as voting");
-        assert!(
-            restored.timing.pending_consensus_timeouts.contains_key(&11),
-            "consensus timeout re-armed"
+        assert_eq!(
+            restored.timing.pending_consensus_timeouts[&11],
+            engine.timing.pending_consensus_timeouts[&11],
+            "consensus timeout re-armed at the deadline it had"
         );
+        assert!(
+            !restored.timing.pending_auto_votes.contains_key(&11),
+            "no auto-vote for a session already voted on"
+        );
+        assert!(
+            !out.events
+                .iter()
+                .any(|e| matches!(e, Event::VoteRequested { .. })),
+            "no vote requested for a session already voted on"
+        );
+        assert!(
+            !out.decisions
+                .iter()
+                .any(|d| matches!(d, Decision::ValidateKeyPackage { .. })),
+            "no key package check for a session already voted on"
+        );
+    }
+
+    /// Two persisted sessions, an emergency and a removal, are both voting
+    /// after a restore: the removal is admitted first, so the emergency's
+    /// partial freeze cannot drop it.
+    #[test]
+    fn restore_admits_sessions_lowest_kind_first() {
+        let members: Vec<MemberId> = (1..=4).map(|i| MemberId::from(member(i))).collect();
+        let (mut engine, _) = Engine::create(
+            Timestamp::ZERO,
+            "conv",
+            members[0].clone(),
+            0,
+            &members,
+            EngineConfig::default(),
+            InMemoryStore::default(),
+        )
+        .expect("create");
+        engine.begin(Timestamp::ZERO);
+
+        let removal = ConversationUpdateRequest::remove_member(member(4));
+        engine
+            .on_incoming_proposal(
+                &member(2),
+                peer_proposal(&member(2), 11, &removal, 4),
+                engine.epoch(),
+            )
+            .unwrap();
+        let emergency = ViolationEvidence::deadlock(0)
+            .with_creator(member(3))
+            .into_update_request()
+            .unwrap();
+        engine
+            .on_incoming_proposal(
+                &member(3),
+                peer_proposal(&member(3), 12, &emergency, 4),
+                engine.epoch(),
+            )
+            .unwrap();
+        assert!(engine.queues.is_voting(11) && engine.queues.is_voting(12));
+
+        engine.dirty = Dirty::ALL;
+        engine.flush().expect("flush");
+        let (restored, _) = Engine::restore(
+            Timestamp::ZERO,
+            "conv",
+            members[0].clone(),
+            0,
+            &members,
+            engine.store().clone(),
+        )
+        .expect("restore");
+
+        assert!(restored.queues.is_voting(11), "the removal is admitted");
+        assert!(restored.queues.is_voting(12), "the emergency is admitted");
     }
 }

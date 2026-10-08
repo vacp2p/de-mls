@@ -68,6 +68,13 @@ fn sole_steward_removal_is_committed_by_a_fresh_steward(remove: impl FnOnce(&mut
     let mut bed = Bed::new("conv", "alice", config);
     let bob = bed.seat(0, "bob");
     let carol = bed.seat(0, "carol");
+    // Guard: the seating returns once the joiner is live, and the proposal
+    // below needs every node out of `Syncing`.
+    bed.process_until("every node is synced", |b| {
+        b.live_nodes()
+            .iter()
+            .all(|&n| b.router(n).engine.is_synced())
+    });
     let steward = bed.epoch_steward();
     let others: Vec<usize> = [0, bob, carol]
         .into_iter()
@@ -177,12 +184,12 @@ fn rejected_invite_never_lands() {
     assert!(bed.agree_among(&[0, bob, carol]));
 }
 
-// Backlog 32: at four settled members the steward list (`sn_max` == 2)
-// exhausts into a genuine subset. Every node enters `Syncing`, alice files
-// the election, it lands, everyone returns to `Working`, and a fifth
-// member seats normally afterward.
+// The steward list runs out at an epoch boundary while members keep
+// joining: alice enters `Syncing` for the election, it lands, and seating
+// goes on without a stall until six members are seated and every live node
+// is `Working`.
 #[test]
-fn five_members_keep_committing() {
+fn an_exhausted_steward_list_is_replaced_without_a_stall() {
     let mut bed = Bed::new("conv", "alice", fast_config());
     bed.seat(0, "bob");
     bed.seat(0, "carol");

@@ -7,7 +7,7 @@ use tracing::info;
 use crate::{
     engine::{
         proposal_kind::change_of,
-        queues::EngineQueues,
+        queues::{Admission, EngineQueues},
         types::{ActionKind, Verdict},
     },
     protos::de_mls::messages::v1::{
@@ -41,22 +41,15 @@ pub(crate) enum ApplyOutcome {
     QueuedRemoval { target: Vec<u8> },
 }
 
-/// Classify a resolved proposal and apply its queue effects.
-///
-/// What happens follows from `approved` and the request kind: accepted
-/// membership changes move to the approved queue for the next commit; an
-/// accepted below-threshold emergency becomes a `RemoveMember` with an urgent
-/// commit; an accepted Deadlock skips the current epoch steward; an accepted
-/// election is handed back to install; a rejected or failed proposal is
-/// dropped; an emergency's partial freeze lifts whatever the verdict.
-///
-/// One rule that isn't obvious from the branches: **removal dedup** — the same
-/// member can be removed by several paths (self-leave, ban, below-threshold)
-/// under different proposal ids. Only the first reaches the approved queue,
-/// because the group rejects a duplicate at commit time. Invites dedup the
-/// same way, keyed by the joiner id the proposer stamped on the request.
+/// Apply a verdict. An approved membership change is offered to the queue
+/// through [`EngineQueues::admit_approved`]; an approved below-threshold
+/// emergency becomes a `RemoveMember` and an urgent commit; an approved
+/// Deadlock skips the epoch steward; an approved election is handed back
+/// to install. A rejected or failed proposal is dropped. An emergency's
+/// partial freeze lifts whatever the verdict.
 pub(crate) fn apply_outcome(
     queues: &mut EngineQueues,
+    members: &[Vec<u8>],
     proposal_id: u32,
     verdict: Verdict,
     request: &ConversationUpdateRequest,
@@ -92,37 +85,6 @@ pub(crate) fn apply_outcome(
         transforms_to_removal,
     );
 
-    // Two approvals from independent paths (self-leave + ban, ECP + ban, …)
-    // can each carry `RemoveMember(target)` under different proposal ids. The
-    // group rejects a duplicate removal at commit time, so keep the first
-    // entry and drop the second.
-    if let Some(target) = &removal_target
-        && queues.has_approved_removal(target)
-    {
-        info!(
-            proposal_id,
-            target = ?target,
-            "removal proposal deduped — target already queued for removal"
-        );
-        return ApplyOutcome::NoAction;
-    }
-
-    // Two approved proposals can admit one member (an invitation racing a
-    // sponsored join) with key packages the group won't collapse into one.
-    // Drop the duplicate, like removals above, or the whole batch is rejected.
-    if approved
-        && let Some((ActionKind::Add, member_id)) = change_of(request)
-        && !member_id.is_empty()
-        && queues.has_approved_invite(member_id)
-    {
-        info!(
-            proposal_id,
-            target = ?member_id,
-            "invite proposal deduped — target already queued for admission"
-        );
-        return ApplyOutcome::NoAction;
-    }
-
     if let Some(ev) = evidence.as_ref() {
         if approved {
             info!(
@@ -141,21 +103,39 @@ pub(crate) fn apply_outcome(
         }
     }
 
-    // Below-threshold ECP: it becomes a `RemoveMember`, and the next commit is
+    // A below-threshold ECP becomes a `RemoveMember`, and the next commit is
     // restricted to that target so the removal doesn't drag along unrelated
     // approved work. `transforms_to_removal` implies `approved` and `evidence`
-    // is `Some`; `filter` binds it without an unwrap.
-    if let Some(ev) = evidence.as_ref().filter(|_| transforms_to_removal) {
-        queues.insert_approved_proposal(proposal_id, removal_request_for(ev));
+    // is `Some`; `filter` binds it without an unwrap. Other emergencies
+    // produce no membership change, so there is nothing to queue.
+    let transformed = evidence.as_ref().filter(|_| transforms_to_removal);
+    let to_queue = match transformed {
+        Some(ev) => Some(removal_request_for(ev)),
+        None => (approved && !is_emergency).then(|| request.clone()),
+    };
+    if let Some(queued) = to_queue {
+        match queues.admit_approved(members, proposal_id, queued) {
+            Admission::Duplicate => {
+                info!(
+                    proposal_id,
+                    "approval deduped — the change is already queued"
+                );
+                return ApplyOutcome::NoAction;
+            }
+            Admission::Stale => {
+                info!(
+                    proposal_id,
+                    "approval dropped: stale, its change is in effect or its owner is being removed"
+                );
+                return ApplyOutcome::NoAction;
+            }
+            Admission::Queued => {}
+        }
+    }
+    if let Some(ev) = transformed {
         let target = ev.target_member_id.clone();
         queues.set_urgent_commit_target(target.clone());
         return ApplyOutcome::UrgentRemoval { target };
-    }
-
-    // Regular proposals stage for the next commit; other emergencies produce
-    // no membership change, so there is nothing to stage.
-    if approved && !is_emergency {
-        queues.insert_approved_proposal(proposal_id, request.clone());
     }
 
     if evidence.as_ref().is_some_and(is_deadlock) && approved {

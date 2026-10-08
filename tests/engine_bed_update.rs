@@ -38,7 +38,7 @@ fn marks(bed: &Bed) -> Vec<usize> {
     (0..3).map(|n| bed.router(n).events.len()).collect()
 }
 
-// A peer's update is checked by every other node, rides the steward's
+// A peer's update is checked by every other node, carried by the steward's
 // commit as an action, and is reported on every node.
 #[test]
 fn a_members_update_lands_and_every_node_reports_it() {

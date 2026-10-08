@@ -17,7 +17,8 @@ pub enum ScoreEvent {
     // ── Target of an accepted ECP (the violation it's penalized for) ──
     /// Committed proposals that don't match the voted-on set.
     BrokenCommit,
-    /// MLS proposal payload was malformed, or didn't match the voted action.
+    /// The emergency evidence named an MLS proposal that was malformed or
+    /// didn't match the voted action.
     BrokenMlsProposal,
     /// Failed to commit approved work within the inactivity window.
     CensorshipInactivity,

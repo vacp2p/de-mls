@@ -68,6 +68,18 @@ pub(crate) fn change_of(req: &ConversationUpdateRequest) -> Option<(ActionKind, 
     }
 }
 
+/// Whether a change is already in effect, or can no longer take effect, for
+/// `members`: an `Add` of a member already seated, a `Remove` of a member
+/// not in the set. An `Update` is never in effect on membership alone.
+pub(crate) fn change_in_effect(members: &[Vec<u8>], kind: ActionKind, member: &[u8]) -> bool {
+    let present = members.iter().any(|m| m == member);
+    match kind {
+        ActionKind::Add => present,
+        ActionKind::Remove => !present,
+        ActionKind::Update => false,
+    }
+}
+
 /// The target of a membership-changing `ConversationUpdateRequest`: a removal's
 /// `member_id`, or an invite's joiner id as the proposer stamped it. Both are
 /// the same key space, so a joiner has one id before and after it is seated.
@@ -113,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn invite_and_remove_are_commit() {
+    fn membership_changes_are_commit() {
         assert_eq!(
             ProposalKind::of(&req(Payload::MemberInvite(MemberInvite::default()))),
             ProposalKind::Commit,
@@ -183,8 +195,18 @@ mod tests {
         assert_eq!(change_of(&election), None);
     }
 
+    #[test]
+    fn a_change_is_in_effect_when_the_member_set_shows_it() {
+        let members = vec![vec![1u8], vec![2u8]];
+        assert!(change_in_effect(&members, ActionKind::Add, &[1]));
+        assert!(!change_in_effect(&members, ActionKind::Add, &[3]));
+        assert!(change_in_effect(&members, ActionKind::Remove, &[3]));
+        assert!(!change_in_effect(&members, ActionKind::Remove, &[2]));
+        assert!(!change_in_effect(&members, ActionKind::Update, &[3]));
+    }
+
     /// RFC partial-freeze priority: Emergency > StewardElection > Commit.
-    /// `ConversationQueues::partial_freeze_blocks` and any future cross-kind
+    /// `EngineQueues::partial_freeze_blocks` and any future cross-kind
     /// priority check rely on this ordering.
     #[test]
     fn priority_ordering() {

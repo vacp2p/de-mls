@@ -28,10 +28,22 @@ use crate::{
         handle::Engine,
         proposal_kind::{ProposalKind, in_flight_target},
         store::EngineStore,
-        types::{Decision, Event, MemberId, Output, Phase, Timestamp},
+        types::{ActionKind, Decision, Event, MemberId, Output, Phase, Timestamp},
     },
-    protos::de_mls::messages::v1::{ConversationUpdateRequest, conversation_update_request},
+    protos::de_mls::messages::v1::{
+        ConversationUpdateRequest, VotingSession, conversation_update_request,
+    },
 };
+
+/// Whether an arriving proposal opened a session here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Arrival {
+    /// A session was opened for it.
+    Opened,
+    /// Nothing opened: this node already holds it, applied its outcome, or
+    /// refuses it under the partial freeze or the one-update rule.
+    Ignored,
+}
 
 impl<St: EngineStore> Engine<St> {
     // ── opening a round ──────────────────────────────────────────────
@@ -40,7 +52,7 @@ impl<St: EngineStore> Engine<St> {
     /// with the proposal in one atomic wire message — no vote request
     /// reaches the router, since the vote is already cast.
     ///
-    /// Errors when the phase forbids new proposals (freeze phases,
+    /// Errors when the phase forbids new proposals (`Syncing`, or the
     /// partial freeze during an active emergency). No-ops when a change for
     /// the request's target member is already in flight locally. On success
     /// the proposal is queued as `Outbound::Control` and a consensus-timeout
@@ -84,7 +96,8 @@ impl<St: EngineStore> Engine<St> {
             },
         )?;
 
-        self.queues.track_voting_proposal(proposal_id, &request);
+        self.queues
+            .track_voting_proposal(proposal_id, &request, self.epoch);
         // Removed again by `handle_consensus_outcome` if an outcome lands
         // before the deadline fires.
         self.register_consensus_timeout(proposal_id, consensus_timeout);
@@ -213,6 +226,7 @@ impl<St: EngineStore> Engine<St> {
         &mut self,
         sender: &[u8],
         proposal: Proposal,
+        epoch: u64,
     ) -> Result<(), ConversationError> {
         if proposal.proposal_owner != sender {
             warn!(
@@ -233,7 +247,33 @@ impl<St: EngineStore> Engine<St> {
             );
             return Ok(());
         }
+        self.admit_proposal(proposal, epoch)?;
+        Ok(())
+    }
 
+    /// Open the session for `proposal`, sealed at `epoch`, however it
+    /// arrived: a live frame, a relayed session or a restored one. A copy
+    /// this node already holds or applied changes nothing.
+    ///
+    /// The members of `epoch` are its voters: this member votes when it was
+    /// seated by then and has not voted already; otherwise only the
+    /// consensus timeout is armed.
+    pub(crate) fn admit_proposal(
+        &mut self,
+        proposal: Proposal,
+        epoch: u64,
+    ) -> Result<Arrival, ConversationError> {
+        if self
+            .queues
+            .is_consensus_outcome_applied(proposal.proposal_id)
+        {
+            debug!(
+                conversation = %self.conversation_id,
+                proposal_id = proposal.proposal_id,
+                "proposal dropped: its outcome is applied here"
+            );
+            return Ok(Arrival::Ignored);
+        }
         let decoded = match ConversationUpdateRequest::decode(proposal.payload.as_slice()) {
             Ok(req) => Some(req),
             Err(e) => {
@@ -257,7 +297,7 @@ impl<St: EngineStore> Engine<St> {
                 ?kind,
                 "dropping lower-priority proposal: active emergency partial-freeze"
             );
-            return Ok(());
+            return Ok(Arrival::Ignored);
         }
 
         let update = match decoded.as_ref().and_then(|r| r.payload.as_ref()) {
@@ -267,7 +307,9 @@ impl<St: EngineStore> Engine<St> {
         // One update per member per epoch, with exactly one voter.
         if let Some(update) = update
             && (proposal.expected_voters_count != 1
-                || self.queues.has_approved_update(&update.member_id))
+                || self
+                    .queues
+                    .has_approved_change(ActionKind::Update, &update.member_id))
         {
             debug!(
                 conversation = %self.conversation_id,
@@ -275,12 +317,13 @@ impl<St: EngineStore> Engine<St> {
                 member = ?update.member_id,
                 "update proposal dropped: not single-voter, or its owner already has one"
             );
-            return Ok(());
+            return Ok(Arrival::Ignored);
         }
 
         let proposal_id = proposal.proposal_id;
         let expected_voters = proposal.expected_voters_count;
         let expiration_timestamp = proposal.expiration_timestamp;
+        let already_voted = proposal.votes.iter().any(|v| v.vote_owner == self.own);
 
         // Consensus validation runs before any queue mirroring, so a proposal
         // that fails it (expired or otherwise mis-stamped) leaves no local
@@ -291,6 +334,14 @@ impl<St: EngineStore> Engine<St> {
             .consensus
             .process_incoming_proposal(&scope, proposal, local_now)
         {
+            if matches!(e, ConsensusError::ProposalAlreadyExist) {
+                info!(
+                    conversation = %self.conversation_id,
+                    proposal_id,
+                    "proposal already in flight, duplicate dropped"
+                );
+                return Ok(Arrival::Ignored);
+            }
             if matches!(e, ConsensusError::ProposalExpired) {
                 self.emit(Event::Error {
                     operation: "incoming_proposal".to_string(),
@@ -306,7 +357,7 @@ impl<St: EngineStore> Engine<St> {
         self.dirty.consensus = true;
 
         if let Some(req) = decoded.as_ref() {
-            self.queues.track_voting_proposal(proposal_id, req);
+            self.queues.track_voting_proposal(proposal_id, req, epoch);
         }
 
         // The router checks an accepted update before a commit can carry it.
@@ -319,9 +370,21 @@ impl<St: EngineStore> Engine<St> {
         }
 
         if expected_voters > 1 {
-            self.arm_local_vote(proposal_id, decoded)?;
+            if self.is_voter_since(epoch) && !already_voted {
+                self.arm_local_vote(proposal_id, decoded)?;
+            } else {
+                self.register_consensus_timeout(proposal_id, self.config.consensus_timeout);
+            }
         }
-        Ok(())
+        Ok(Arrival::Opened)
+    }
+
+    /// Whether this member was seated when a proposal sealed at `epoch` was
+    /// filed, so it is among the voters the proposer counted.
+    fn is_voter_since(&self, epoch: u64) -> bool {
+        self.queues
+            .join_epoch(&self.own)
+            .is_none_or(|joined| epoch >= joined)
     }
 
     /// The router checked the update of the proposal `proposal_id`. The
@@ -352,61 +415,77 @@ impl<St: EngineStore> Engine<St> {
         }
     }
 
-    /// Replay a persisted consensus session on restore: feed the bundled
-    /// proposal (and every vote it carries) back into the library so it
-    /// recomputes its state — a session already decided by its bundled
-    /// votes resolves inside `process_incoming_proposal` and rides its
-    /// verdict out through `drain_consensus_outcomes` in `finish`.
+    /// Every consensus session of this conversation, each proposal carrying
+    /// every vote seen so far and the deadline this node holds for it. A
+    /// session with no armed deadline (its vote resolves on arrival) gets a
+    /// fresh one from now.
+    pub(crate) fn voting_sessions(&self) -> Result<Vec<VotingSession>, ConversationError> {
+        let scope = self.conversation_id.clone();
+        let fresh = self.now + self.config.consensus_timeout;
+        Ok(self
+            .consensus
+            .storage()
+            .list_scope_sessions(&scope)?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|session| {
+                let mut proposal = session.proposal;
+                proposal.votes = session.votes.into_values().collect();
+                let deadline = self
+                    .timing
+                    .pending_consensus_timeouts
+                    .get(&proposal.proposal_id)
+                    .copied()
+                    .unwrap_or(fresh);
+                let filed_epoch = self
+                    .queues
+                    .voting_epoch(proposal.proposal_id)
+                    .unwrap_or(self.epoch);
+                VotingSession {
+                    proposal: Some(proposal),
+                    deadline_ms: deadline.as_millis(),
+                    filed_epoch,
+                }
+            })
+            .collect())
+    }
+
+    /// Admit `sessions` as live frames would be, lowest `ProposalKind` first
+    /// so an emergency's partial freeze can never block a lower-priority
+    /// session that was already open. A session that fails to open is logged
+    /// and dropped rather than failing the rest.
     ///
-    /// A session this member already voted in before the restart is not
-    /// re-armed: a fresh auto-vote would double the vote (the library
-    /// rejects it) and a fresh key-package check would ask the router for a
-    /// decision it already made. Every session's consensus-timeout deadline
-    /// is pinned to its original absolute time
-    /// (`created_at + consensus_timeout`), so the restart neither extends
-    /// nor shortens it.
-    pub(crate) fn replay_session(
-        &mut self,
-        proposal: Proposal,
-        created_at: u64,
-    ) -> Result<(), ConversationError> {
-        let proposal_id = proposal.proposal_id;
-        let expected_voters = proposal.expected_voters_count;
-        let already_voted = proposal.votes.iter().any(|v| v.vote_owner == self.own);
-        let decoded = match ConversationUpdateRequest::decode(proposal.payload.as_slice()) {
-            Ok(req) => Some(req),
-            Err(e) => {
-                debug!(
+    /// A session opened here keeps the consensus-timeout deadline it had, so
+    /// this node resolves the vote no earlier than its holder. One this node
+    /// held already keeps its own deadline.
+    pub(crate) fn admit_sessions(&mut self, mut sessions: Vec<VotingSession>) {
+        sessions.sort_by_key(session_kind);
+        for session in sessions {
+            let Some(proposal) = session.proposal else {
+                continue;
+            };
+            let proposal_id = proposal.proposal_id;
+            match self.admit_proposal(proposal, session.filed_epoch) {
+                Ok(Arrival::Opened) => {
+                    let deadline = Timestamp::from_duration_since_epoch(Duration::from_millis(
+                        session.deadline_ms,
+                    ));
+                    // Absent when the bundled votes already resolved the
+                    // session, or it has a single voter.
+                    if let Some(held) = self.timing.pending_consensus_timeouts.get_mut(&proposal_id)
+                    {
+                        *held = deadline;
+                    }
+                }
+                Ok(Arrival::Ignored) => {}
+                Err(e) => warn!(
+                    conversation = %self.conversation_id,
                     proposal_id,
                     error = %e,
-                    "replayed proposal payload failed to decode; treated as opaque commit"
-                );
-                None
+                    "session dropped"
+                ),
             }
-        };
-
-        let scope = self.conversation_id.clone();
-        self.consensus
-            .process_incoming_proposal(&scope, proposal.clone(), self.now.as_secs())?;
-
-        if let Some(req) = decoded.as_ref() {
-            self.queues.track_voting_proposal(proposal_id, req);
         }
-
-        if expected_voters > 1 {
-            if !already_voted {
-                self.arm_local_vote(proposal_id, decoded)?;
-            }
-            // The deadline stays where it was before the restart: relative
-            // to when the session opened, not to when it was replayed, so a
-            // restarted node resolves the vote no earlier than its peers.
-            self.timing.pending_consensus_timeouts.insert(
-                proposal_id,
-                Timestamp::from_duration_since_epoch(Duration::from_secs(created_at))
-                    + self.config.consensus_timeout,
-            );
-        }
-        Ok(())
     }
 
     /// Arm this member's side of a proposal that expects more than one
@@ -513,16 +592,15 @@ impl<St: EngineStore> Engine<St> {
 
     // ── private ──────────────────────────────────────────────────────
 
-    /// Refuse a proposal that cannot be opened right now. Nothing opens
-    /// outside `Working`, except the steward election that ends `Syncing`; an
-    /// active emergency also blocks lower-priority proposals.
+    /// Refuse a proposal that cannot be opened right now. A proposal opens in
+    /// every phase but `Syncing`, where only the steward election that ends it
+    /// does; an active emergency also blocks lower-priority proposals.
     pub(crate) fn check_proposal_allowed(
         &self,
         kind: ProposalKind,
     ) -> Result<(), ConversationError> {
         let state = self.phase;
-        let allowed_here =
-            state == Phase::Working || (state == Phase::Syncing && kind.is_steward_election());
+        let allowed_here = state != Phase::Syncing || kind.is_steward_election();
         if !allowed_here {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
@@ -531,4 +609,16 @@ impl<St: EngineStore> Engine<St> {
         }
         Ok(())
     }
+}
+
+/// The `ProposalKind` a persisted session's payload decodes to, `Commit`
+/// (the lowest) for one that fails to decode.
+fn session_kind(session: &VotingSession) -> ProposalKind {
+    session
+        .proposal
+        .as_ref()
+        .and_then(|p| ConversationUpdateRequest::decode(p.payload.as_slice()).ok())
+        .as_ref()
+        .map(ProposalKind::of)
+        .unwrap_or(ProposalKind::Commit)
 }

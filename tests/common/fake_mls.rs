@@ -78,7 +78,7 @@ struct Commit {
     seq: u64,
     sender: MemberId,
     actions: Vec<Action>,
-    /// The committer's own leaf update rides the commit itself, never as an
+    /// The committer's own leaf update is carried by the commit itself, never as an
     /// action.
     own_update: bool,
 }
@@ -211,7 +211,7 @@ impl FakeMls {
         MemberId::from(format!("key:{name}").into_bytes())
     }
 
-    /// The key package a name mints; `key_package_identity` reads it back.
+    /// The key package generated for a name; `key_package_identity` reads it back.
     pub fn key_package(name: &str) -> Vec<u8> {
         format!("kp:{name}").into_bytes()
     }

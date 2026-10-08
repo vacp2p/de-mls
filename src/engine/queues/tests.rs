@@ -1,6 +1,8 @@
 use super::*;
-use crate::engine::types::MembershipDelta;
-use crate::protos::de_mls::messages::v1::{ConversationUpdateRequest, ViolationEvidence};
+use crate::engine::types::{Action, ActionKind, MemberId, MembershipDelta};
+use crate::protos::de_mls::messages::v1::{
+    ConversationUpdateRequest, MemberInvite, ViolationEvidence,
+};
 
 fn member(id: u8) -> Vec<u8> {
     vec![id; 20]
@@ -84,9 +86,6 @@ fn test_approved_proposals_preserve_fifo_across_mutations() {
     insert_remove_member(&mut queues, &member(2), 500);
     let order: Vec<ProposalId> = queues.approved_proposals().keys().copied().collect();
     assert_eq!(order, vec![500, 100, 300]);
-
-    queues.drain_approved_proposals();
-    assert!(queues.approved_proposals().is_empty());
 }
 
 fn update_request(owner: &[u8]) -> ConversationUpdateRequest {
@@ -94,23 +93,15 @@ fn update_request(owner: &[u8]) -> ConversationUpdateRequest {
 }
 
 #[test]
-fn has_approved_update_matches_the_owner_only() {
+fn has_approved_change_matches_kind_and_member() {
     let mut queues = EngineQueues::new();
     queues.insert_approved_proposal(1, update_request(&member(2)));
     insert_remove_member(&mut queues, &member(3), 2);
 
-    assert!(queues.has_approved_update(&member(2)));
-    assert!(!queues.has_approved_update(&member(3)));
-}
-
-#[test]
-fn approved_update_members_lists_owners_in_approval_order() {
-    let mut queues = EngineQueues::new();
-    queues.insert_approved_proposal(9, update_request(&member(4)));
-    insert_remove_member(&mut queues, &member(3), 2);
-    queues.insert_approved_proposal(1, update_request(&member(2)));
-
-    assert_eq!(queues.approved_update_members(), vec![member(4), member(2)]);
+    assert!(queues.has_approved_change(ActionKind::Update, &member(2)));
+    assert!(!queues.has_approved_change(ActionKind::Update, &member(3)));
+    assert!(queues.has_approved_change(ActionKind::Remove, &member(3)));
+    assert!(!queues.has_approved_change(ActionKind::Remove, &member(2)));
 }
 
 #[test]
@@ -122,20 +113,41 @@ fn drop_approved_update_removes_only_an_update() {
     assert!(!queues.drop_approved_update(2));
     assert!(!queues.drop_approved_update(9));
     assert!(queues.drop_approved_update(1));
-    assert!(!queues.has_approved_update(&member(2)));
+    assert!(!queues.has_approved_change(ActionKind::Update, &member(2)));
     assert_eq!(queues.approved_proposals().len(), 1);
 }
 
+/// A landed invite and removal and every update are dropped; an invite whose
+/// member did not land stays.
 #[test]
-fn drop_approved_updates_keeps_other_approvals() {
+fn drop_landed_keeps_what_did_not_land() {
     let mut queues = EngineQueues::new();
     queues.insert_approved_proposal(1, update_request(&member(2)));
     insert_remove_member(&mut queues, &member(3), 2);
+    insert_remove_member(&mut queues, &member(4), 3);
+    queues.insert_approved_proposal(
+        4,
+        ConversationUpdateRequest::member_invite(MemberInvite {
+            key_package_bytes: b"kp".to_vec(),
+            member_id: member(5),
+        }),
+    );
+    queues.insert_approved_proposal(
+        5,
+        ConversationUpdateRequest::member_invite(MemberInvite {
+            key_package_bytes: b"kp".to_vec(),
+            member_id: member(6),
+        }),
+    );
 
-    queues.drop_approved_updates();
+    queues.drop_landed(&MembershipDelta {
+        added: vec![member(5)],
+        removed: vec![member(3)],
+    });
 
-    assert_eq!(queues.approved_proposals_count(), 1);
-    assert!(queues.approved_proposals().contains_key(&2));
+    let left: Vec<ProposalId> = queues.approved_proposals().keys().copied().collect();
+    assert_eq!(left, vec![3, 5]);
+    assert!(queues.has_approved_change(ActionKind::Add, &member(6)));
 }
 
 #[test]
@@ -150,25 +162,6 @@ fn test_urgent_commit_target_set_take_clears() {
     let taken = queues.take_urgent_commit_target().unwrap();
     assert_eq!(taken, target);
     assert!(queues.urgent_commit_target().is_none());
-}
-
-#[test]
-fn test_drop_approved_removals_for_target() {
-    let mut queues = EngineQueues::new();
-    let victim = member(7);
-    let bystander = member(9);
-
-    insert_remove_member(&mut queues, &victim, 100);
-    insert_remove_member(&mut queues, &victim, 101);
-    insert_remove_member(&mut queues, &bystander, 200);
-    assert_eq!(queues.approved_proposals_count(), 3);
-
-    queues.drop_approved_removals_for(&victim);
-
-    assert_eq!(queues.approved_proposals_count(), 1);
-    assert!(queues.approved_proposals().contains_key(&200));
-    assert!(!queues.approved_proposals().contains_key(&100));
-    assert!(!queues.approved_proposals().contains_key(&101));
 }
 
 /// A score-below-threshold removal is a live change for its target across
@@ -190,19 +183,19 @@ fn score_removal_target_stays_covered_through_its_lifecycle() {
 
     // Voting: the ECP hasn't produced a RemoveMember yet, but the target is
     // already covered — the blind spot the ECP-aware index closes.
-    queues.track_voting_proposal(proposal_id, &request);
+    queues.track_voting_proposal(proposal_id, &request, 0);
     assert!(queues.is_voting(proposal_id));
     assert!(
         queues.active_proposal_targets().contains(target.as_slice()),
         "the in-flight ECP already covers its target"
     );
-    assert!(!queues.has_approved_removal(&target));
+    assert!(!queues.has_approved_change(ActionKind::Remove, &target));
 
     // Resolved: the ECP transforms into a queued RemoveMember, and the
     // target stays covered with no gap.
     queues.remove_voting_proposal(proposal_id);
     queues.insert_approved_proposal(proposal_id, remove_request(&target));
-    assert!(queues.has_approved_removal(&target));
+    assert!(queues.has_approved_change(ActionKind::Remove, &target));
     assert!(
         queues.active_proposal_targets().contains(target.as_slice()),
         "the queued RemoveMember still covers the target"
@@ -226,9 +219,9 @@ fn steward_eligibility_skips_non_members_and_queued_removals() {
     assert!(!eligible(&outsider));
 }
 
-/// The join epoch is per member id and survives every later commit, so a
-/// sync recomputing the unsettled set at a past epoch gets the same answer.
-/// A departure drops the entry, so a re-join is unsettled again.
+/// One applied delta drops the leaver's queued removal, marks the joiner
+/// unsettled in its join epoch and settled from the next, and leaves an
+/// untracked id settled.
 #[test]
 fn membership_bookkeeping_tracks_join_epochs_and_clears_departures() {
     let mut queues = EngineQueues::new();
@@ -243,9 +236,9 @@ fn membership_bookkeeping_tracks_join_epochs_and_clears_departures() {
         added: vec![joiner.clone()],
         removed: vec![leaver.clone()],
     };
-    queues.apply_membership_delta_bookkeeping(5, &delta);
+    queues.apply_membership_delta(5, &delta);
 
-    assert!(!queues.has_approved_removal(&leaver));
+    assert!(!queues.has_approved_change(ActionKind::Remove, &leaver));
     assert!(queues.is_settled(&leaver, 5), "an untracked id is settled");
 
     assert!(
@@ -257,4 +250,115 @@ fn membership_bookkeeping_tracks_join_epochs_and_clears_departures() {
         queues.settled_members(std::slice::from_ref(&joiner), 6),
         vec![joiner]
     );
+}
+
+fn invite_request(joiner: u8) -> ConversationUpdateRequest {
+    ConversationUpdateRequest::member_invite(MemberInvite {
+        key_package_bytes: format!("kp:{joiner}").into_bytes(),
+        member_id: member(joiner),
+    })
+}
+
+fn add_action(joiner: u8) -> Action {
+    Action::Add {
+        member: MemberId::from(member(joiner)),
+        key_package: format!("kp:{joiner}").into_bytes(),
+    }
+}
+
+fn remove_action(target: u8) -> Action {
+    Action::Remove {
+        member: MemberId::from(member(target)),
+    }
+}
+
+fn update_action(owner: u8) -> Action {
+    Action::Update {
+        member: MemberId::from(member(owner)),
+    }
+}
+
+/// Under an urgent target only the target's removal is allowed alone; once
+/// the target is taken, the rest of the approved set is allowed again.
+#[test]
+fn an_urgent_candidate_matches_the_target_removal_alone() {
+    let mut queues = EngineQueues::new();
+    queues.insert_approved_proposal(7, invite_request(4));
+    insert_remove_member(&mut queues, &member(3), 8);
+    queues.set_urgent_commit_target(member(3));
+
+    assert!(queues.actions_within_approved(&member(1), &[remove_action(3)]));
+    assert!(!queues.actions_within_approved(&member(1), &[add_action(4), remove_action(3)]));
+
+    queues.take_urgent_commit_target();
+    assert!(queues.actions_within_approved(&member(1), &[add_action(4), remove_action(3)]));
+}
+
+/// A commit carrying exactly the approved update and invite is valid.
+#[test]
+fn a_commit_matching_the_approved_updates_is_valid() {
+    let mut queues = EngineQueues::new();
+    queues.insert_approved_proposal(7, update_request(&member(2)));
+    queues.insert_approved_proposal(8, invite_request(3));
+    assert!(queues.actions_within_approved(&member(1), &[update_action(2), add_action(3)]));
+}
+
+/// A commit carrying only part of the approved set is valid.
+#[test]
+fn a_commit_carrying_a_subset_of_the_approved_set_is_valid() {
+    let mut queues = EngineQueues::new();
+    queues.insert_approved_proposal(7, update_request(&member(2)));
+    queues.insert_approved_proposal(8, invite_request(3));
+    assert!(queues.actions_within_approved(&member(1), &[add_action(3)]));
+}
+
+/// A commit carrying an update nobody approved is invalid.
+#[test]
+fn a_commit_carrying_an_unapproved_update_is_invalid() {
+    let mut queues = EngineQueues::new();
+    queues.insert_approved_proposal(8, invite_request(3));
+    assert!(!queues.actions_within_approved(&member(1), &[update_action(2), add_action(3)]));
+}
+
+/// An approved update owned by the commit's sender is carried by the commit
+/// itself, so it is not allowed as an action; for any other sender it is.
+#[test]
+fn the_senders_own_update_is_not_allowed_as_an_action() {
+    let mut queues = EngineQueues::new();
+    queues.insert_approved_proposal(7, update_request(&member(1)));
+    let carried = [update_action(1)];
+    assert!(!queues.actions_within_approved(&member(1), &carried));
+    assert!(queues.actions_within_approved(&member(2), &carried));
+}
+
+/// A commit must carry something approved. Empty, it is invalid; empty but
+/// from a sender whose own update is approved, it carries that update; in an
+/// urgent round the own update does not count and empty stays invalid.
+#[test]
+fn an_empty_commit_is_invalid_unless_it_carries_the_senders_update() {
+    let mut queues = EngineQueues::new();
+    assert!(!queues.actions_within_approved(&member(1), &[]));
+
+    queues.insert_approved_proposal(7, update_request(&member(1)));
+    assert!(queues.actions_within_approved(&member(1), &[]));
+    assert!(!queues.actions_within_approved(&member(2), &[]));
+
+    insert_remove_member(&mut queues, &member(3), 8);
+    queues.set_urgent_commit_target(member(3));
+    assert!(!queues.actions_within_approved(&member(1), &[]));
+}
+
+/// With both an update and the target's removal approved, a commit carrying
+/// the pair is rejected while the urgent target is set and accepted once it
+/// is taken.
+#[test]
+fn an_urgent_round_with_an_update_is_invalid() {
+    let mut queues = EngineQueues::new();
+    queues.insert_approved_proposal(7, update_request(&member(2)));
+    insert_remove_member(&mut queues, &member(3), 8);
+    queues.set_urgent_commit_target(member(3));
+    assert!(!queues.actions_within_approved(&member(1), &[update_action(2), remove_action(3)]));
+
+    queues.take_urgent_commit_target();
+    assert!(queues.actions_within_approved(&member(1), &[update_action(2), remove_action(3)]));
 }

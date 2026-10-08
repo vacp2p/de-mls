@@ -34,12 +34,13 @@ pub struct FakeRouter {
     /// Set once `Decision::Leave` ran.
     pub left: bool,
     /// Announcements the router holds because `propose_add` refused with
-    /// `ConversationBlocked` — retried once an `Event::PhaseChange(Phase::Working)`
-    /// is drained. The engine keeps no memory of these; the router does.
-    pending_announcements: Vec<(MemberId, Vec<u8>)>,
+    /// `ConversationBlocked` (the engine was `Syncing`) — retried once an
+    /// `Event::PhaseChange(Phase::Working)` is drained. The engine keeps no
+    /// memory of these; the router does.
+    held_announcements: Vec<(MemberId, Vec<u8>)>,
     /// Candidates the router holds because `handle_candidate` refused with
     /// `ConversationBlocked` (the engine was `Syncing`) — retried the same
-    /// way as `pending_announcements`.
+    /// way as `held_announcements`.
     held_candidates: Vec<(CommitHash, StagedFacts)>,
     /// The candidates the engine rejected as not the epoch steward's, kept
     /// staged until the epoch merges. After `StewardSkipped` or
@@ -112,7 +113,7 @@ impl FakeRouter {
             chats: Vec::new(),
             next_wakeup: None,
             left: false,
-            pending_announcements: Vec::new(),
+            held_announcements: Vec::new(),
             held_candidates: Vec::new(),
             rejected_commits: Vec::new(),
             staged_hashes: HashSet::new(),
@@ -126,13 +127,18 @@ impl FakeRouter {
     }
 
     /// Announce a key package for `member`, the router's job: hold
-    /// it and propose it right away. A `ConversationBlocked` refusal (a
-    /// commit round is open) keeps it parked until this router drains
+    /// it and propose it right away. A `ConversationBlocked` refusal (the
+    /// engine is `Syncing`) keeps it held until this router drains
     /// `Event::PhaseChange(Phase::Working)`.
     pub fn announce(&mut self, now: Timestamp, member: MemberId, key_package: Vec<u8>) {
-        self.pending_announcements.push((member, key_package));
+        self.held_announcements.push((member, key_package));
         let out = self.propose_announced(now);
         self.drive(now, out);
+    }
+
+    /// Announcements the router holds because `propose_add` was refused.
+    pub fn held_announcements_count(&self) -> usize {
+        self.held_announcements.len()
     }
 
     /// Change this member's own leaf: sign the update on the group and file
@@ -162,18 +168,18 @@ impl FakeRouter {
         }
     }
 
-    /// `propose_add` for every held announcement; one refused because a
-    /// round is open stays held.
+    /// `propose_add` for every held announcement; one refused because the
+    /// engine is `Syncing` stays held.
     fn propose_announced(&mut self, now: Timestamp) -> Output {
         let mut out = Output::default();
-        for (member, key_package) in std::mem::take(&mut self.pending_announcements) {
+        for (member, key_package) in std::mem::take(&mut self.held_announcements) {
             match self
                 .engine
                 .propose_add(now, member.clone(), key_package.clone())
             {
                 Ok(o) => out.merge(o),
                 Err(de_mls::ConversationError::ConversationBlocked(_)) => {
-                    self.pending_announcements.push((member, key_package));
+                    self.held_announcements.push((member, key_package));
                 }
                 Err(e) => panic!("announce: propose_add failed: {e}"),
             }
@@ -299,7 +305,7 @@ impl FakeRouter {
         )
         .expect("engine restore");
         self.engine = engine;
-        self.pending_announcements.clear();
+        self.held_announcements.clear();
         self.rejected_commits.clear();
         self.staged_hashes.clear();
         self.pending_update = false;
@@ -587,7 +593,7 @@ impl FakeRouter {
             .map_err(de_mls::ConversationError::InvalidConfig)
     }
 
-    /// Queue the welcome minted for `hash` for its joiners. It carries only
+    /// Queue the welcome the build of `hash` returned for its joiners. It carries only
     /// the group snapshot: the joiners' sync arrives as an ordinary control
     /// message once the epoch steward broadcasts it.
     pub fn deliver_welcome(&mut self, hash: CommitHash) {

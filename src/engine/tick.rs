@@ -201,7 +201,7 @@ mod tests {
             .with_creator(b"alice".to_vec())
             .into_update_request()
             .unwrap();
-        e.queues.track_voting_proposal(9, &emergency);
+        e.queues.track_voting_proposal(9, &emergency, 0);
 
         let window = e.config.commit_batch_window;
         e.tick(at(0)).unwrap();
