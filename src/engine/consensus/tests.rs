@@ -14,7 +14,11 @@ use crate::{
         consensus::{MemberSigner, wire::authorize_fast_path_proposal},
         handle::Engine,
         store::InMemoryStore,
-        types::{Decision, DecisionFailure, Event, MemberId, Outbound, Output, Timestamp, Verdict},
+        test_support::founder,
+        types::{
+            ActionKind, Decision, DecisionFailure, Event, MemberId, Outbound, Output, Timestamp,
+            Verdict,
+        },
         util::single_voter_proposal_id,
     },
     protos::de_mls::messages::v1::{
@@ -86,7 +90,7 @@ fn proposal_from_a_different_sender_is_dropped() {
     let proposal = peer_proposal(&member(2), 7, &request, 4);
 
     engine
-        .on_incoming_proposal(&member(3), proposal)
+        .on_incoming_proposal(&member(3), proposal, engine.epoch())
         .expect("dropped, not an error");
 
     assert!(engine.out.events.is_empty());
@@ -103,7 +107,7 @@ fn single_voter_proposal_is_only_allowed_for_self_removal() {
     let proposal = peer_proposal(&member(2), 8, &request, 1);
 
     engine
-        .on_incoming_proposal(&member(2), proposal)
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
         .expect("dropped, not an error");
 
     assert!(!engine.queues.is_voting(8));
@@ -111,7 +115,7 @@ fn single_voter_proposal_is_only_allowed_for_self_removal() {
     let request = ConversationUpdateRequest::remove_member(member(2));
     let proposal = peer_proposal(&member(2), 9, &request, 1);
     engine
-        .on_incoming_proposal(&member(2), proposal)
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
         .expect("self-removal accepted");
     assert!(engine.queues.is_voting(9));
 }
@@ -125,7 +129,9 @@ fn incoming_invite_asks_for_validation_before_voting() {
     let request = invite_request(&member(9));
     let proposal = peer_proposal(&member(2), 11, &request, 4);
 
-    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
+        .unwrap();
 
     assert!(matches!(
         engine.out.decisions.as_slice(),
@@ -145,6 +151,54 @@ fn incoming_invite_asks_for_validation_before_voting() {
     assert!(engine.timing.pending_consensus_timeouts.contains_key(&11));
 }
 
+/// A second sighting of a proposal in flight is a no-op: no error, no second
+/// key-package check, no second deadline.
+#[test]
+fn a_second_sighting_of_a_proposal_changes_nothing() {
+    let mut engine = engine();
+    let request = invite_request(&member(9));
+    let proposal = peer_proposal(&member(2), 11, &request, 4);
+    engine
+        .on_incoming_proposal(&member(2), proposal.clone(), engine.epoch())
+        .unwrap();
+    let deadline = engine.timing.pending_consensus_timeouts[&11];
+    engine.out = Output::default();
+    engine.begin(Timestamp::ZERO + Duration::from_secs(5));
+
+    engine
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
+        .expect("a duplicate is not an error");
+
+    assert!(engine.out.events.is_empty());
+    assert!(engine.out.decisions.is_empty());
+    assert_eq!(engine.timing.pending_consensus_timeouts[&11], deadline);
+}
+
+/// A copy arriving after its outcome was applied opens no session.
+#[test]
+fn a_copy_arriving_after_its_outcome_opens_no_session() {
+    let mut engine = engine();
+    let request = invite_request(&member(9));
+    let proposal = peer_proposal(&member(2), 11, &request, 4);
+    engine.queues.mark_consensus_outcome_applied(11);
+
+    engine
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
+        .expect("a late copy is not an error");
+
+    assert!(!engine.queues.is_voting(11));
+    assert!(engine.out.decisions.is_empty());
+    assert!(
+        engine
+            .consensus
+            .storage()
+            .list_scope_sessions(&engine.conversation_id)
+            .unwrap()
+            .unwrap_or_default()
+            .is_empty()
+    );
+}
+
 /// A passing key package releases the vote: the request reaches the
 /// router and the auto-vote timer arms.
 #[test]
@@ -152,7 +206,9 @@ fn key_package_pass_releases_the_vote() {
     let mut engine = engine();
     let request = invite_request(&member(9));
     let proposal = peer_proposal(&member(2), 12, &request, 4);
-    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
+        .unwrap();
     engine.out = Output::default();
 
     let out = engine
@@ -174,7 +230,9 @@ fn key_package_failure_votes_no() {
     let mut engine = engine();
     let request = invite_request(&member(9));
     let proposal = peer_proposal(&member(2), 13, &request, 4);
-    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
+        .unwrap();
     engine.out = Output::default();
 
     let out = engine
@@ -192,7 +250,9 @@ fn vote_from_a_different_sender_is_dropped() {
     let mut engine = engine();
     let request = ConversationUpdateRequest::remove_member(member(4));
     let proposal = peer_proposal(&member(2), 14, &request, 4);
-    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
+        .unwrap();
 
     let vote = Vote {
         proposal_id: 14,
@@ -222,11 +282,13 @@ fn partial_freeze_drops_lower_priority_proposals() {
         .with_creator(member(1))
         .into_update_request()
         .unwrap();
-    engine.queues.track_voting_proposal(1, &deadlock_request);
+    engine.queues.track_voting_proposal(1, &deadlock_request, 0);
     let request = ConversationUpdateRequest::remove_member(member(4));
     let proposal = peer_proposal(&member(2), 15, &request, 4);
 
-    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
+        .unwrap();
 
     assert!(!engine.queues.is_voting(15));
     assert!(engine.out.events.is_empty());
@@ -244,7 +306,9 @@ fn failed_emergency_scores_nobody_and_lifts_the_freeze() {
         .unwrap();
     let proposal_id = 17;
     let proposal = peer_proposal(&member(2), proposal_id, &request, 4);
-    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
+        .unwrap();
     assert!(engine.queues.has_active_emergency());
     engine.out = Output::default();
 
@@ -288,7 +352,9 @@ fn auto_vote_fires_at_its_deadline() {
     let mut engine = engine();
     let request = ConversationUpdateRequest::remove_member(member(4));
     let proposal = peer_proposal(&member(2), 16, &request, 4);
-    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
+        .unwrap();
     engine.out = Output::default();
 
     let fire_at = engine.timing.pending_auto_votes[&16].fire_at;
@@ -314,7 +380,9 @@ fn a_replayed_proposal_arms_only_its_timeout() {
 
     let request = ConversationUpdateRequest::remove_member(member(4));
     let proposal = peer_proposal(&member(2), 20, &request, 2);
-    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
+        .unwrap();
 
     assert!(
         !engine
@@ -359,7 +427,9 @@ fn past_the_horizon_the_engine_votes_again() {
 
     let request = ConversationUpdateRequest::remove_member(member(4));
     let proposal = peer_proposal(&member(2), 21, &request, 4);
-    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
+        .unwrap();
 
     assert!(
         engine
@@ -371,6 +441,35 @@ fn past_the_horizon_the_engine_votes_again() {
     assert!(engine.timing.pending_auto_votes.contains_key(&21));
 }
 
+/// Skipping the silent epoch steward records the skip and names the
+/// steward in `StewardSkipped`; the rotation then hands the role to the
+/// next eligible steward.
+#[test]
+fn skipping_the_epoch_steward_moves_the_role_to_the_next() {
+    let mut e = founder();
+    e.begin(Timestamp::ZERO);
+    let eligible = e.queues.steward_eligibility(&e.members);
+    let es = e
+        .steward_list
+        .epoch_steward(e.epoch, &eligible)
+        .unwrap()
+        .to_vec();
+    drop(eligible);
+
+    e.skip_silent_epoch_steward();
+    let out = e.finish().unwrap();
+
+    assert!(out.events.iter().any(|ev| matches!(
+        ev,
+        Event::StewardSkipped { steward, .. } if steward.as_bytes() == es.as_slice()
+    )));
+    assert!(e.queues.skipped_stewards().contains(&es));
+
+    let eligible = e.queues.steward_eligibility(&e.members);
+    let next = e.steward_list.epoch_steward(e.epoch, &eligible).unwrap();
+    assert_ne!(next, es.as_slice(), "the next eligible steward takes over");
+}
+
 /// What a resolved proposal does to the queues, and the follow-up it owes.
 mod outcome_application {
     use crate::{
@@ -378,7 +477,7 @@ mod outcome_application {
             consensus::apply::{ApplyOutcome, apply_outcome},
             queues::EngineQueues,
             test_support::founder,
-            types::{Event, Timestamp, Verdict},
+            types::{ActionKind, Event, Timestamp, Verdict},
         },
         peer_scoring::emergency_score_ops,
         protos::de_mls::messages::v1::{
@@ -394,6 +493,11 @@ mod outcome_application {
 
     fn members(ids: &[u8]) -> Vec<Vec<u8>> {
         ids.iter().map(|&id| member(id)).collect()
+    }
+
+    /// The member set the apply tests run against: members 1 and 7.
+    fn seated() -> Vec<Vec<u8>> {
+        members(&[1, 7])
     }
 
     fn election_request(stewards: Vec<Vec<u8>>, epoch: u64) -> ConversationUpdateRequest {
@@ -437,9 +541,15 @@ mod outcome_application {
         let request = election_request(list.members().to_vec(), 10);
 
         let proposal_id = 42;
-        queues.track_voting_proposal(proposal_id, &request);
+        queues.track_voting_proposal(proposal_id, &request, 0);
 
-        let result = apply_outcome(&mut queues, proposal_id, Verdict::Approved, &request);
+        let result = apply_outcome(
+            &mut queues,
+            &seated(),
+            proposal_id,
+            Verdict::Approved,
+            &request,
+        );
 
         let ApplyOutcome::ElectionAccepted(outcome) = result else {
             panic!("expected ElectionAccepted, got {result:?}");
@@ -459,9 +569,9 @@ mod outcome_application {
             let request = election_request(vec![member(1), member(2)], 10);
 
             let proposal_id = 43;
-            queues.track_voting_proposal(proposal_id, &request);
+            queues.track_voting_proposal(proposal_id, &request, 0);
 
-            let result = apply_outcome(&mut queues, proposal_id, verdict, &request);
+            let result = apply_outcome(&mut queues, &seated(), proposal_id, verdict, &request);
 
             assert!(
                 matches!(result, ApplyOutcome::ElectionDropped),
@@ -480,13 +590,25 @@ mod outcome_application {
 
         let first_id = 10;
         let request = remove_request(target.clone());
-        let first_result = apply_outcome(&mut queues, first_id, Verdict::Approved, &request);
+        let first_result = apply_outcome(
+            &mut queues,
+            &seated(),
+            first_id,
+            Verdict::Approved,
+            &request,
+        );
         assert!(matches!(first_result, ApplyOutcome::QueuedRemoval { .. }));
         assert_eq!(queues.approved_proposals_count(), 1);
 
         let second_id = 11;
         let request = remove_request(target.clone());
-        let result = apply_outcome(&mut queues, second_id, Verdict::Approved, &request);
+        let result = apply_outcome(
+            &mut queues,
+            &seated(),
+            second_id,
+            Verdict::Approved,
+            &request,
+        );
 
         assert!(matches!(result, ApplyOutcome::NoAction));
         assert_eq!(
@@ -498,31 +620,6 @@ mod outcome_application {
         assert!(!queues.approved_proposals().contains_key(&second_id));
     }
 
-    /// Removal dedup clears the duplicate's voting entry so the queue does
-    /// not retain an outcome we deliberately discarded.
-    #[test]
-    fn removal_dedup_clears_voting_entry() {
-        let mut queues = EngineQueues::new();
-        let target = member(7);
-
-        let pending_id = 20;
-        queues.insert_approved_proposal(pending_id, remove_request(target.clone()));
-
-        let dup_id = 21;
-        let dup_request = remove_request(target.clone());
-        queues.track_voting_proposal(dup_id, &dup_request);
-
-        let result = apply_outcome(&mut queues, dup_id, Verdict::Approved, &dup_request);
-
-        assert!(matches!(result, ApplyOutcome::NoAction));
-        assert_eq!(queues.approved_proposals_count(), 1);
-        assert!(queues.approved_proposals().contains_key(&pending_id));
-        assert!(
-            !queues.is_voting(dup_id),
-            "duplicate must be cleared from voting queue"
-        );
-    }
-
     #[test]
     fn ecp_score_below_threshold_yes_returns_urgent_removal() {
         let mut queues = EngineQueues::new();
@@ -530,7 +627,7 @@ mod outcome_application {
 
         let request = score_below_threshold_request(target.clone(), member(1));
 
-        let result = apply_outcome(&mut queues, 100, Verdict::Approved, &request);
+        let result = apply_outcome(&mut queues, &seated(), 100, Verdict::Approved, &request);
 
         let ApplyOutcome::UrgentRemoval { target: out_target } = result else {
             panic!("expected UrgentRemoval, got {result:?}");
@@ -549,7 +646,7 @@ mod outcome_application {
         let mut queues = EngineQueues::new();
 
         let request = deadlock_request(member(1));
-        let result = apply_outcome(&mut queues, 200, Verdict::Approved, &request);
+        let result = apply_outcome(&mut queues, &seated(), 200, Verdict::Approved, &request);
 
         assert!(matches!(result, ApplyOutcome::DeadlockAccepted));
         assert_eq!(
@@ -576,8 +673,8 @@ mod outcome_application {
         ] {
             for verdict in [Verdict::Rejected, Verdict::Failed] {
                 let mut queues = EngineQueues::new();
-                queues.track_voting_proposal(201, &request);
-                let result = apply_outcome(&mut queues, 201, verdict, &request);
+                queues.track_voting_proposal(201, &request, 0);
+                let result = apply_outcome(&mut queues, &seated(), 201, verdict, &request);
 
                 assert!(
                     matches!(result, ApplyOutcome::NoAction),
@@ -602,9 +699,9 @@ mod outcome_application {
     fn approved_emergency_lifts_partial_freeze() {
         let mut queues = EngineQueues::new();
         let request = deadlock_request(member(1));
-        queues.track_voting_proposal(202, &request);
+        queues.track_voting_proposal(202, &request, 0);
 
-        let result = apply_outcome(&mut queues, 202, Verdict::Approved, &request);
+        let result = apply_outcome(&mut queues, &seated(), 202, Verdict::Approved, &request);
 
         assert!(matches!(result, ApplyOutcome::DeadlockAccepted));
         assert!(!queues.has_active_emergency());
@@ -618,9 +715,15 @@ mod outcome_application {
         let request = remove_request(member(7));
 
         let proposal_id = 70;
-        queues.track_voting_proposal(proposal_id, &request);
+        queues.track_voting_proposal(proposal_id, &request, 0);
 
-        apply_outcome(&mut queues, proposal_id, Verdict::Approved, &request);
+        apply_outcome(
+            &mut queues,
+            &seated(),
+            proposal_id,
+            Verdict::Approved,
+            &request,
+        );
 
         assert!(emergency_score_ops(&request, Verdict::Approved).is_empty());
         assert_eq!(queues.approved_proposals_count(), 1);
@@ -639,9 +742,15 @@ mod outcome_application {
             .unwrap();
 
         let proposal_id = 300;
-        queues.track_voting_proposal(proposal_id, &request);
+        queues.track_voting_proposal(proposal_id, &request, 0);
 
-        apply_outcome(&mut queues, proposal_id, Verdict::Approved, &request);
+        apply_outcome(
+            &mut queues,
+            &seated(),
+            proposal_id,
+            Verdict::Approved,
+            &request,
+        );
 
         assert_eq!(
             queues.approved_proposals_count(),
@@ -667,41 +776,116 @@ mod outcome_application {
         };
 
         let mut queues = EngineQueues::new();
-        apply_outcome(&mut queues, 1, Verdict::Approved, &invite(b"kp-a"));
+        apply_outcome(
+            &mut queues,
+            &seated(),
+            1,
+            Verdict::Approved,
+            &invite(b"kp-a"),
+        );
         assert_eq!(queues.approved_proposals_count(), 1);
 
-        let result = apply_outcome(&mut queues, 2, Verdict::Approved, &invite(b"kp-b"));
+        let result = apply_outcome(
+            &mut queues,
+            &seated(),
+            2,
+            Verdict::Approved,
+            &invite(b"kp-b"),
+        );
         assert!(matches!(result, ApplyOutcome::NoAction));
         assert_eq!(queues.approved_proposals_count(), 1);
     }
 
-    /// A `Deadlock` YES skips the epoch steward for this epoch: the skip is
-    /// recorded, `StewardSkipped` names it, and the rotation then hands the
-    /// role to the next eligible steward.
+    fn invite_request(joiner: &[u8]) -> ConversationUpdateRequest {
+        use crate::protos::de_mls::messages::v1::MemberInvite;
+        ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::MemberInvite(
+                MemberInvite {
+                    key_package_bytes: b"kp".to_vec(),
+                    member_id: joiner.to_vec(),
+                },
+            )),
+        }
+    }
+
+    fn update_request(owner: &[u8]) -> ConversationUpdateRequest {
+        ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::LeafUpdate(
+                crate::protos::de_mls::messages::v1::LeafUpdate {
+                    member_id: owner.to_vec(),
+                    ..Default::default()
+                },
+            )),
+        }
+    }
+
+    /// An approved invite for a member already seated is dropped as stale: it queues
+    /// nothing.
     #[test]
-    fn deadlock_accepted_skips_the_epoch_steward_and_moves_to_the_next() {
-        let mut e = founder();
-        e.begin(Timestamp::ZERO);
-        let eligible = e.queues.steward_eligibility(&e.members);
-        let es = e
-            .steward_list
-            .epoch_steward(e.epoch, &eligible)
-            .unwrap()
-            .to_vec();
-        drop(eligible);
+    fn an_invite_for_a_seated_member_is_stale() {
+        let mut queues = EngineQueues::new();
+        let result = apply_outcome(
+            &mut queues,
+            &seated(),
+            1,
+            Verdict::Approved,
+            &invite_request(&member(7)),
+        );
+        assert!(matches!(result, ApplyOutcome::NoAction));
+        assert_eq!(queues.approved_proposals_count(), 0);
+    }
 
-        e.skip_silent_epoch_steward();
-        let out = e.finish().unwrap();
+    /// An approved removal of a member not in the set is dropped as stale.
+    #[test]
+    fn a_removal_of_an_absent_member_is_stale() {
+        let mut queues = EngineQueues::new();
+        let result = apply_outcome(
+            &mut queues,
+            &seated(),
+            1,
+            Verdict::Approved,
+            &remove_request(member(9)),
+        );
+        assert!(matches!(result, ApplyOutcome::NoAction));
+        assert_eq!(queues.approved_proposals_count(), 0);
+    }
 
-        assert!(out.events.iter().any(|ev| matches!(
-            ev,
-            Event::StewardSkipped { steward, .. } if steward.as_bytes() == es.as_slice()
-        )));
-        assert!(e.queues.skipped_stewards().contains(&es));
+    /// A below-threshold emergency against an absent member queues no
+    /// removal and sets no urgent target.
+    #[test]
+    fn an_emergency_against_an_absent_member_is_stale() {
+        let mut queues = EngineQueues::new();
+        let request = score_below_threshold_request(member(9), member(1));
+        let result = apply_outcome(&mut queues, &seated(), 1, Verdict::Approved, &request);
+        assert!(matches!(result, ApplyOutcome::NoAction));
+        assert_eq!(queues.approved_proposals_count(), 0);
+        assert!(queues.urgent_commit_target().is_none());
+    }
 
-        let eligible = e.queues.steward_eligibility(&e.members);
-        let next = e.steward_list.epoch_steward(e.epoch, &eligible).unwrap();
-        assert_ne!(next, es.as_slice(), "the next eligible steward takes over");
+    /// An update and a removal of the same member end with the removal
+    /// queued and no update, whichever lands first.
+    #[test]
+    fn a_removal_and_an_update_of_one_member_leave_the_removal() {
+        let target = member(7);
+        let orders: [[(u32, ConversationUpdateRequest); 2]; 2] = [
+            [
+                (1, update_request(&target)),
+                (2, remove_request(target.clone())),
+            ],
+            [
+                (1, remove_request(target.clone())),
+                (2, update_request(&target)),
+            ],
+        ];
+        for order in orders {
+            let mut queues = EngineQueues::new();
+            for (id, request) in &order {
+                apply_outcome(&mut queues, &seated(), *id, Verdict::Approved, request);
+            }
+            assert!(queues.has_approved_change(ActionKind::Remove, &target));
+            assert!(!queues.has_approved_change(ActionKind::Update, &target));
+            assert_eq!(queues.approved_proposals_count(), 1);
+        }
     }
 
     /// An election installed while an ask is pending settles it: the node
@@ -758,7 +942,9 @@ fn incoming_update_is_approved_and_asks_for_a_check() {
     let proposal = update_proposal(&member(2), &member(2), b"upd");
     let id = proposal.proposal_id;
 
-    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
+        .unwrap();
     let out = engine.finish().unwrap();
 
     assert!(matches!(
@@ -766,7 +952,11 @@ fn incoming_update_is_approved_and_asks_for_a_check() {
         [Decision::ValidateUpdate { proposal_id, member: who, update }]
             if *proposal_id == id && *who == MemberId::from(member(2)) && update == b"upd"
     ));
-    assert!(engine.queues.has_approved_update(&member(2)));
+    assert!(
+        engine
+            .queues
+            .has_approved_change(ActionKind::Update, &member(2))
+    );
     assert!(out.events.iter().any(|e| matches!(
         e,
         Event::ConsensusReached { proposal_id, verdict: Verdict::Approved, .. } if *proposal_id == id
@@ -778,12 +968,18 @@ fn a_passed_update_check_leaves_the_update_approved() {
     let mut engine = engine();
     let proposal = update_proposal(&member(2), &member(2), b"upd");
     let id = proposal.proposal_id;
-    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
+        .unwrap();
     engine.finish().unwrap();
 
     let out = engine.update_checked(Timestamp::ZERO, id, true).unwrap();
 
-    assert!(engine.queues.has_approved_update(&member(2)));
+    assert!(
+        engine
+            .queues
+            .has_approved_change(ActionKind::Update, &member(2))
+    );
     assert!(out.is_empty());
 }
 
@@ -792,12 +988,18 @@ fn a_failed_update_check_takes_the_update_out() {
     let mut engine = engine();
     let proposal = update_proposal(&member(2), &member(2), b"upd");
     let id = proposal.proposal_id;
-    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
+        .unwrap();
     engine.finish().unwrap();
 
     let out = engine.update_checked(Timestamp::ZERO, id, false).unwrap();
 
-    assert!(!engine.queues.has_approved_update(&member(2)));
+    assert!(
+        !engine
+            .queues
+            .has_approved_change(ActionKind::Update, &member(2))
+    );
     assert!(out.decisions.is_empty());
 }
 
@@ -805,15 +1007,24 @@ fn a_failed_update_check_takes_the_update_out() {
 fn a_second_update_from_the_same_member_is_dropped() {
     let mut engine = engine();
     let first = update_proposal(&member(2), &member(2), b"first");
-    engine.on_incoming_proposal(&member(2), first).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), first, engine.epoch())
+        .unwrap();
     engine.finish().unwrap();
 
     let second = update_proposal(&member(2), &member(2), b"second");
-    engine.on_incoming_proposal(&member(2), second).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), second, engine.epoch())
+        .unwrap();
     let out = engine.finish().unwrap();
 
     assert!(out.decisions.is_empty());
-    assert_eq!(engine.queues.approved_update_members(), vec![member(2)]);
+    assert_eq!(engine.queues.approved_proposals_count(), 1);
+    assert!(
+        engine
+            .queues
+            .has_approved_change(ActionKind::Update, &member(2))
+    );
 }
 
 /// A check the router could not run takes the update out: its owner can
@@ -822,7 +1033,9 @@ fn a_second_update_from_the_same_member_is_dropped() {
 fn a_failed_update_decision_lets_the_member_file_again() {
     let mut engine = engine();
     let first = update_proposal(&member(2), &member(2), b"first");
-    engine.on_incoming_proposal(&member(2), first).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), first, engine.epoch())
+        .unwrap();
     let out = engine.finish().unwrap();
     let decision = out.decisions[0].clone();
 
@@ -835,16 +1048,26 @@ fn a_failed_update_decision_lets_the_member_file_again() {
             },
         )
         .unwrap();
-    assert!(!engine.queues.has_approved_update(&member(2)));
+    assert!(
+        !engine
+            .queues
+            .has_approved_change(ActionKind::Update, &member(2))
+    );
 
     let second = update_proposal(&member(2), &member(2), b"second");
-    engine.on_incoming_proposal(&member(2), second).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), second, engine.epoch())
+        .unwrap();
     let out = engine.finish().unwrap();
     assert!(matches!(
         out.decisions.as_slice(),
         [Decision::ValidateUpdate { .. }]
     ));
-    assert!(engine.queues.has_approved_update(&member(2)));
+    assert!(
+        engine
+            .queues
+            .has_approved_change(ActionKind::Update, &member(2))
+    );
 }
 
 #[test]
@@ -853,9 +1076,15 @@ fn a_multi_voter_leaf_update_is_dropped() {
     let request = ConversationUpdateRequest::leaf_update(member(2), b"upd".to_vec());
     let proposal = peer_proposal(&member(2), 31, &request, 4);
 
-    engine.on_incoming_proposal(&member(2), proposal).unwrap();
+    engine
+        .on_incoming_proposal(&member(2), proposal, engine.epoch())
+        .unwrap();
 
     assert!(engine.out.decisions.is_empty());
-    assert!(!engine.queues.has_approved_update(&member(2)));
+    assert!(
+        !engine
+            .queues
+            .has_approved_change(ActionKind::Update, &member(2))
+    );
     assert!(!engine.queues.is_voting(31));
 }

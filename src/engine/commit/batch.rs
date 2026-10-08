@@ -17,7 +17,7 @@ use crate::{
 
 impl<St: EngineStore> Engine<St> {
     /// A peer's candidate opens the round locally: from `Working` we enter
-    /// `Freezing` and, if we are the epoch steward, mint our own.
+    /// `Freezing` and, if we are the epoch steward, ask for our own.
     pub(crate) fn open_round_on_peer_candidate(&mut self) -> Result<(), ConversationError> {
         if self.phase != Phase::Working {
             return Ok(());
@@ -59,11 +59,7 @@ impl<St: EngineStore> Engine<St> {
         }
 
         let actions = self.batch_actions()?;
-        // Our own update rides the commit itself, so a batch holding only it
-        // still builds, with no actions.
-        let carries_own_update = self.queues.urgent_commit_target().is_none()
-            && self.queues.has_approved_update(&self.own);
-        if actions.is_empty() && !carries_own_update {
+        if actions.is_empty() && !self.queues.commit_carries_update_of(&self.own) {
             return Ok(false);
         }
         info!(
@@ -87,7 +83,7 @@ impl<St: EngineStore> Engine<St> {
         for (_id, proposal) in approved.iter() {
             match proposal.payload.as_ref() {
                 Some(Payload::MemberInvite(invite)) => {
-                    if urgent.is_some() || self.is_member(&invite.member_id) {
+                    if urgent.is_some() {
                         continue;
                     }
                     actions.push(Action::Add {
@@ -96,9 +92,7 @@ impl<St: EngineStore> Engine<St> {
                     });
                 }
                 Some(Payload::RemoveMember(remove)) => {
-                    if urgent.is_some_and(|target| remove.member_id != target)
-                        || !self.is_member(&remove.member_id)
-                    {
+                    if urgent.is_some_and(|target| remove.member_id != target) {
                         continue;
                     }
                     actions.push(Action::Remove {
@@ -123,8 +117,8 @@ impl<St: EngineStore> Engine<St> {
     /// no-op unless we are the epoch steward — then announce the phase.
     pub(crate) fn on_freeze_entered(&mut self, event: Phase) -> Result<(), ConversationError> {
         if let Err(e) = self.request_own_candidate() {
-            // A mint failure stalls this round and repeats on every retry, and
-            // the phase change alone reads as a healthy freeze.
+            // If the build request fails, this round gets stuck and keeps retrying,
+            // but just changing the phase looks like everything is fine.
             self.report_failure("commit_candidate_build", &e);
         }
         self.emit_phase(Some(event));

@@ -10,10 +10,11 @@ use crate::{
     StewardListConfig,
     engine::{
         test_support::{creator, founder, id, joiner, member},
-        types::{CommitHash, Outbound, Phase, StagedFacts, Timestamp},
+        types::{ActionKind, CommitHash, Outbound, Phase, StagedFacts, Timestamp},
     },
     protos::de_mls::messages::v1::{
-        ControlMessage, ConversationSync, JoinEpoch, TimingConfig, control_message,
+        ControlMessage, ConversationSync, ConversationUpdateRequest, JoinEpoch, MemberInvite,
+        TimingConfig, control_message,
     },
 };
 
@@ -63,6 +64,8 @@ fn valid_sync() -> ConversationSync {
         liveness_criteria_yes: true,
         join_epochs: vec![],
         default_peer_score: 100,
+        approved_proposals: vec![],
+        voting_sessions: vec![],
     }
 }
 
@@ -202,19 +205,6 @@ fn each_zero_field_is_detected() {
     }
 }
 
-/// The creator is its own steward list, so it answers a sync request by
-/// sharing the sync a joiner with no list can adopt.
-#[test]
-fn epoch_steward_answers_sync_request() {
-    let mut engine = creator();
-    engine.begin(Timestamp::ZERO);
-    engine.on_conversation_sync_request(b"joiner");
-    assert!(matches!(
-        engine.out.outbound.as_slice(),
-        [Outbound::Control(_)]
-    ));
-}
-
 /// A member with no list can't answer.
 #[test]
 fn an_unsynced_node_ignores_sync_request_and_arms_nothing() {
@@ -252,19 +242,9 @@ fn a_synced_non_steward_ignores_sync_request_and_arms_nothing() {
     assert!(engine.timing.sync_takeover_anchor.is_none());
 }
 
-/// An unsynced node cannot judge whether it is the epoch steward or a
-/// backup, so it answers nothing and arms nothing.
-#[test]
-fn an_unsynced_steward_does_not_answer() {
-    let mut engine = joiner();
-    engine.begin(Timestamp::ZERO);
-    engine.on_conversation_sync_request(b"x");
-    assert!(engine.out.outbound.is_empty());
-    assert!(engine.timing.sync_takeover_anchor.is_none());
-}
-
-/// The epoch steward answers reactively, so it never leaves a backup
-/// takeover armed — a stale anchor is cleared.
+/// The epoch steward answers a sync request with one control message, and
+/// answers reactively, so it never leaves a backup takeover armed — a stale
+/// anchor is cleared.
 #[test]
 fn epoch_steward_request_clears_takeover_anchor() {
     let mut engine = creator();
@@ -272,7 +252,10 @@ fn epoch_steward_request_clears_takeover_anchor() {
     engine.timing.sync_takeover_anchor = Some(Timestamp::ZERO);
     engine.on_conversation_sync_request(b"joiner");
     assert!(engine.timing.sync_takeover_anchor.is_none());
-    assert_eq!(engine.out.outbound.len(), 1);
+    assert!(matches!(
+        engine.out.outbound.as_slice(),
+        [Outbound::Control(_)]
+    ));
 }
 
 /// Sharing is a no-op with no steward list to send yet.
@@ -338,6 +321,7 @@ fn conversation_sync_round_trips_into_a_joiner() {
     steward.begin(Timestamp::ZERO);
     let bytes = steward
         .build_conversation_sync()
+        .expect("build")
         .expect("a list is installed");
 
     let mut engine = joiner();
@@ -376,6 +360,7 @@ fn adopting_a_sync_clamps_voting_delay_below_its_timeout() {
     steward.begin(Timestamp::ZERO);
     let bytes = steward
         .build_conversation_sync()
+        .expect("build")
         .expect("a list is installed");
 
     let joiner_config = EngineConfig {
@@ -433,7 +418,10 @@ fn a_working_node_adopts_a_newer_election() {
     )
     .expect("create")
     .0;
-    let bytes = a.build_conversation_sync().expect("a list is installed");
+    let bytes = a
+        .build_conversation_sync()
+        .expect("build")
+        .expect("a list is installed");
     let sync = decode_sync(&bytes);
 
     b.begin(at(5));
@@ -466,7 +454,10 @@ fn a_current_node_counts_an_answer_and_reports_no_miss() {
 
     a.begin(at(0));
     a.broadcast_sync_request();
-    let bytes = a.build_conversation_sync().expect("a list is installed");
+    let bytes = a
+        .build_conversation_sync()
+        .expect("build")
+        .expect("a list is installed");
     let sync = decode_sync(&bytes);
 
     a.on_conversation_sync(sync)
@@ -510,7 +501,10 @@ fn adopting_a_newer_list_drops_a_candidate_from_the_old_steward() {
     )
     .expect("create")
     .0;
-    let bytes = a.build_conversation_sync().expect("a list is installed");
+    let bytes = a
+        .build_conversation_sync()
+        .expect("build")
+        .expect("a list is installed");
     let sync = decode_sync(&bytes);
 
     let new_steward = a.expected_steward().expect("a steward at epoch 1");
@@ -545,4 +539,211 @@ fn adopting_a_newer_list_drops_a_candidate_from_the_old_steward() {
     assert!(b.round_candidate.is_none());
     assert_eq!(b.phase(), Phase::Working);
     assert!(b.out.events.contains(&Event::PhaseChange(Phase::Working)));
+}
+
+fn invite_request(member_id: &[u8]) -> ConversationUpdateRequest {
+    ConversationUpdateRequest::member_invite(MemberInvite {
+        key_package_bytes: b"kp".to_vec(),
+        member_id: member_id.to_vec(),
+    })
+}
+
+/// A steward holding an approved invite and a voting session for another,
+/// filed off the whole second so a deadline carried in seconds would differ.
+fn steward_with_pending_work() -> (Engine<InMemoryStore>, Vec<u8>) {
+    let filed = Timestamp::from_duration_since_epoch(Duration::from_millis(250));
+    let mut steward = founder();
+    steward
+        .queues
+        .insert_approved_proposal(7, invite_request(b"dave"));
+    steward
+        .propose_add(filed, id("carol"), b"kp".to_vec())
+        .expect("propose add");
+    steward.begin(filed);
+    let bytes = steward
+        .build_conversation_sync()
+        .expect("build")
+        .expect("a list is installed");
+    (steward, bytes)
+}
+
+/// The sync a steward builds lists its pending proposals and voting sessions,
+/// each session with the deadline the steward holds for it and the epoch it
+/// was filed at, not the steward's epoch when it answers.
+#[test]
+fn the_sync_lists_approved_proposals_and_voting_sessions() {
+    let (mut steward, _) = steward_with_pending_work();
+    steward.epoch = 2;
+    let bytes = steward
+        .build_conversation_sync()
+        .expect("build")
+        .expect("a list is installed");
+    let sync = decode_sync(&bytes);
+
+    assert_eq!(sync.approved_proposals.len(), 1);
+    assert_eq!(sync.approved_proposals[0].proposal_id, 7);
+    assert_eq!(sync.voting_sessions.len(), 1);
+    let session = &sync.voting_sessions[0];
+    let proposal = session.proposal.as_ref().expect("proposal");
+    assert_eq!(proposal.votes.len(), 1, "the proposer's vote is carried");
+    assert_eq!(
+        session.deadline_ms,
+        steward.timing.pending_consensus_timeouts[&proposal.proposal_id].as_millis(),
+        "the deadline is the steward's own"
+    );
+    assert_eq!(session.filed_epoch, 1, "the epoch the session was filed at");
+}
+
+/// A joiner adopting it later holds the pending proposal approved and the
+/// voting session in flight under the steward's deadline. The session was
+/// filed at epoch 1, where the joiner was seated, so it is a voter: the key
+/// package check is asked for.
+#[test]
+fn a_joiner_votes_on_a_relayed_session_filed_since_its_seating() {
+    let (steward, bytes) = steward_with_pending_work();
+    let session_id = decode_sync(&bytes).voting_sessions[0]
+        .proposal
+        .as_ref()
+        .expect("proposal")
+        .proposal_id;
+
+    let mut engine = joiner();
+    let out = engine
+        .handle_control(at(3), id("alice"), 1, &bytes)
+        .expect("handle control");
+
+    assert!(engine.queues.approved_proposals().contains_key(&7));
+    assert!(engine.queues.is_voting(session_id));
+    assert_eq!(
+        engine.timing.pending_consensus_timeouts[&session_id],
+        steward.timing.pending_consensus_timeouts[&session_id],
+        "the session ends when it ends for the steward"
+    );
+    assert!(out.decisions.iter().any(|d| matches!(
+        d,
+        Decision::ValidateKeyPackage { member, .. } if member == &id("carol")
+    )));
+}
+
+/// A joiner seated after the session was filed is not among its voters: it
+/// adopts the session and holds the steward's deadline, and asks for no
+/// vote.
+#[test]
+fn a_joiner_seated_after_a_relayed_session_was_filed_does_not_vote() {
+    let (steward, bytes) = steward_with_pending_work();
+    let session_id = decode_sync(&bytes).voting_sessions[0]
+        .proposal
+        .as_ref()
+        .expect("proposal")
+        .proposal_id;
+
+    let mut engine = Engine::join(
+        Timestamp::ZERO,
+        "conv",
+        id("bob"),
+        2,
+        &[id("alice"), id("bob")],
+        EngineConfig::default(),
+        InMemoryStore::default(),
+    )
+    .expect("join")
+    .0;
+    let out = engine
+        .handle_control(at(3), id("alice"), 2, &bytes)
+        .expect("handle control");
+
+    assert!(engine.queues.is_voting(session_id));
+    assert_eq!(
+        engine.timing.pending_consensus_timeouts[&session_id],
+        steward.timing.pending_consensus_timeouts[&session_id],
+        "the session ends when it ends for the steward"
+    );
+    assert!(
+        !out.events
+            .iter()
+            .any(|e| matches!(e, Event::VoteRequested { .. }))
+    );
+    assert!(
+        !out.decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ValidateKeyPackage { .. }))
+    );
+}
+
+/// A node whose list is current ignores the pending work too: neither the
+/// proposal nor the session is taken.
+#[test]
+fn a_current_node_ignores_the_pending_work() {
+    let (_, bytes) = steward_with_pending_work();
+    let session_id = decode_sync(&bytes).voting_sessions[0]
+        .proposal
+        .as_ref()
+        .expect("proposal")
+        .proposal_id;
+    let mut engine = founder();
+    engine
+        .handle_control(Timestamp::ZERO, id("bob"), 1, &bytes)
+        .expect("handle control");
+
+    assert_eq!(engine.queues.approved_proposals_count(), 0);
+    assert!(!engine.queues.is_voting(session_id));
+}
+
+/// A sync's pending changes meet the admission a vote would: an invite for
+/// a seated member is not installed, and a removal drops its target's queued
+/// update.
+#[test]
+fn a_pending_change_is_admitted_as_a_vote_would_be() {
+    let mut steward = founder();
+    steward
+        .queues
+        .insert_approved_proposal(7, invite_request(&member("bob")));
+    steward
+        .queues
+        .insert_approved_proposal(8, ConversationUpdateRequest::remove_member(member("bob")));
+    steward.begin(Timestamp::ZERO);
+    let bytes = steward
+        .build_conversation_sync()
+        .expect("build")
+        .expect("a list is installed");
+
+    let mut engine = joiner();
+    engine.queues.insert_approved_proposal(
+        9,
+        ConversationUpdateRequest::leaf_update(member("bob"), b"update".to_vec()),
+    );
+    engine
+        .handle_control(Timestamp::ZERO, id("alice"), 1, &bytes)
+        .expect("handle control");
+
+    assert_eq!(engine.queues.approved_proposals_count(), 1);
+    assert!(
+        engine
+            .queues
+            .has_approved_change(ActionKind::Remove, &member("bob"))
+    );
+    assert!(
+        !engine
+            .queues
+            .has_approved_change(ActionKind::Update, &member("bob"))
+    );
+}
+
+/// A pending change the joiner already holds under another proposal id is
+/// not installed a second time.
+#[test]
+fn a_pending_change_already_held_under_another_id_is_not_installed() {
+    let (_, bytes) = steward_with_pending_work();
+
+    let mut engine = joiner();
+    engine
+        .queues
+        .insert_approved_proposal(9, invite_request(b"dave"));
+    engine
+        .handle_control(Timestamp::ZERO, id("alice"), 1, &bytes)
+        .expect("handle control");
+
+    assert_eq!(engine.queues.approved_proposals_count(), 1);
+    assert!(engine.queues.approved_proposals().contains_key(&9));
+    assert!(!engine.queues.approved_proposals().contains_key(&7));
 }

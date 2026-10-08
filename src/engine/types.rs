@@ -218,7 +218,8 @@ pub enum Outbound {
 pub enum Phase {
     /// Normal operation.
     Working,
-    /// New proposals are no longer accepted; candidates are being collected.
+    /// A round is open: proposals and votes continue, and the candidate is
+    /// validated when the window ends.
     Freezing,
     /// A candidate has been picked and is being merged.
     Selection,
@@ -257,7 +258,7 @@ pub enum Verdict {
 pub enum CandidateRejection {
     /// Its sender is not the epoch steward this node expects.
     NotEpochSteward,
-    /// Its actions do not match the voted set.
+    /// It carries an action this node has not approved.
     ActionsMismatch,
 }
 
@@ -265,7 +266,7 @@ impl fmt::Display for CandidateRejection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CandidateRejection::NotEpochSteward => write!(f, "not the epoch steward"),
-            CandidateRejection::ActionsMismatch => write!(f, "actions do not match the voted set"),
+            CandidateRejection::ActionsMismatch => write!(f, "carries an action not approved here"),
         }
     }
 }

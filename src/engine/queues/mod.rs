@@ -6,6 +6,7 @@
 mod proposals;
 mod state;
 
+pub(crate) use proposals::Admission;
 #[cfg(test)]
 pub(crate) use state::BoundedSet;
 pub(crate) use state::VotingMeta;

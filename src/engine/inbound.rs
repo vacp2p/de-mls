@@ -41,7 +41,7 @@ impl<St: EngineStore> Engine<St> {
         let outcome = match message.payload {
             Some(control_message::Payload::Proposal(proposal)) => (
                 "incoming_proposal",
-                self.on_incoming_proposal(&sender, proposal),
+                self.on_incoming_proposal(&sender, proposal, epoch),
             ),
             Some(control_message::Payload::Vote(vote)) => {
                 ("incoming_vote", self.forward_incoming_vote(&sender, vote))
@@ -105,6 +105,8 @@ mod tests {
             liveness_criteria_yes: true,
             join_epochs: vec![],
             default_peer_score: 100,
+            approved_proposals: vec![],
+            voting_sessions: vec![],
         };
         let payload = control_bytes(control_message::Payload::ConversationSync(sync));
         let out = engine

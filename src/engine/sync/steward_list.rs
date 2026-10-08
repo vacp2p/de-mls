@@ -9,7 +9,11 @@ use tracing::info;
 
 use crate::{
     ConversationError, ElectionDecision,
-    engine::{handle::Engine, store::EngineStore, types::Phase},
+    engine::{
+        handle::Engine,
+        store::EngineStore,
+        types::{ActionKind, Phase},
+    },
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, ViolationEvidence,
     },
@@ -85,7 +89,10 @@ impl<St: EngineStore> Engine<St> {
     fn election_pool(&self, epoch: u64) -> Vec<Vec<u8>> {
         self.members
             .iter()
-            .filter(|m| self.queues.is_settled(m, epoch) && !self.queues.has_approved_removal(m))
+            .filter(|m| {
+                self.queues.is_settled(m, epoch)
+                    && !self.queues.has_approved_change(ActionKind::Remove, m)
+            })
             .cloned()
             .collect()
     }
@@ -126,7 +133,7 @@ impl<St: EngineStore> Engine<St> {
 
         let (proposed_stewards, election_epoch, retry_round) = {
             let queues = &self.queues;
-            let eligible = |c: &[u8]| !queues.has_approved_removal(c);
+            let eligible = |c: &[u8]| !queues.has_approved_change(ActionKind::Remove, c);
             let decision =
                 self.steward_list
                     .propose_election(epoch, &candidate_pool, &self.own, eligible)?;

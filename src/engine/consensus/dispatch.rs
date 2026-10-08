@@ -24,7 +24,7 @@ use crate::{
 
 impl<St: EngineStore> Engine<St> {
     /// Pop every resolved outcome and apply it. Called at the end of every
-    /// driving call, so an outcome reached mid-call rides out on that call
+    /// driving call, so an outcome reached mid-call is reported by that call
     /// instead of waiting for the next wakeup.
     pub(crate) fn drain_consensus_outcomes(&mut self) {
         while let Some((_scope, event)) = self.consensus_rx.try_recv() {
@@ -87,7 +87,13 @@ impl<St: EngineStore> Engine<St> {
             proposal_id, verdict = ?verdict, "consensus ended"
         );
         self.queues.mark_consensus_outcome_applied(proposal_id);
-        let outcome = apply_outcome(&mut self.queues, proposal_id, verdict, &request);
+        let outcome = apply_outcome(
+            &mut self.queues,
+            &self.members,
+            proposal_id,
+            verdict,
+            &request,
+        );
         self.dirty.proposals = true;
         self.dirty.consensus = true;
 
@@ -104,7 +110,7 @@ impl<St: EngineStore> Engine<St> {
                 self.dirty.skipped_stewards = true;
             }
             ApplyOutcome::UrgentRemoval { target } => {
-                // A steward-gated removal: enter freezing and mint it now.
+                // A steward-gated removal: enter freezing and build it now.
                 if let Some(event) = self.start_freezing() {
                     self.on_freeze_entered(event)?;
                 }

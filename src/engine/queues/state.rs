@@ -8,7 +8,11 @@ use std::hash::Hash;
 use indexmap::{IndexMap, IndexSet};
 
 use crate::{
-    engine::{proposal_kind::ProposalKind, types::MembershipDelta, util::member_set},
+    engine::{
+        proposal_kind::ProposalKind,
+        types::{ActionKind, MembershipDelta},
+        util::member_set,
+    },
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
@@ -17,11 +21,12 @@ pub type ProposalId = u32;
 
 /// What the queues need to reason about an in-flight proposal without holding
 /// the full request — consensus storage keeps that. Just who it targets and
-/// whether it is a steward election.
+/// whether it is a steward election, and the epoch it was sealed at.
 #[derive(Clone, Debug)]
 pub(crate) struct VotingMeta {
     pub(crate) target: Option<Vec<u8>>,
     pub(crate) kind: ProposalKind,
+    pub(crate) epoch: u64,
 }
 
 /// A capacity-bounded, insertion-ordered set: dedups by value and evicts the
@@ -122,7 +127,7 @@ impl EngineQueues {
     pub fn steward_eligibility(&self, members: &[Vec<u8>]) -> impl Fn(&[u8]) -> bool {
         let member_set = member_set(members);
         move |candidate: &[u8]| {
-            !self.has_approved_removal(candidate)
+            !self.has_approved_change(ActionKind::Remove, candidate)
                 && !self.skipped_stewards.contains(candidate)
                 && member_set.contains(candidate)
         }
@@ -146,14 +151,14 @@ impl EngineQueues {
 
     // ─────────────────────────── Settled membership ───────────────────────────
 
-    /// Updates queue state from the merged commit's delta: adds join epochs
-    /// for new members and drops the departed member's approved-removal and
-    /// join-epoch entries. This happens during commit finalization, before
-    /// steward-list reconciliation, so just-joined members are marked as
-    /// unsettled for this epoch.
-    pub fn apply_membership_delta_bookkeeping(&mut self, epoch: u64, delta: &MembershipDelta) {
+    /// Updates queue state from the merged commit's delta: drops the
+    /// approved work the commit landed, records join epochs for new members
+    /// and drops the departed members' entries. This happens during commit
+    /// finalization, before steward-list reconciliation, so just-joined
+    /// members are marked as unsettled for this epoch.
+    pub fn apply_membership_delta(&mut self, epoch: u64, delta: &MembershipDelta) {
+        self.drop_landed(delta);
         for member in &delta.removed {
-            self.drop_approved_removals_for(member);
             // Drop the departed member so a later re-join records a fresh join
             // epoch rather than inheriting its earlier one.
             self.member_join_epoch.remove(member);

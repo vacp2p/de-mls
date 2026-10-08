@@ -11,7 +11,7 @@ use crate::{
     engine::{
         handle::Engine,
         store::EngineStore,
-        types::{MemberId, Output, Phase, Timestamp},
+        types::{MemberId, Output, Timestamp},
     },
     protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberInvite},
 };
@@ -20,9 +20,10 @@ impl<St: EngineStore> Engine<St> {
     /// Propose adding `member`, whose key package the router validated.
     /// Proposing is this member's own YES, so no vote request comes back.
     ///
-    /// A `ConversationBlocked` refusal means a commit round is open; the
-    /// engine keeps no memory of the attempt, so it is the caller's to retry
-    /// once it drains an `Event::PhaseChange(Phase::Working)`.
+    /// A `ConversationBlocked` refusal means the conversation is `Syncing`;
+    /// `PartialFreeze` means an emergency proposal is in flight. The engine
+    /// keeps no memory of the attempt, so it is the caller's to retry once
+    /// it drains an `Event::PhaseChange(Phase::Working)`.
     pub fn propose_add(
         &mut self,
         now: Timestamp,
@@ -30,10 +31,6 @@ impl<St: EngineStore> Engine<St> {
         key_package: Vec<u8>,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
-        let state = self.phase;
-        if state != Phase::Working {
-            return Err(ConversationError::ConversationBlocked(state.to_string()));
-        }
         if self.is_member(member.as_bytes()) {
             return Err(ConversationError::AlreadyMember);
         }
@@ -49,10 +46,6 @@ impl<St: EngineStore> Engine<St> {
         member: MemberId,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
-        let state = self.phase;
-        if state != Phase::Working {
-            return Err(ConversationError::ConversationBlocked(state.to_string()));
-        }
         if !self.is_member(member.as_bytes()) {
             return Err(ConversationError::MemberGone);
         }
@@ -94,9 +87,9 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// File `update`, the MLS Update proposal this member signed for its own
-    /// leaf. It is approved at once and rides the epoch steward's next
+    /// leaf. It is approved at once and carried by the epoch steward's next
     /// commit; a second call in the epoch is a no-op. Refused and retried
-    /// like [`Self::propose_add`] while a round is open.
+    /// like [`Self::propose_add`].
     pub fn propose_update(
         &mut self,
         now: Timestamp,
@@ -108,8 +101,7 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// Cast this member's vote on `proposal_id`, replacing the auto-vote that
-    /// would otherwise fire. Refused mid-rotation, where a vote could arrive
-    /// after the round it belongs to closed.
+    /// would otherwise fire.
     pub fn vote(
         &mut self,
         now: Timestamp,
@@ -117,10 +109,6 @@ impl<St: EngineStore> Engine<St> {
         approve: bool,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
-        let state = self.phase;
-        if matches!(state, Phase::Freezing | Phase::Selection) {
-            return Err(ConversationError::ConversationBlocked(state.to_string()));
-        }
         self.cancel_auto_vote(proposal_id);
         self.cast_local_vote(proposal_id, approve)?;
         self.finish()
@@ -174,7 +162,7 @@ mod tests {
     use super::*;
     use crate::engine::{
         test_support::{creator, id, joiner},
-        types::Outbound,
+        types::{ActionKind, Outbound, Phase},
     };
 
     /// Adding someone already seated is refused, and nothing moves.
@@ -188,21 +176,70 @@ mod tests {
         assert!(engine.out.outbound.is_empty());
     }
 
-    /// A round in progress blocks a fresh add: refused, and nothing about
-    /// the engine moves. The engine keeps no memory of the attempt — it is
-    /// the caller's to retry once the round closes.
+    /// A joiner, still `Syncing`, is refused a new member and nothing is
+    /// queued or sent; a steward election is the one proposal it may file.
     #[test]
-    fn propose_add_refuses_while_freezing() {
-        let mut engine = creator();
-        engine.begin(Timestamp::ZERO);
-        engine.start_freezing();
+    fn propose_add_refuses_while_syncing() {
+        let mut engine = joiner();
+        assert_eq!(engine.phase(), Phase::Syncing);
         assert!(matches!(
             engine.propose_add(Timestamp::ZERO, id("dave"), b"kp".to_vec()),
             Err(ConversationError::ConversationBlocked(_))
         ));
-        assert_eq!(engine.phase(), Phase::Freezing);
-        assert_eq!(engine.queues.approved_proposals_count(), 0);
         assert!(engine.out.outbound.is_empty());
+        assert_eq!(engine.queues.approved_proposals_count(), 0);
+
+        assert!(engine.propose_election(Timestamp::ZERO).is_ok());
+    }
+
+    /// An add filed while a round is open lands in the approved queue with
+    /// one control message out; the phase does not move.
+    #[test]
+    fn propose_add_lands_while_freezing() {
+        let mut engine = creator();
+        engine.begin(Timestamp::ZERO);
+        engine.start_freezing();
+        let out = engine
+            .propose_add(Timestamp::ZERO, id("dave"), b"kp".to_vec())
+            .expect("propose add");
+        assert!(matches!(out.outbound.as_slice(), [Outbound::Control(_)]));
+        assert_eq!(engine.phase(), Phase::Freezing);
+        assert_eq!(engine.queues.approved_proposals_count(), 1);
+    }
+
+    /// A manual vote on a peer's open proposal is cast while a round is
+    /// open: one control message out, the phase unchanged.
+    #[test]
+    fn vote_lands_while_freezing() {
+        use hashgraph_like_consensus::protos::consensus::v1::Proposal;
+        use prost::Message;
+
+        use crate::engine::test_support::{founder, member};
+
+        let mut engine = founder();
+        let request = ConversationUpdateRequest::remove_member(member("carol"));
+        let proposal = Proposal {
+            name: "p7".to_string(),
+            payload: request.encode_to_vec(),
+            proposal_id: 7,
+            proposal_owner: member("bob"),
+            votes: Vec::new(),
+            expected_voters_count: 2,
+            round: 1,
+            timestamp: 0,
+            expiration_timestamp: 600,
+            liveness_criteria_yes: true,
+        };
+        engine.begin(Timestamp::ZERO);
+        engine
+            .on_incoming_proposal(&member("bob"), proposal, engine.epoch())
+            .expect("incoming proposal");
+        engine.start_freezing();
+        engine.out = Output::default();
+
+        let out = engine.vote(Timestamp::ZERO, 7, true).expect("vote");
+        assert!(matches!(out.outbound.as_slice(), [Outbound::Control(_)]));
+        assert_eq!(engine.phase(), Phase::Freezing);
     }
 
     /// An own update lands in the approved queue at once, with one control
@@ -214,27 +251,17 @@ mod tests {
             .propose_update(Timestamp::ZERO, b"upd".to_vec())
             .expect("propose update");
         assert!(matches!(out.outbound.as_slice(), [Outbound::Control(_)]));
-        assert!(engine.queues.has_approved_update(engine.own.as_slice()));
+        assert!(
+            engine
+                .queues
+                .has_approved_change(ActionKind::Update, engine.own.as_slice())
+        );
 
         let out = engine
             .propose_update(Timestamp::ZERO, b"other".to_vec())
             .expect("repeat");
         assert!(out.outbound.is_empty());
         assert_eq!(engine.queues.approved_proposals_count(), 1);
-    }
-
-    /// A round in progress blocks an update; nothing moves.
-    #[test]
-    fn propose_update_refuses_while_freezing() {
-        let mut engine = creator();
-        engine.begin(Timestamp::ZERO);
-        engine.start_freezing();
-        assert!(matches!(
-            engine.propose_update(Timestamp::ZERO, b"upd".to_vec()),
-            Err(ConversationError::ConversationBlocked(_))
-        ));
-        assert_eq!(engine.queues.approved_proposals_count(), 0);
-        assert!(engine.out.outbound.is_empty());
     }
 
     /// Removing someone who isn't here is refused.
@@ -245,14 +272,6 @@ mod tests {
             engine.propose_remove(Timestamp::ZERO, id("ghost")),
             Err(ConversationError::MemberGone)
         ));
-    }
-
-    /// A sync request goes out as one control message.
-    #[test]
-    fn request_sync_puts_one_request_on_the_wire() {
-        let mut engine = joiner();
-        let out = engine.request_sync(Timestamp::ZERO).expect("request sync");
-        assert_eq!(out.outbound.len(), 1);
     }
 
     /// The router's ask goes out in any phase, `Working` included: exactly

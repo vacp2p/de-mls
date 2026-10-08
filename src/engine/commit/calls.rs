@@ -10,13 +10,13 @@
 use tracing::{debug, info, warn};
 
 use crate::{
-    ConversationError, ScoreEvent,
+    ConversationError, ScoreEvent, ScoreOp,
     engine::{
-        commit::select::penalty,
         handle::Engine,
+        queues::EngineQueues,
         store::EngineStore,
         types::{
-            CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId,
+            ActionKind, CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId,
             MembershipDelta, Output, Phase, StagedFacts, Timestamp,
         },
     },
@@ -46,7 +46,7 @@ impl<St: EngineStore> Engine<St> {
             return self.finish();
         }
 
-        // Without a list this node cannot judge the candidate. The router
+        // Without a list this node cannot validate the candidate. The router
         // keeps it staged and reports it again after `PhaseChange(Working)`.
         if self.phase == Phase::Syncing {
             return Err(ConversationError::ConversationBlocked(
@@ -61,10 +61,10 @@ impl<St: EngineStore> Engine<St> {
                 sender = ?facts.sender,
                 "candidate rejected: not the epoch steward"
             );
-            self.apply_score_ops(&[penalty(
-                facts.sender.as_bytes(),
-                ScoreEvent::MisbehavingCommit,
-            )]);
+            self.apply_score_ops(&[ScoreOp {
+                member_id: facts.sender.as_bytes().to_vec(),
+                event: ScoreEvent::MisbehavingCommit,
+            }]);
             self.emit(Event::CandidateRejected {
                 sender: facts.sender.clone(),
                 reason: CandidateRejection::NotEpochSteward,
@@ -116,18 +116,17 @@ impl<St: EngineStore> Engine<St> {
         adopted.sort();
         adopted.dedup();
 
-        let pending = self.pending_merge.take();
-        let decided = pending.as_ref().is_some_and(|p| p.hash == hash);
-        let facts = match pending {
-            Some(p) if decided => p.facts,
-            _ => None,
-        };
-        // Matching is exact: a decided, non-urgent merge landed every approved
-        // update.
-        let updated = if decided && self.queues.urgent_commit_target().is_none() {
-            self.queues.approved_update_members()
-        } else {
-            Vec::new()
+        let facts = self
+            .pending_merge
+            .take()
+            .filter(|p| p.hash == hash)
+            .map(|p| p.facts);
+        let decided = facts.is_some();
+        // Read before the merge drops the approved updates. An adopted
+        // commit's facts were never seen, so it reports no update.
+        let updated = match &facts {
+            Some(facts) => updated_members(&self.queues, facts),
+            None => Vec::new(),
         };
         if !decided {
             warn!(
@@ -184,13 +183,13 @@ impl<St: EngineStore> Engine<St> {
     /// the commit resolved, before the steward-list reconcile reads settled
     /// membership.
     fn finalize_committed_batch(&mut self, epoch: u64, delta: &MembershipDelta) {
-        self.queues.apply_membership_delta_bookkeeping(epoch, delta);
-        if let Some(target) = self.queues.take_urgent_commit_target() {
-            // Urgent commit: the rest of the queue waits for the next cycle.
-            self.queues.drop_approved_removals_for(&target);
-            self.queues.drop_approved_updates();
-        } else {
-            self.queues.drain_approved_proposals();
+        self.queues.apply_membership_delta(epoch, delta);
+        if self
+            .queues
+            .urgent_commit_target()
+            .is_some_and(|target| delta.removed.iter().any(|m| m.as_slice() == target))
+        {
+            self.queues.take_urgent_commit_target();
         }
         self.dirty.proposals = true;
         self.dirty.join_epochs = true;
@@ -284,4 +283,21 @@ impl<St: EngineStore> Engine<St> {
         }
         self.finish()
     }
+}
+
+/// The members whose leaf a commit with `facts` replaces: the `Update`
+/// actions it carries, plus the sender's own update when the commit carries
+/// it. Read before the merge drops the approved updates.
+fn updated_members(queues: &EngineQueues, facts: &StagedFacts) -> Vec<Vec<u8>> {
+    let mut updated: Vec<Vec<u8>> = facts
+        .actions
+        .iter()
+        .filter(|a| a.kind() == ActionKind::Update)
+        .map(|a| a.member().as_bytes().to_vec())
+        .collect();
+    let sender = facts.sender.as_bytes();
+    if queues.commit_carries_update_of(sender) {
+        updated.push(sender.to_vec());
+    }
+    updated
 }

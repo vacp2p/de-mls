@@ -99,6 +99,30 @@ message ConversationSync {
   repeated JoinEpoch join_epochs = 9;
   // Score a new member starts at (RFC §Peer Scoring `default_peer_score`).
   int64 default_peer_score = 10;
+  // Approved work the epoch's commit has not carried yet, from the answering
+  // steward's view, so a member seated after it was approved can validate
+  // the commit that carries it.
+  repeated ApprovedProposal approved_proposals = 11;
+  // Sessions still voting, from the answering steward's view: each proposal with
+  // every vote seen so far, so a member seated after they were sent can
+  // validate the commit that carries them.
+  repeated VotingSession voting_sessions = 12;
+}
+
+message ApprovedProposal {
+  uint32 proposal_id = 1;
+  ConversationUpdateRequest request = 2;
+}
+
+message VotingSession {
+  consensus.v1.Proposal proposal = 1; // votes = every vote seen
+  // When the holder's consensus timeout fires for this session, milliseconds
+  // since the Unix epoch. A node that takes the session over keeps this
+  // deadline, so the vote ends at the same moment everywhere.
+  uint64 deadline_ms = 2;
+  // The group epoch the proposal was sealed at; its voters are that epoch's
+  // members.
+  uint64 filed_epoch = 3;
 }
 
 // A member with no steward list covering its epoch asks a steward for the

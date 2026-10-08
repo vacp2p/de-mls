@@ -81,8 +81,8 @@ impl Timing {
 #[derive(Debug, Clone)]
 pub(crate) struct PendingMerge {
     pub(crate) hash: CommitHash,
-    /// Facts of the winning candidate, or `None` for our own commit.
-    pub(crate) facts: Option<StagedFacts>,
+    /// Facts of the winning candidate.
+    pub(crate) facts: StagedFacts,
 }
 
 /// One conversation's protocol state, with no group, provider, signer or

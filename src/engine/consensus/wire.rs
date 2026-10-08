@@ -17,7 +17,7 @@ use std::time::Duration;
 use crate::{
     ConversationError,
     engine::{
-        handle::Engine, proposal_kind::ProposalKind, store::EngineStore,
+        handle::Engine, proposal_kind::ProposalKind, store::EngineStore, types::ActionKind,
         util::single_voter_proposal_id,
     },
     protos::de_mls::messages::v1::{
@@ -112,7 +112,10 @@ impl<St: EngineStore> Engine<St> {
         update: Vec<u8>,
     ) -> Result<(), ConversationError> {
         self.check_proposal_allowed(ProposalKind::Commit)?;
-        if self.queues.has_approved_update(&self.own) {
+        if self
+            .queues
+            .has_approved_change(ActionKind::Update, &self.own)
+        {
             info!(
                 conversation = %self.conversation_id,
                 "leaf update already approved this epoch, ignoring duplicate"
@@ -135,7 +138,8 @@ impl<St: EngineStore> Engine<St> {
     ) -> Result<(), ConversationError> {
         // Track before the session opens: the bundled YES fires the outcome
         // synchronously.
-        self.queues.track_voting_proposal(proposal_id, request);
+        self.queues
+            .track_voting_proposal(proposal_id, request, self.epoch);
 
         let submitted = self.submit_single_voter_proposal(request, proposal_id, name)?;
 

@@ -1,19 +1,13 @@
-//! Round selection: the eligibility-filtered epoch steward lookup and the
-//! close that ends one round.
-//!
-//! Only the epoch steward's candidate ever reaches [`Engine::round_candidate`]:
-//! [`Engine::handle_candidate`] rejects and scores anyone
-//! else's on sight. `close_round` validates that one candidate against the
-//! voted set, or reports the miss when none arrived.
+//! Closing a round: the epoch steward lookup, and the close that merges the
+//! steward's candidate when every action it carries is approved here and
+//! reports the miss otherwise.
 
 use crate::{
     ConversationError, ScoreEvent, ScoreOp,
     engine::{
         handle::{Engine, PendingMerge},
-        proposal_kind::change_of,
-        queues::EngineQueues,
         store::EngineStore,
-        types::{Action, ActionKind, CandidateRejection, Decision, Event, MemberId},
+        types::{CandidateRejection, Decision, Event, MemberId},
     },
 };
 
@@ -27,21 +21,18 @@ impl<St: EngineStore> Engine<St> {
             .map(<[u8]>::to_vec)
     }
 
-    /// Close the round: validate the epoch steward's candidate against the
-    /// voted set, or report the miss when none arrived this round.
-    ///
-    /// A valid candidate scores `SuccessfulCommit` for its sender and merges.
-    /// An invalid one scores `BrokenMlsProposal`, discards it, and falls through
-    /// to the same miss as when no candidate arrived.
+    /// Close the round. The epoch steward's candidate merges and scores
+    /// `SuccessfulCommit` when every action it carries is approved here;
+    /// otherwise it is discarded and the round ends as a miss, the same as
+    /// when no candidate arrived.
     pub(crate) fn close_round(&mut self) -> Result<(), ConversationError> {
         let Some((hash, facts)) = self.round_candidate.take() else {
             return self.close_round_without_commit();
         };
         let sender = facts.sender.as_bytes().to_vec();
         let valid = facts.proposal_count as usize == facts.actions.len()
-            && actions_match_voted(&self.queues, &sender, &facts.actions);
+            && self.queues.actions_within_approved(&sender, &facts.actions);
         if !valid {
-            self.apply_score_ops(&[penalty(&sender, ScoreEvent::BrokenMlsProposal)]);
             self.decide(Decision::Discard { hashes: vec![hash] });
             self.emit(Event::CandidateRejected {
                 sender: facts.sender.clone(),
@@ -50,20 +41,19 @@ impl<St: EngineStore> Engine<St> {
             return self.close_round_without_commit();
         }
 
-        self.apply_score_ops(&[penalty(&sender, ScoreEvent::SuccessfulCommit)]);
-        let is_local = sender == self.own;
-        self.pending_merge = Some(PendingMerge {
-            hash,
-            facts: (!is_local).then_some(facts),
-        });
+        self.apply_score_ops(&[ScoreOp {
+            member_id: sender,
+            event: ScoreEvent::SuccessfulCommit,
+        }]);
+        self.pending_merge = Some(PendingMerge { hash, facts });
         self.decide(Decision::Merge { hash });
         Ok(())
     }
 
-    /// No candidate validated this round, or none arrived: report the miss
-    /// and resume `Working` with the approved batch still queued — the
-    /// router asks again on the next inactivity tick, or after
-    /// [`Engine::request_recovery`] skips the silent steward.
+    /// End the round as a miss: score the silent steward, report
+    /// `CommitMissing` and resume `Working` with the approved queue intact.
+    /// The next inactivity window opens a new round, under the next steward
+    /// once [`Engine::request_recovery`] skips this one.
     pub(crate) fn close_round_without_commit(&mut self) -> Result<(), ConversationError> {
         let expected = self.expected_steward();
 
@@ -85,45 +75,4 @@ impl<St: EngineStore> Engine<St> {
         self.emit_phase(Some(resumed));
         Ok(())
     }
-}
-
-/// A penalty against the authenticated author of a candidate.
-pub(crate) fn penalty(member_id: &[u8], event: ScoreEvent) -> ScoreOp {
-    ScoreOp {
-        member_id: member_id.to_vec(),
-        event,
-    }
-}
-
-/// Checks if a commit's actions match the allowed membership changes this round:
-/// either all approved adds/removals/updates, or just the urgent removal
-/// target. An approved update owned by `sender` is not expected as an action:
-/// the commit carries it itself.
-///
-/// Compares sorted, deduped `(kind, member)` pairs; duplicate approvals collapse
-/// to one commit action.
-pub(crate) fn actions_match_voted(
-    queues: &EngineQueues,
-    sender: &[u8],
-    actions: &[Action],
-) -> bool {
-    let mut expected: Vec<(ActionKind, Vec<u8>)> = match queues.urgent_commit_target() {
-        Some(target) => vec![(ActionKind::Remove, target.to_vec())],
-        None => queues
-            .approved_proposals()
-            .values()
-            .filter_map(change_of)
-            .map(|(kind, member)| (kind, member.to_vec()))
-            .filter(|(kind, member)| !(*kind == ActionKind::Update && member == sender))
-            .collect(),
-    };
-    let mut actual: Vec<(ActionKind, Vec<u8>)> = actions
-        .iter()
-        .map(|a| (a.kind(), a.member().as_bytes().to_vec()))
-        .collect();
-    expected.sort();
-    expected.dedup();
-    actual.sort();
-    actual.dedup();
-    expected == actual
 }

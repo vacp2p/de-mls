@@ -6,6 +6,7 @@
 use tracing::info;
 
 use crate::{
+    ConversationError,
     engine::{consensus::wire::control_bytes, handle::Engine, store::EngineStore},
     protos::de_mls::messages::v1::{
         ConversationSync, JoinEpoch, PeerScore, TimingConfig, control_message,
@@ -15,10 +16,13 @@ use crate::{
 impl<St: EngineStore> Engine<St> {
     /// The `ConversationSync` control bytes carrying the current steward
     /// list, protocol flags, timing and peer scores. `None` while there is no
-    /// list; the caller owns delivery.
-    pub(crate) fn build_conversation_sync(&self) -> Option<Vec<u8>> {
+    /// list; the caller owns delivery. Carries the approved proposals the
+    /// epoch's commit has not carried yet and every consensus session still
+    /// open, so a member seated after they were sent can validate the commit
+    /// that carries them.
+    pub(crate) fn build_conversation_sync(&self) -> Result<Option<Vec<u8>>, ConversationError> {
         // Sparse snapshot — only members whose score has diverged from
-        // `default_score`, which rides along in `default_peer_score` so the
+        // `default_score`, which is carried in `default_peer_score` so the
         // joiner adopts the same pivot and reads the omissions as we meant
         // them. Saves wire size at scale.
         let peer_scores: Vec<PeerScore> = self
@@ -29,7 +33,9 @@ impl<St: EngineStore> Engine<St> {
             .map(|(member_id, score)| PeerScore { member_id, score })
             .collect();
 
-        let list = self.steward_list.current_list()?;
+        let Some(list) = self.steward_list.current_list() else {
+            return Ok(None);
+        };
         let steward_members = list.members().to_vec();
         let election_epoch = list.election_epoch();
         let sn_min = list.config().sn_min as u32;
@@ -53,6 +59,9 @@ impl<St: EngineStore> Engine<St> {
             })
             .collect();
 
+        let approved_proposals = self.queues.approved_as_wire();
+        let voting_sessions = self.voting_sessions()?;
+
         let sync = ConversationSync {
             steward_members,
             election_epoch,
@@ -64,17 +73,21 @@ impl<St: EngineStore> Engine<St> {
             retry_round,
             liveness_criteria_yes: self.config.liveness_criteria_yes,
             join_epochs,
+            approved_proposals,
+            voting_sessions,
         };
-        Some(control_bytes(control_message::Payload::ConversationSync(
-            sync,
+        Ok(Some(control_bytes(
+            control_message::Payload::ConversationSync(sync),
         )))
     }
 
     /// Send the current `ConversationSync` as a control message. No-op while
     /// there is no list to share.
     pub(crate) fn share_conversation_sync(&mut self) {
-        if let Some(bytes) = self.build_conversation_sync() {
-            self.send_control(bytes);
+        match self.build_conversation_sync() {
+            Ok(Some(bytes)) => self.send_control(bytes),
+            Ok(None) => {}
+            Err(e) => self.report_failure("conversation_sync_build", &e),
         }
     }
 

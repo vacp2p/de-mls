@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use prost::Message;
 
-use super::select::actions_match_voted;
 use crate::{
     Action, ConversationError,
     engine::{
@@ -11,8 +10,8 @@ use crate::{
         store::{EngineStore, InMemoryStore, keys},
         test_support::{id, joiner, member},
         types::{
-            CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId, Outbound,
-            Phase, StagedFacts, Timestamp,
+            ActionKind, CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId,
+            Outbound, Phase, StagedFacts, Timestamp,
         },
     },
     protos::de_mls::{
@@ -69,6 +68,7 @@ fn removal(target: &str) -> ConversationUpdateRequest {
 #[test]
 fn a_candidate_while_syncing_is_refused_and_kept() {
     let mut e = joiner();
+    let before = e.scoring.score_for(&member("alice"));
     let hash = CommitHash::of(b"commit");
     let result = e.handle_candidate(
         at(0),
@@ -87,6 +87,8 @@ fn a_candidate_while_syncing_is_refused_and_kept() {
     ));
     assert!(e.round_candidate.is_none());
     assert!(e.out.decisions.is_empty());
+    let after = e.scoring.score_for(&member("alice"));
+    assert_eq!(before, after, "a refused candidate scores nothing");
 }
 
 /// A candidate sealed at any epoch but the current one is discarded on
@@ -153,69 +155,6 @@ fn a_non_epoch_steward_candidate_is_rejected_and_scored() {
     }));
 }
 
-/// The voted set and the commit are compared as deduplicated sets: two
-/// approvals naming one change are committed once.
-#[test]
-fn duplicate_approvals_of_one_change_match_a_single_action() {
-    let mut e = engine(&["alice", "bob"]);
-    e.queues.insert_approved_proposal(7, invite("carol"));
-    e.queues.insert_approved_proposal(8, invite("carol"));
-    assert!(actions_match_voted(
-        &e.queues,
-        &member("alice"),
-        &[Action::Add {
-            member: id("carol"),
-            key_package: b"kp:carol".to_vec(),
-        }]
-    ));
-}
-
-/// Under an urgent freeze the expected set is the target's removal alone;
-/// the rest of the approved queue waits, exactly as `batch_actions` builds it.
-#[test]
-fn an_urgent_candidate_matches_the_target_removal_alone() {
-    let mut e = engine(&["alice", "bob", "carol"]);
-    e.queues.insert_approved_proposal(7, invite("dave"));
-    e.queues.insert_approved_proposal(8, removal("carol"));
-    e.queues.set_urgent_commit_target(member("carol"));
-
-    assert!(actions_match_voted(
-        &e.queues,
-        &member("alice"),
-        &[Action::Remove {
-            member: id("carol")
-        }]
-    ));
-    assert!(!actions_match_voted(
-        &e.queues,
-        &member("alice"),
-        &[
-            Action::Add {
-                member: id("dave"),
-                key_package: b"kp:dave".to_vec(),
-            },
-            Action::Remove {
-                member: id("carol")
-            },
-        ]
-    ));
-
-    e.queues.take_urgent_commit_target();
-    assert!(actions_match_voted(
-        &e.queues,
-        &member("alice"),
-        &[
-            Action::Add {
-                member: id("dave"),
-                key_package: b"kp:dave".to_vec(),
-            },
-            Action::Remove {
-                member: id("carol")
-            },
-        ]
-    ));
-}
-
 // ── the round end to end ───────────────────────────────────────────
 
 /// The epoch steward's candidate sits in `round_candidate` until the round
@@ -259,7 +198,7 @@ fn the_epoch_stewards_candidate_merges_only_at_window_close() {
 }
 
 /// The steward's own commit, reported back through `handle_candidate` the
-/// same way a peer's is, merges with `pending_merge.facts` unset.
+/// same way a peer's is, merges with the facts it carried.
 #[test]
 fn the_own_commit_reported_through_handle_candidate_merges() {
     let mut e = engine(&["alice"]);
@@ -291,7 +230,11 @@ fn the_own_commit_reported_through_handle_candidate_merges() {
 
     e.start_selection();
     e.close_round().unwrap();
-    assert!(e.pending_merge.as_ref().is_some_and(|m| m.facts.is_none()));
+    assert!(
+        e.pending_merge
+            .as_ref()
+            .is_some_and(|m| { m.facts.sender == id("alice") && m.facts.actions.len() == 1 })
+    );
     let out = e.finish().unwrap();
     assert!(matches!(
         out.decisions.as_slice(),
@@ -315,7 +258,7 @@ fn the_own_commit_reported_through_handle_candidate_merges() {
     assert_eq!(
         e.queues.approved_proposals_count(),
         0,
-        "the committed batch leaves the queue"
+        "the landed invite leaves the queue"
     );
 
     let meta_bytes = e.store().get(keys::META).unwrap().expect("meta written");
@@ -337,15 +280,20 @@ fn the_own_commit_reported_through_handle_candidate_merges() {
 /// A merge report for a commit the engine never decided still moves the
 /// view in full — the group is the truth — and reports the adoption along
 /// with the membership change it carried, asking for a sync in the same
-/// output so a newer list and scores arrive.
+/// output so a newer list and scores arrive. Approved work the commit did
+/// not land stays, the urgent target with it.
 #[test]
 fn an_unexpected_merge_is_adopted_in_full() {
-    let mut e = engine(&["alice", "bob"]);
-    e.queues.insert_approved_proposal(7, invite("carol"));
+    let mut e = engine(&["alice", "bob", "carol"]);
+    e.queues.insert_approved_proposal(7, invite("dave"));
+    e.queues.insert_approved_proposal(8, removal("carol"));
+    e.queues.set_urgent_commit_target(member("carol"));
     let hash = CommitHash::of(b"surprise");
-    let out = e.commit_applied(at(0), hash, 4, &[id("alice")]).unwrap();
+    let out = e
+        .commit_applied(at(0), hash, 4, &[id("alice"), id("carol")])
+        .unwrap();
     assert_eq!(e.epoch(), 4);
-    assert_eq!(e.members(), vec![id("alice")]);
+    assert_eq!(e.members(), vec![id("alice"), id("carol")]);
     assert!(
         out.events.contains(&Event::CommitAdopted {
             hash: CommitHash::of(b"surprise")
@@ -367,8 +315,21 @@ fn an_unexpected_merge_is_adopted_in_full() {
     );
     assert_eq!(
         e.queues.approved_proposals_count(),
-        0,
-        "the committed batch leaves the queue"
+        2,
+        "an invite and a removal the commit did not land stay queued"
+    );
+    assert!(
+        e.queues
+            .has_approved_change(ActionKind::Add, &member("dave"))
+    );
+    assert!(
+        e.queues
+            .has_approved_change(ActionKind::Remove, &member("carol"))
+    );
+    assert_eq!(
+        e.queues.urgent_commit_target(),
+        Some(member("carol").as_slice()),
+        "the urgent target stays until its removal lands"
     );
     assert_eq!(
         out.outbound
@@ -424,7 +385,7 @@ fn a_commit_that_removes_us_asks_the_router_to_leave() {
     let hash = CommitHash::of(b"commit");
     e.pending_merge = Some(PendingMerge {
         hash,
-        facts: Some(StagedFacts {
+        facts: StagedFacts {
             sender: id("bob"),
             epoch: 0,
             actions: vec![Action::Remove {
@@ -432,7 +393,7 @@ fn a_commit_that_removes_us_asks_the_router_to_leave() {
             }],
             proposal_count: 1,
             self_removed: true,
-        }),
+        },
     });
     let out = e.commit_applied(at(0), hash, 1, &[id("bob")]).unwrap();
     assert_eq!(out.decisions, vec![Decision::Leave]);
@@ -472,10 +433,9 @@ fn a_silent_epoch_steward_yields_commit_missing_and_keeps_the_batch() {
     assert_eq!(e.phase(), Phase::Working);
 }
 
-/// A candidate whose actions don't match the voted set is discarded and its
-/// sender scored `BrokenMlsProposal`, reported through
-/// `Event::CandidateRejected`, and the round then reports the same miss it
-/// would for an absent candidate.
+/// A candidate carrying an action that is not approved here is discarded and
+/// reported through `Event::CandidateRejected`, its sender's score unchanged,
+/// and the round then reports the same miss it would for an absent candidate.
 #[test]
 fn a_mismatching_candidate_is_discarded_and_commit_missing_follows() {
     let mut e = engine(&["alice"]);
@@ -517,7 +477,7 @@ fn a_mismatching_candidate_is_discarded_and_commit_missing_follows() {
         reason: CandidateRejection::ActionsMismatch,
     }));
     let after = e.scoring.score_for(&member("alice")).unwrap();
-    assert!(after < before, "the sender is penalised for the mismatch");
+    assert_eq!(after, before, "a rejected candidate is not scored");
     assert_eq!(e.phase(), Phase::Working);
     assert_eq!(
         e.queues.approved_proposals_count(),
@@ -623,7 +583,7 @@ fn an_update_only_batch_builds_an_update_action() {
     );
 }
 
-/// The steward's own update rides the commit itself: the build has no
+/// The steward's own update is carried by the commit itself: the build has no
 /// actions but still happens.
 #[test]
 fn an_own_update_only_batch_builds_with_no_actions() {
@@ -645,92 +605,38 @@ fn an_own_update_only_batch_builds_with_no_actions() {
     );
 }
 
-#[test]
-fn a_commit_matching_the_approved_updates_is_valid() {
-    let mut e = engine(&["alice", "bob"]);
-    e.queues.insert_approved_proposal(7, update("bob"));
-    e.queues.insert_approved_proposal(8, invite("carol"));
-    assert!(actions_match_voted(
-        &e.queues,
-        &member("alice"),
-        &[
-            Action::Update { member: id("bob") },
-            Action::Add {
-                member: id("carol"),
-                key_package: b"kp:carol".to_vec(),
-            },
-        ]
-    ));
+fn facts(sender: &str, actions: Vec<Action>) -> StagedFacts {
+    StagedFacts {
+        sender: id(sender),
+        epoch: 0,
+        proposal_count: actions.len() as u32,
+        actions,
+        self_removed: false,
+    }
 }
 
+/// A decided merge reports the updates its facts carry, plus the sender's own
+/// approved update, and drops every approved update; an urgent commit
+/// carries none.
 #[test]
-fn a_commit_missing_an_approved_update_is_a_mismatch() {
-    let mut e = engine(&["alice", "bob"]);
-    e.queues.insert_approved_proposal(7, update("bob"));
-    e.queues.insert_approved_proposal(8, invite("carol"));
-    assert!(!actions_match_voted(
-        &e.queues,
-        &member("alice"),
-        &[Action::Add {
-            member: id("carol"),
-            key_package: b"kp:carol".to_vec(),
-        }]
-    ));
-}
-
-#[test]
-fn a_commit_carrying_an_unapproved_update_is_a_mismatch() {
-    let mut e = engine(&["alice", "bob"]);
-    e.queues.insert_approved_proposal(8, invite("carol"));
-    assert!(!actions_match_voted(
-        &e.queues,
-        &member("alice"),
-        &[
-            Action::Update { member: id("bob") },
-            Action::Add {
-                member: id("carol"),
-                key_package: b"kp:carol".to_vec(),
-            },
-        ]
-    ));
-}
-
-/// An approved update owned by the commit's sender is carried by the commit
-/// itself, so it is not expected as an action; for any other sender it is.
-#[test]
-fn the_senders_own_update_is_not_expected_as_an_action() {
-    let mut e = engine(&["alice", "bob"]);
-    e.queues.insert_approved_proposal(7, update("alice"));
-    assert!(actions_match_voted(&e.queues, &member("alice"), &[]));
-    assert!(!actions_match_voted(&e.queues, &member("bob"), &[]));
-}
-
-#[test]
-fn an_urgent_round_with_an_update_is_a_mismatch() {
-    let mut e = engine(&["alice", "bob", "carol"]);
-    e.queues.insert_approved_proposal(7, removal("carol"));
-    e.queues.set_urgent_commit_target(member("carol"));
-    assert!(!actions_match_voted(
-        &e.queues,
-        &member("alice"),
-        &[
-            Action::Update { member: id("bob") },
-            Action::Remove {
-                member: id("carol")
-            },
-        ]
-    ));
-}
-
-/// A decided merge reports each landed update and leaves no update in the
-/// queue, on the plain branch and on the urgent one.
-#[test]
-fn a_merge_reports_the_landed_updates_and_empties_the_queue() {
+fn a_merge_reports_the_carried_updates_and_drops_them() {
     let mut e = engine(&["alice", "bob", "carol"]);
     e.queues.insert_approved_proposal(7, update("bob"));
     e.queues.insert_approved_proposal(8, update("carol"));
+    e.queues.insert_approved_proposal(9, update("alice"));
     let hash = CommitHash::of(b"commit");
-    e.pending_merge = Some(PendingMerge { hash, facts: None });
+    e.pending_merge = Some(PendingMerge {
+        hash,
+        facts: facts(
+            "alice",
+            vec![
+                Action::Update { member: id("bob") },
+                Action::Update {
+                    member: id("carol"),
+                },
+            ],
+        ),
+    });
     let out = e
         .commit_applied(at(0), hash, 1, &[id("alice"), id("bob"), id("carol")])
         .unwrap();
@@ -747,16 +653,27 @@ fn a_merge_reports_the_landed_updates_and_empties_the_queue() {
             &Event::MemberUpdated {
                 member: id("carol")
             },
+            &Event::MemberUpdated {
+                member: id("alice")
+            },
         ]
     );
-    assert!(e.queues.approved_update_members().is_empty());
+    assert_eq!(e.queues.approved_proposals_count(), 0);
 
     let mut e = engine(&["alice", "bob", "carol"]);
     e.queues.insert_approved_proposal(7, update("bob"));
     e.queues.insert_approved_proposal(8, removal("carol"));
     e.queues.set_urgent_commit_target(member("carol"));
     let hash = CommitHash::of(b"urgent");
-    e.pending_merge = Some(PendingMerge { hash, facts: None });
+    e.pending_merge = Some(PendingMerge {
+        hash,
+        facts: facts(
+            "alice",
+            vec![Action::Remove {
+                member: id("carol"),
+            }],
+        ),
+    });
     let out = e
         .commit_applied(at(0), hash, 1, &[id("alice"), id("bob")])
         .unwrap();
@@ -765,5 +682,6 @@ fn a_merge_reports_the_landed_updates_and_empties_the_queue() {
             .iter()
             .any(|ev| matches!(ev, Event::MemberUpdated { .. }))
     );
-    assert!(e.queues.approved_update_members().is_empty());
+    assert_eq!(e.queues.approved_proposals_count(), 0);
+    assert!(e.queues.urgent_commit_target().is_none());
 }

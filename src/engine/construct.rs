@@ -65,6 +65,7 @@ impl<St: EngineStore> Engine<St> {
         store: St,
     ) -> Result<(Self, Output), ConversationError> {
         let mut engine = Self::assemble(conversation_id, own, epoch, members, config, store)?;
+        engine.queues.record_join_epoch(engine.own.clone(), epoch);
         engine.begin(now);
         // A joiner holds no steward list: ask for the sync in this very
         // `Output` and report the answer turns as its wakeup.
