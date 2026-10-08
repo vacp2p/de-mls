@@ -84,10 +84,11 @@ MUST.
    settles it is the commit itself (rules 20 and 21), and a cue with no
    commit behind it is ignored.
 6. Control traffic is delivered in the order it was sent and before the
-   commit of the epoch it belongs to. A node that missed a proposal or an
-   emergency outcome cannot judge that epoch's commit, and a sync cannot
-   restore what it missed: it rejects the commit and stays at its epoch.
-   A discarded commit cannot be staged again.
+   commit of the epoch it belongs to. A sync answer brings a new member
+   the approved work and the open votes it could not see. What the
+   answering steward never saw, nobody brings: a node that missed such a
+   proposal rejects the commit and stays at its epoch. A discarded commit
+   cannot be staged again.
 7. A candidate on the wire is the raw commit bytes. The router stages it
    and reports the facts through `handle_candidate`; it never ranks or
    validates candidates, the group rejecting a foreign or stale commit. A
@@ -105,15 +106,14 @@ MUST.
    group (a discovery topic, a contact exchange) and never reaches the
    engine as bytes: the router validates the key package, reads the
    joiner's id from it, decides whether it wants the member, and calls
-   `propose_add(now, member, key_package)`. A `ConversationBlocked`
-   refusal means a commit round is open or the engine is `Syncing`; the
-   router keeps the announcement and proposes it again after it drains
-   `Event::PhaseChange(Phase::Working)`. The engine keeps no announcement
-   and no re-propose memory; any member may propose, and the engine dedups
-   a proposal whose target a peer's proposal or an approval already covers.
-   A member's own leaf update is filed the same way: `propose_update` on
-   the group, then `propose_update(now, bytes)` on the engine, kept and
-   filed again after the same refusal.
+   `propose_add(now, member, key_package)`. While the engine is `Syncing`
+   the call is refused with `ConversationBlocked`; the router keeps the
+   announcement and proposes it again after `Event::PhaseChange(Phase::Working)`.
+   The engine remembers nothing of a refused call. Any member may propose;
+   a proposal for a member already covered by another proposal or an
+   approval is dropped. A member's own leaf update is filed the same way:
+   `propose_update` on the group, then `propose_update(now, bytes)` on the
+   engine, kept and filed again after the same refusal.
 9. An invite proposal carries the joiner's id as the proposer read it from
    the key package. Every member executes `Decision::ValidateKeyPackage`
    (full validation plus identity equals the claimed id) and reports
@@ -145,13 +145,16 @@ MUST.
     nothing, at `join` and at a stale restart; every other ask is
     `request_sync(now)`, the router's call in any phase: after an offline
     stretch, after `Event::SyncUnanswered`, after
-    `Event::CandidateRejected`. A synced steward answers. Any node whose
-    list is from an older election adopts the answer, in any phase, and
-    reports `SyncApplied`; a current node ignores it. Two answer turns
-    with no valid answer report `SyncUnanswered` once. A list elected
-    after the node's own epoch is not a valid answer for it (it cannot be
-    recomputed over a member set the node lacks): a node an epoch behind
-    heals through the missing commit (rule 6), not through a sync.
+    `Event::CandidateRejected`. A synced steward answers with its list,
+    timing, scores, approved work and open votes. A node whose list is
+    older adopts the answer, in any phase, and reports `SyncApplied`; a
+    current node ignores it. An open vote counts the members of the epoch
+    it was filed in: a member seated by then votes, a member seated later
+    only waits for it to end. Two answer turns with no valid answer report
+    `SyncUnanswered` once. A list elected after the node's own epoch is
+    not a valid answer for it (it cannot be recomputed over a member set
+    the node lacks): a node an epoch behind heals through the missing
+    commit (rule 6), not through a sync.
 
 **Commits**
 
@@ -232,10 +235,10 @@ and the network. A router written another way should still pass them.
 | 5 | chat reaches the engine, or a vote is counted for a sender the group never authenticated | `engine_bed_smoke::creator_seats_two_joiners_and_chat_crosses` |
 | 6, 20 | a member that missed the traffic cannot judge the commit; replayed in order with the frame's time it merges through the ordinary path | `engine_bed_catch_up::a_member_offline_through_a_commit_catches_up_by_replay`, `engine_bed_catch_up::a_failed_recovery_vote_stays_failed_on_replay`, `engine_bed_liveness::a_skipped_steward_that_comes_back_follows_the_substitute` |
 | 7 | a commit from anyone but the epoch steward is applied; or the substitute's commit, rejected a moment before the skip verdict, is lost and the node stays behind | `engine_bed_liveness::foreign_commit_is_rejected_and_scored`, `engine_bed_liveness::a_substitute_commit_that_beats_the_verdict_is_reported_again_after_the_skip` |
-| 8 | an announcement refused while a round is open is never proposed again | `engine_bed_flow::announcement_during_a_round_is_retried_after_it_closes` |
+| 8 | an announcement filed while a round is open is held until the round closes instead of landing in the next commit | `engine_bed_flow::a_proposal_filed_during_a_round_lands_in_the_next_commit` |
 | 9, 10 | an invite lands without the key package checked, or a rejected one lands anyway | `engine_bed_flow::creator_adds_one_then_a_member_adds_another`, `engine_bed_membership::rejected_invite_never_lands` |
-| 11 | a node with no list guesses the steward; at list exhaustion every node enters `Syncing`, the election lands, work resumes | `engine_bed_membership::five_members_keep_committing`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs` |
-| 12 | a joiner or a restarted node never learns the list; a silent epoch steward leaves the ask unanswered until the backup takes over | `engine_bed_sync::backup_steward_answers_when_the_epoch_steward_is_silent`, `engine_bed_sync::a_working_member_can_ask_and_learns_it_is_current` |
+| 11 | a node with no list guesses the steward; at list exhaustion every node enters `Syncing`, the election lands, work resumes | `engine_bed_membership::an_exhausted_steward_list_is_replaced_without_a_stall`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs` |
+| 12 | a joiner or a restarted node never learns the list; a silent epoch steward leaves the ask unanswered until the backup takes over; a joiner rejects the commit carrying work approved before its seating, or stays silent on a vote it was counted in | `engine_bed_sync::backup_steward_answers_when_the_epoch_steward_is_silent`, `engine_bed_sync::a_working_member_can_ask_and_learns_it_is_current`, `engine_bed_flow::a_session_open_at_a_seating_commit_reaches_the_new_member`, `engine_bed_flow::a_proposal_filed_after_a_seating_reaches_the_new_member_in_any_order` |
 | 13, 14 | a foreign commit merges, or a discarded one stays staged and merges later | `engine_bed_liveness::foreign_commit_is_rejected_and_scored` |
 | 15, 21 | the engine's member set drifts from the group's; a commit merged on the router's own trust is adopted in full and the node follows the next one | `engine_bed_catch_up::a_member_that_missed_only_the_commit_adopts_it_and_follows_the_next`, `engine_bed_catch_up::two_members_survivor_commits_on_its_own_authority` |
 | 17, 18 | a restart loses the vote in flight, or loads the engine before the group and starts from the wrong epoch | `engine_bed_flow::restart_mid_vote_resumes_and_merges`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs` |
