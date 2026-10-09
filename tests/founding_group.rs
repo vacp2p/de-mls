@@ -16,7 +16,7 @@ mod common;
 use std::time::Duration;
 
 use common::harness::{TestHarness, fast_config};
-use de_mls::{ConversationConfig, StewardListConfig};
+use de_mls::{ConversationConfig, MemberId, StewardListConfig};
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -325,5 +325,31 @@ fn survivors_recover_when_the_sole_steward_is_partitioned() {
     assert!(
         !h.converged(),
         "the epoch authenticators diverge — the fork the counts can't see"
+    );
+    // Each branch names the commit it took: the creator its own lost one, the
+    // survivors the one they landed without it.
+    let creator = h
+        .member(0)
+        .convo()
+        .applied_commit()
+        .expect("the creator applied its own commit");
+    let survivor = h
+        .member(1)
+        .convo()
+        .applied_commit()
+        .expect("the survivors applied theirs");
+    assert_ne!(
+        creator.hash, survivor.hash,
+        "the branches took different commits at one epoch number"
+    );
+    assert_eq!(
+        MemberId::from(&creator.committer),
+        h.member(0).member_id(),
+        "the creator's branch is the commit it minted"
+    );
+    assert_ne!(
+        MemberId::from(&survivor.committer),
+        h.member(0).member_id(),
+        "the survivors' branch is a commit one of them minted"
     );
 }

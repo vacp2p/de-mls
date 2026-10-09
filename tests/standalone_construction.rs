@@ -16,7 +16,7 @@ use openmls::credentials::CredentialWithKey;
 use openmls_basic_credential::SignatureKeyPair;
 
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, InMemoryPeerScoreStorage};
-use de_mls::{Conversation, ConversationState, MockClock};
+use de_mls::{Conversation, ConversationState, MemberId, MockClock};
 use de_mls::{ConversationEvent, ScoringConfig, StewardListConfig};
 
 use common::{
@@ -260,6 +260,14 @@ fn create_with_members_seeds_initial_members_at_genesis() {
         creator.is_steward(),
         "the creator stewards the genesis epoch"
     );
+    let genesis = creator
+        .applied_commit()
+        .expect("the creator applied the genesis commit");
+    assert_eq!(
+        MemberId::from(&genesis.committer),
+        creator.own_id(),
+        "the creator committed genesis"
+    );
 
     // Exactly one welcome, addressing both initial members.
     let welcome = creator
@@ -302,6 +310,11 @@ fn create_with_members_seeds_initial_members_at_genesis() {
         let (e, _) = joined.epoch_and_retry().expect("epoch");
         assert_eq!(e, 1, "member lands on the genesis epoch");
         assert!(joined.is_steward(), "an initial member stewards genesis");
+        assert_eq!(
+            joined.applied_commit(),
+            None,
+            "an initial member joined by welcome"
+        );
     }
 }
 

@@ -162,8 +162,12 @@ where
 
     // The merge is the commit point (epoch advanced by one); derive it rather
     // than reading MLS again, so an already-applied commit can't become an error.
-    let committed_batch =
-        finalize_committed_batch(conversation, chosen.commit_hash, ctx.current_epoch + 1);
+    let committed_batch = finalize_committed_batch(
+        conversation,
+        chosen.commit_hash,
+        &chosen.candidate_msg.steward_member_id,
+        ctx.current_epoch + 1,
+    );
 
     // Build the welcome artifact only after merge.
     let joiner_identities = chosen.joiner_identities;
@@ -254,8 +258,12 @@ where
     conversation.store_membership_delta(delta);
     // The merge is the commit point (epoch advanced by one); derive it rather
     // than reading MLS again, so an already-applied commit can't become an error.
-    let committed_batch =
-        finalize_committed_batch(conversation, chosen.commit_hash, ctx.current_epoch + 1);
+    let committed_batch = finalize_committed_batch(
+        conversation,
+        chosen.commit_hash,
+        &commit_sender,
+        ctx.current_epoch + 1,
+    );
 
     Ok(CandidateOutcome::Terminal {
         outcome: CommitRoundOutcome::Applied {
@@ -289,9 +297,11 @@ where
 fn finalize_committed_batch(
     conversation: &mut ConversationQueues,
     commit_hash: CommitHash,
+    committer: &[u8],
     current_epoch: u64,
 ) -> Vec<ConversationUpdateRequest> {
     conversation.insert_committed_hash(commit_hash);
+    conversation.set_applied_commit(commit_hash, committer);
     // Stamp join epochs and clear resolved pending/approved entries now, before
     // the steward-list reconcile reads settled membership.
     conversation.apply_membership_delta_bookkeeping(current_epoch);
@@ -321,6 +331,7 @@ mod tests {
         use openmls::key_packages::KeyPackage;
         use openmls::prelude::tls_codec::Serialize as _;
         use openmls_basic_credential::SignatureKeyPair;
+        use sha2::{Digest, Sha256};
 
         let (mut mls, provider, signer) = make_creator_mls(b"alice");
         let alice = b"alice".to_vec();
@@ -402,6 +413,75 @@ mod tests {
                 .iter()
                 .any(|m| m.credential.serialized_content() == b"bob"),
             "our own commit (add bob) was applied"
+        );
+        assert_eq!(
+            conversation.applied_commit(),
+            Some((compute_commit_hash(&artifacts.commit), alice.as_slice())),
+            "our own commit is on record, under our own id"
+        );
+        let digest: [u8; 32] = Sha256::digest(&artifacts.commit).into();
+        assert_eq!(
+            conversation.applied_commit().unwrap().0.as_bytes(),
+            &digest,
+            "the bytes handed out are the SHA-256 of the applied commit's bytes"
+        );
+    }
+
+    /// A round whose only candidate is a remote that fails staging applies
+    /// nothing: no commit goes on record and the epoch stays where it was.
+    #[test]
+    fn a_round_whose_only_candidate_fails_names_no_commit() {
+        use crate::commit_round::round::compute_commit_hash;
+        use crate::protos::de_mls::messages::v1::CommitCandidate;
+        use crate::test_fixtures::{make_creator_mls, steward_service_steward};
+
+        let (mut mls, provider, _signer) = make_creator_mls(b"alice");
+        let alice = b"alice".to_vec();
+        let steward = steward_service_steward(&alice);
+
+        let failing_remote = BufferedCommitCandidate {
+            candidate_msg: CommitCandidate {
+                conversation_id: b"test-conversation".to_vec(),
+                mls_proposals: vec![],
+                commit_message: vec![0xFFu8; 64],
+                steward_member_id: alice.clone(),
+            },
+            commit_hash: compute_commit_hash(&[0xFFu8; 64]),
+            is_local_candidate: false,
+            welcome_bytes: None,
+            joiner_identities: vec![],
+        };
+
+        let epoch_before = mls.current_epoch().unwrap();
+        let mut conversation = ConversationQueues::new("test-conversation", 10);
+        let ctx = RoundContext {
+            mls_count: 1,
+            self_remove_pending: false,
+            current_epoch: epoch_before,
+            in_recovery: false,
+            epoch_steward_id: Some(alice.clone()),
+        };
+
+        let result = apply_in_priority_order(
+            &provider,
+            &mut conversation,
+            &mut mls,
+            &steward,
+            vec![failing_remote],
+            &ctx,
+            &alice,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, CommitRoundOutcome::NoCandidate),
+            "the only candidate failed, so nothing applied"
+        );
+        assert_eq!(mls.current_epoch().unwrap(), epoch_before);
+        assert_eq!(
+            conversation.applied_commit(),
+            None,
+            "a remote that failed is not on record"
         );
     }
 }

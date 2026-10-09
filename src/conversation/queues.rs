@@ -101,6 +101,9 @@ pub struct ConversationQueues {
     active_emergency_ids: HashSet<ProposalId>,
     /// Recent commit hashes for dedup.
     committed_batch_hashes: BoundedSet<CommitHash>,
+    /// The commit that made the current epoch, with its committer's
+    /// `member_id`; `None` until this member applies one.
+    applied_commit: Option<(CommitHash, Vec<u8>)>,
     /// Commit-round candidate buffer for deterministic selection.
     pub(crate) commit_round: CommitRoundBuffer,
     /// Buffer of membership updates (Add/Remove) that every member records so a
@@ -144,6 +147,7 @@ impl ConversationQueues {
             voting_proposals: HashMap::new(),
             active_emergency_ids: HashSet::new(),
             committed_batch_hashes: BoundedSet::new(dedup_window),
+            applied_commit: None,
             commit_round: CommitRoundBuffer::default(),
             pending_updates: HashMap::new(),
             resolved_proposals: BoundedSet::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
@@ -409,6 +413,21 @@ impl ConversationQueues {
     /// new (process it) and `false` for a duplicate (drop it).
     pub(crate) fn record_welcome_broadcast(&mut self, hash: CommitHash) -> bool {
         self.welcome_broadcast_hashes.insert(hash)
+    }
+
+    // ─────────────────────────── Applied Commit ───────────────────────────
+
+    /// Record the commit that made the current epoch and who committed it.
+    pub(crate) fn set_applied_commit(&mut self, commit_hash: CommitHash, committer: &[u8]) {
+        self.applied_commit = Some((commit_hash, committer.to_vec()));
+    }
+
+    /// The commit that made the current epoch, with its committer's
+    /// `member_id`; `None` until this member applies one.
+    pub(crate) fn applied_commit(&self) -> Option<(CommitHash, &[u8])> {
+        self.applied_commit
+            .as_ref()
+            .map(|(hash, committer)| (*hash, committer.as_slice()))
     }
 
     // ──────────────────────── Early (pre-approval) Candidates ────────────────────────

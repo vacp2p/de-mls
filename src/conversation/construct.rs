@@ -20,7 +20,7 @@ use hashgraph_like_consensus::{events::ConsensusEventBus, service::ConsensusServ
 use crate::{
     ConsensusPlugin, Conversation, ConversationConfig, ConversationError, ConversationEvent,
     ConversationQueues, ConversationServices, ConversationStateMachine, PeerScoreStorage,
-    PeerScoringService, StewardListService, WallClock,
+    PeerScoringService, StewardListService, WallClock, compute_commit_hash,
     consensus::outcome_bus::OutcomeBus,
     mls_crypto::{MlsCommitInput, MlsService, member_id_of, signature_key_of_key_package},
     protos::de_mls::messages::v1::MemberWelcome,
@@ -109,6 +109,8 @@ where
             .mls
             .create_commit_candidate(provider, signer, &updates)?;
         let delta = self.services.mls.merge_own_commit(provider)?;
+        self.queues
+            .set_applied_commit(compute_commit_hash(&artifacts.commit), &self.self_member_id);
 
         // Score the members by their assigned leaf and install the steward list
         // over the settled members at the merged epoch.

@@ -586,6 +586,16 @@ impl Member {
             .expect("request recovery");
     }
 
+    /// Mint the Layer-3 recovery commit by hand; `false` when there was
+    /// nothing to commit.
+    pub fn commit_in_recovery(&mut self) -> bool {
+        self.convo
+            .as_mut()
+            .expect("member has joined")
+            .commit_in_recovery(&self.integ.provider, &self.integ.signer)
+            .expect("commit in recovery")
+    }
+
     /// File a `ScoreBelowThreshold` ECP against `member_id` — the emergency
     /// removal route an integrator drives off a low score.
     pub fn propose_score_removal(&mut self, member_id: &[u8]) {

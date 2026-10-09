@@ -3,10 +3,23 @@
 use openmls::group::Member;
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationState, Extensions, GroupContext,
-    MemberId, MemberRole, PeerScoreStorage, WallClock, mls_crypto::member_id_of,
+    CommitHash, ConsensusPlugin, Conversation, ConversationError, ConversationState, Extensions,
+    GroupContext, MemberId, MemberRole, PeerScoreStorage, WallClock, mls_crypto::member_id_of,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
+
+/// The commit a member applied to reach its current epoch, as
+/// [`Conversation::applied_commit`] reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedCommit {
+    /// The hash of the candidate's commit bytes as this member minted or
+    /// received them, the value candidates are told apart by. Two members that
+    /// applied one MLS commit name the same hash when they were handed the
+    /// same bytes.
+    pub hash: CommitHash,
+    /// The member that committed it, as MLS authenticated it.
+    pub committer: Member,
+}
 
 impl<Cp, Sc, Wc> Conversation<Cp, Sc, Wc>
 where
@@ -55,6 +68,28 @@ where
     /// convergence. Pair with [`Self::epoch_and_retry`] to compare like epochs.
     pub fn epoch_authenticator(&self) -> Vec<u8> {
         self.mls().epoch_authenticator().to_vec()
+    }
+
+    /// The commit this member applied to reach its current epoch, or `None` if
+    /// it applied none: it joined by welcome at this epoch, or the group is
+    /// still at its creation epoch. Where [`Self::epoch_authenticator`] says
+    /// that two members forked, this says which commit each of them took.
+    ///
+    /// The commit is named by the hash of the candidate's commit bytes as this
+    /// member minted or received them, the value candidates are told apart by,
+    /// so two members that applied one MLS commit name the same hash when they
+    /// were handed the same bytes. On a member the commit removes, this names
+    /// the commit that removed it while that member's epoch authenticator
+    /// stays the previous epoch's, so the two are not paired after
+    /// [`crate::ConversationEvent::Leaving`]. It changes on every merged
+    /// commit, including one that raises no
+    /// [`crate::ConversationEvent::CommitApplied`].
+    pub fn applied_commit(&self) -> Option<AppliedCommit> {
+        let (hash, committer) = self.queues.applied_commit()?;
+        Some(AppliedCommit {
+            hash,
+            committer: self.mls().member_at(committer)?,
+        })
     }
 
     /// Count of buffered pending membership updates. Used by tests and the UI

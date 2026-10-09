@@ -250,6 +250,13 @@ impl MlsService {
         self.group.member_at(index).map(|m| MemberId::from(&m))
     }
 
+    /// The member at `member_id` (leaf bytes) as an OpenMLS [`Member`], or
+    /// `None` if no current member sits there.
+    pub fn member_at(&self, member_id: &[u8]) -> Option<Member> {
+        let index = leaf_index_of(member_id)?;
+        self.group.member_at(index)
+    }
+
     /// Current members as OpenMLS [`Member`]s, in leaf order.
     pub fn members_view(&self) -> Vec<Member> {
         self.group.members().collect()

@@ -49,6 +49,13 @@ pub enum CommitRoundOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CommitHash([u8; 32]);
 
+impl CommitHash {
+    /// The raw digest.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// Canonical commit hash used for dedup of buffered/committed candidates.
 pub fn compute_commit_hash(commit_message: &[u8]) -> CommitHash {
     let mut hasher = Sha256::new();
