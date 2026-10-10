@@ -122,10 +122,13 @@ impl MlsService {
 
     /// Join a group from a welcome. `provider` must hold the joiner's
     /// key-package private keys from the earlier key-package build, and is read
-    /// from but not retained. Returns `Ok(None)` when the welcome doesn't
+    /// from but not retained. `join_config` is the joiner's counterpart
+    /// of the creator's config and must use the ratchet tree extension as well.
+    /// Returns `Ok(None)` when the welcome doesn't
     /// address one of our key packages — the "not for us" branch, not an error.
     pub fn new_from_welcome<Pr>(
         provider: &Pr,
+        join_config: &MlsGroupJoinConfig,
         welcome_bytes: &[u8],
     ) -> Result<Option<Self>, MlsError>
     where
@@ -138,10 +141,7 @@ impl MlsService {
             _ => return Ok(None),
         };
 
-        let config = MlsGroupJoinConfig::builder()
-            .use_ratchet_tree_extension(true)
-            .build();
-        let staged = match StagedWelcome::new_from_welcome(provider, &config, welcome, None) {
+        let staged = match StagedWelcome::new_from_welcome(provider, join_config, welcome, None) {
             Ok(staged) => staged,
             Err(WelcomeError::NoMatchingKeyPackage | WelcomeError::JoinerSecretNotFound) => {
                 return Ok(None);
@@ -646,6 +646,7 @@ mod service_tests {
     use crate::test_fixtures::{TEST_SUITE, TestProvider, make_creator_mls};
     use openmls::credentials::{BasicCredential, CredentialWithKey};
     use openmls::key_packages::KeyPackage;
+    use openmls::prelude::SenderRatchetConfiguration;
     use openmls::prelude::tls_codec::Serialize as _;
     use openmls_basic_credential::SignatureKeyPair;
 
@@ -669,6 +670,65 @@ mod service_tests {
 
     fn fresh_key_package(provider: &TestProvider, member_id: &[u8]) -> Vec<u8> {
         member_key_package(provider, member_id).0
+    }
+
+    fn join_config() -> MlsGroupJoinConfig {
+        MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
+            .build()
+    }
+
+    /// The joiner's group runs on the config it was handed: a message stays
+    /// readable until one `out_of_order_tolerance` newer from its sender is
+    /// decrypted, and the tolerance here is past the OpenMLS default.
+    #[test]
+    fn joiner_reads_out_of_order_as_far_as_its_config_tolerates() {
+        const TOLERANCE: usize = 8;
+        let (mut alice, provider_a, signer_a) = make_creator_mls(b"alice");
+        let provider_b = TestProvider::default();
+        let bob_kp = fresh_key_package(&provider_b, b"bob");
+        let artifacts = alice
+            .create_commit_candidate(&provider_a, &signer_a, &[MlsCommitInput::Add(bob_kp)])
+            .expect("add bob");
+        alice.merge_own_commit(&provider_a).unwrap();
+        let welcome = artifacts.welcome.expect("welcome for bob");
+        let default = SenderRatchetConfiguration::default();
+        assert!((default.out_of_order_tolerance() as usize) < TOLERANCE);
+        let config = MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
+            .sender_ratchet_configuration(SenderRatchetConfiguration::new(
+                TOLERANCE as u32,
+                default.maximum_forward_distance(),
+            ))
+            .build();
+        let mut bob = MlsService::new_from_welcome(&provider_b, &config, &welcome)
+            .expect("open welcome")
+            .expect("welcome addressed to bob");
+
+        let messages: Vec<Vec<u8>> = (0..TOLERANCE + 2)
+            .map(|_| {
+                alice
+                    .build_message(&provider_a, &signer_a, &AppMessage::default())
+                    .expect("alice message")
+            })
+            .collect();
+        let newest = messages.len() - 1;
+
+        assert!(
+            bob.decrypt_application_only(&provider_b, &messages[newest])
+                .expect("newest")
+                .is_some()
+        );
+        assert!(
+            bob.decrypt_application_only(&provider_b, &messages[newest - (TOLERANCE - 1)])
+                .expect("within the tolerance")
+                .is_some()
+        );
+        assert!(
+            bob.decrypt_application_only(&provider_b, &messages[newest - TOLERANCE])
+                .is_err(),
+            "one further behind is too old"
+        );
     }
 
     /// A *failed* remote-commit stage must leave our own pending commit intact.
@@ -726,7 +786,7 @@ mod service_tests {
             .expect("add bob");
         alice.merge_own_commit(&provider_a).unwrap();
         let welcome = artifacts.welcome.expect("welcome for bob");
-        let mut bob = MlsService::new_from_welcome(&provider_b, &welcome)
+        let mut bob = MlsService::new_from_welcome(&provider_b, &join_config(), &welcome)
             .expect("open welcome")
             .expect("welcome addressed to bob");
         let synced_epoch = alice.current_epoch().unwrap();
@@ -781,7 +841,7 @@ mod service_tests {
             .expect("add bob");
         alice.merge_own_commit(&provider_a).unwrap();
         let welcome = artifacts.welcome.expect("welcome for bob");
-        let mut bob = MlsService::new_from_welcome(&provider_b, &welcome)
+        let mut bob = MlsService::new_from_welcome(&provider_b, &join_config(), &welcome)
             .expect("open welcome")
             .expect("welcome addressed to bob");
         let synced_epoch = alice.current_epoch().unwrap();

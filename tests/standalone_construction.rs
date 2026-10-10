@@ -180,6 +180,7 @@ fn join_completes_in_one_call() {
     let bystander = Integrator::with_key(ALICE);
     let bystander_join: Option<TestConversation> = Conversation::join(
         &bystander.provider,
+        test_mls_group_config().join_config(),
         &bystander.signer,
         &welcome.welcome_bytes,
         &welcome.conversation_sync_bytes,
@@ -200,6 +201,7 @@ fn join_completes_in_one_call() {
     // joiner — holding the KP provider — gets `Some`.
     let joined: TestConversation = Conversation::join(
         &bob.provider,
+        test_mls_group_config().join_config(),
         &bob.signer,
         &welcome.welcome_bytes,
         &welcome.conversation_sync_bytes,
@@ -282,6 +284,7 @@ fn create_with_members_seeds_initial_members_at_genesis() {
     for member in [&bob, &charlie] {
         let joined: TestConversation = Conversation::join(
             &member.provider,
+            test_mls_group_config().join_config(),
             &member.signer,
             &welcome.welcome_bytes,
             &welcome.conversation_sync_bytes,
@@ -355,6 +358,7 @@ fn create_with_members_founds_a_subset_steward_group() {
     for member in [&bob, &charlie, &dave] {
         let joined: TestConversation = Conversation::join(
             &member.provider,
+            test_mls_group_config().join_config(),
             &member.signer,
             &welcome.welcome_bytes,
             &welcome.conversation_sync_bytes,

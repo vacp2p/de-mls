@@ -11,7 +11,7 @@ use std::error::Error as StdError;
 use std::sync::Arc;
 
 use openmls::credentials::CredentialWithKey;
-use openmls::group::MlsGroupCreateConfig;
+use openmls::group::{MlsGroupCreateConfig, MlsGroupJoinConfig};
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 
@@ -149,7 +149,9 @@ where
     /// joiner-side MLS group from `welcome_bytes` using `provider` (which must
     /// hold the joiner's key-package private keys), runs the joiner-side join
     /// side-effects, and replays the bundled `ConversationSync` (steward list,
-    /// timing, peer scores).
+    /// timing, peer scores). `group_config` is the joiner's counterpart of the
+    /// `group_config` handed to [`Self::create`] and must use the ratchet tree
+    /// extension as well.
     ///
     /// Returns `Ok(None)` when the welcome doesn't address one of our key
     /// packages — the "not for us" branch, not an error.
@@ -162,6 +164,7 @@ where
     #[allow(clippy::too_many_arguments)]
     pub fn join<Pr>(
         provider: &Pr,
+        group_config: &MlsGroupJoinConfig,
         signer: &impl Signer,
         welcome_bytes: &[u8],
         conversation_sync_bytes: &[u8],
@@ -175,7 +178,7 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let Some(mls) = MlsService::new_from_welcome(provider, welcome_bytes)? else {
+        let Some(mls) = MlsService::new_from_welcome(provider, group_config, welcome_bytes)? else {
             return Ok(None);
         };
         let conversation_id = mls.conversation_id().to_string();

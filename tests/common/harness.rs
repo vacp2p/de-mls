@@ -760,6 +760,7 @@ impl Member {
         // `Some`.
         match Conversation::join(
             &self.integ.provider,
+            test_mls_group_config().join_config(),
             &self.integ.signer,
             &welcome.welcome_bytes,
             &welcome.conversation_sync_bytes,

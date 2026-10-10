@@ -51,7 +51,7 @@ let mut convo: Conversation<DefaultConsensusPlugin, InMemoryPeerScoreStorage, _>
     Conversation::create(id, &provider, credential, group_config, &signer,
                          &consensus, scoring, clock, app_id, config, initial_members)?;
 
-// let joined = Conversation::join(&provider, &signer,
+// let joined = Conversation::join(&provider, join_config, &signer,
 //                                 welcome_bytes, sync_bytes, …)?;  // Ok(None) = not for us
 // de-mls surfaces members as OpenMLS `Member`s (via `members_view()` and the
 // `MembersChanged` event) and takes back an opaque `MemberId` handle
