@@ -47,6 +47,9 @@ pub struct FakeRouter {
     /// Chat the application received: `(sender, text)`.
     pub chats: Vec<(MemberId, Vec<u8>)>,
     next_wakeup: Option<Timestamp>,
+    /// When this router last asked for a sync; it asks again on its own
+    /// clock while the engine is still unsynced.
+    sync_asked: Option<Timestamp>,
     /// Set once `Decision::Leave` ran.
     pub left: bool,
     /// Inputs the engine refused, in arrival order. The engine keeps no
@@ -110,6 +113,7 @@ impl FakeRouter {
         )
         .expect("engine join");
         let mut router = Self::over(mls, engine);
+        router.sync_asked = Some(now);
         router.drive(now, out);
         router
     }
@@ -124,6 +128,7 @@ impl FakeRouter {
             decisions: Vec::new(),
             chats: Vec::new(),
             next_wakeup: None,
+            sync_asked: None,
             left: false,
             held: Vec::new(),
             rejected_commits: Vec::new(),
@@ -326,7 +331,15 @@ impl FakeRouter {
         self.rejected_commits.clear();
         self.staged_hashes.clear();
         self.pending_update = false;
+        self.sync_asked = (!self.engine.is_synced()).then_some(now);
         self.drive(now, out);
+    }
+
+    /// Ask the stewards for a sync, as the router's own call, and note when.
+    pub fn ask_sync(&mut self, now: Timestamp) {
+        self.sync_asked = Some(now);
+        let out = self.engine.request_sync(now);
+        self.finish(now, out);
     }
 
     /// Catch-up as the contract describes it: the retained frames in send
@@ -435,6 +448,16 @@ impl FakeRouter {
         if self.left {
             return;
         }
+        // The bed's patience, a router policy: the contract says only that
+        // the router asks again on its own clock.
+        let patience = 2 * self.engine.config().backup_takeover_window;
+        if !self.engine.is_synced()
+            && self
+                .sync_asked
+                .is_some_and(|t| now.saturating_duration_since(t) >= patience)
+        {
+            self.ask_sync(now);
+        }
         if self.next_wakeup.is_some_and(|due| due <= now) {
             self.next_wakeup = None;
             let out = self.engine.tick(now);
@@ -476,6 +499,13 @@ impl FakeRouter {
                 |e| matches!(e, Event::MemberUpdated { member } if member == self.mls.own_id()),
             ) {
                 self.pending_update = false;
+            }
+            if out
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::CommitAdopted { .. }))
+            {
+                self.sync_asked = Some(now);
             }
             self.events.append(&mut out.events);
             if round_closed && !self.replaying {

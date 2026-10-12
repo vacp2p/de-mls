@@ -299,10 +299,6 @@ pub enum Event {
     CommitRoundProgress { received: usize, expected: usize },
     /// A `ConversationSync` was adopted and its steward list installed.
     SyncApplied,
-    /// The request this node sent went unanswered for both answer turns. The
-    /// engine asks no further on its own; [`super::Engine::request_sync`]
-    /// asks again.
-    SyncUnanswered,
     /// A round closed with no valid commit from the epoch steward. The
     /// batch stays queued and the next round opens on its own; call
     /// [`super::Engine::request_recovery`] to put skipping the steward to

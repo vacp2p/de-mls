@@ -36,11 +36,10 @@ fn backup_steward_answers_when_the_epoch_steward_is_silent() {
 }
 
 // A `Working` member asks anyway (the pull is not limited to any phase)
-// and learns from the answer that its list is current: the only things a
-// router can see are its own events and phase, and it sees neither an
-// adoption nor a miss.
+// and adopts the equal answer: the router sees `SyncApplied` and the phase
+// stays `Working`.
 #[test]
-fn a_working_member_can_ask_and_learns_it_is_current() {
+fn a_working_member_that_asks_adopts_the_equal_answer() {
     let mut bed = Bed::new("conv", "alice", fast_config());
     let bob = bed.seat(0, "bob");
     let carol = bed.seat(0, "carol");
@@ -53,19 +52,12 @@ fn a_working_member_can_ask_and_learns_it_is_current() {
 
     let events_before = bed.router(n).events.len();
     let now = bed.now;
-    bed.router_mut(n)
-        .act(now, |e| e.request_sync(now))
-        .expect("request sync");
+    bed.router_mut(n).ask_sync(now);
 
-    let window = bed.router(n).engine.config().backup_takeover_window;
-    let deadline = bed.now + window * 2;
-    bed.process_until("the request settles with no miss", |b| b.now >= deadline);
-
-    assert!(
-        !bed.router(n).events[events_before..]
+    bed.process_until("the equal answer is adopted", |b| {
+        b.router(n).events[events_before..]
             .iter()
-            .any(|e| matches!(e, Event::SyncApplied | Event::SyncUnanswered)),
-        "a current node adopts nothing and reports no miss"
-    );
+            .any(|e| matches!(e, Event::SyncApplied))
+    });
     assert_eq!(bed.router(n).engine.phase(), Phase::Working);
 }

@@ -209,8 +209,6 @@ impl<St: EngineStore> Engine<St> {
             "steward election applied"
         );
         self.dirty.steward_list = true;
-        // An installed election settles a pending ask in any phase.
-        self.timing.sync_deadline = None;
         if let Some(working) = self.leave_syncing() {
             self.emit_phase(Some(working));
         }

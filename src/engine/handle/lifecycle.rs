@@ -51,7 +51,6 @@ impl<St: EngineStore> Engine<St> {
     /// resolved it. `None` from any other phase.
     pub(crate) fn leave_syncing(&mut self) -> Option<Phase> {
         if self.phase == Phase::Syncing {
-            self.timing.sync_deadline = None;
             Some(self.start_working())
         } else {
             None
