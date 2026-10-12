@@ -114,11 +114,6 @@ fn a_proposal_filed_during_a_round_lands_in_the_next_commit() {
     let filed_at = bed.router(steward).events.len();
     bed.router_mut(steward)
         .announce(now, dave_id.clone(), kp_dave);
-    assert_eq!(
-        bed.router(steward).held_announcements_count(),
-        0,
-        "propose_add was accepted, not held"
-    );
 
     // Finer steps than `process_until`: the approval trails the close by
     // tens of milliseconds, inside one coarse step.
