@@ -81,10 +81,7 @@ fn a_candidate_while_syncing_is_refused_and_kept() {
             self_removed: false,
         },
     );
-    assert!(matches!(
-        result,
-        Err(ConversationError::ConversationBlocked(_))
-    ));
+    assert!(matches!(result, Err(ConversationError::Refused(_))));
     assert!(e.round_candidate.is_none());
     assert!(e.out.decisions.is_empty());
     let after = e.scoring.score_for(&member("alice"));

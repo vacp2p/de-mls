@@ -10,7 +10,7 @@
 use tracing::{debug, info, warn};
 
 use crate::{
-    ConversationError, ScoreEvent, ScoreOp,
+    ConversationError, Refusal, ScoreEvent, ScoreOp,
     engine::{
         handle::Engine,
         queues::EngineQueues,
@@ -26,8 +26,8 @@ use crate::{
 impl<St: EngineStore> Engine<St> {
     /// Handles a candidate commit staged by the router. Only the epoch steward's
     /// candidate is kept per round; others are scored and rejected, and stay staged.
-    /// Validation happens at round close. If `Syncing`, the call is refused until
-    /// `Working`.
+    /// Validation happens at round close. If `Syncing`, the call returns
+    /// `Refused` until a list covers the epoch.
     pub fn handle_candidate(
         &mut self,
         now: Timestamp,
@@ -49,9 +49,7 @@ impl<St: EngineStore> Engine<St> {
         // Without a list this node cannot validate the candidate. The router
         // keeps it staged and reports it again after `PhaseChange(Working)`.
         if self.phase == Phase::Syncing {
-            return Err(ConversationError::ConversationBlocked(
-                self.phase.to_string(),
-            ));
+            return Err(ConversationError::Refused(Refusal::Syncing));
         }
 
         let expected = self.expected_steward();

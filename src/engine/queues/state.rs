@@ -227,9 +227,7 @@ impl EngineQueues {
 }
 
 /// Capacity of the resolved-outcome dedup set (`resolved_proposals`): proposal
-/// IDs with a locally observed consensus outcome, kept for the duplicate-drop
-/// guard on consensus outcomes and the late-vote classifier on incoming votes.
-/// Sized well above the consensus library's `max_sessions_per_scope` (default
-/// 10) so a late vote arriving within any plausible peer-lag window still finds
-/// its id cached.
+/// IDs with a locally observed consensus outcome. It guards against a
+/// duplicate consensus outcome: the library re-emits `ConsensusReached` for a
+/// vote or a timeout that reaches a session already reached.
 const RESOLVED_PROPOSAL_CACHE_CAPACITY: usize = 256;

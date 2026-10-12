@@ -20,10 +20,8 @@ impl<St: EngineStore> Engine<St> {
     /// Propose adding `member`, whose key package the router validated.
     /// Proposing is this member's own YES, so no vote request comes back.
     ///
-    /// A `ConversationBlocked` refusal means the conversation is `Syncing`;
-    /// `PartialFreeze` means an emergency proposal is in flight. The engine
-    /// keeps no memory of the attempt, so it is the caller's to retry once
-    /// it drains an `Event::PhaseChange(Phase::Working)`.
+    /// `PartialFreeze` means an emergency proposal is in flight; the engine
+    /// keeps no memory of the attempt, and filing again is the caller's.
     pub fn propose_add(
         &mut self,
         now: Timestamp,
@@ -88,8 +86,7 @@ impl<St: EngineStore> Engine<St> {
 
     /// File `update`, the MLS Update proposal this member signed for its own
     /// leaf. It is approved at once and carried by the epoch steward's next
-    /// commit; a second call in the epoch is a no-op. Refused and retried
-    /// like [`Self::propose_add`].
+    /// commit; a second call in the epoch is a no-op.
     pub fn propose_update(
         &mut self,
         now: Timestamp,
@@ -161,7 +158,7 @@ fn invite(member: &MemberId, key_package: Vec<u8>) -> ConversationUpdateRequest 
 mod tests {
     use super::*;
     use crate::engine::{
-        test_support::{creator, id, joiner},
+        test_support::{creator, id},
         types::{ActionKind, Outbound, Phase},
     };
 
@@ -174,22 +171,6 @@ mod tests {
             Err(ConversationError::AlreadyMember)
         ));
         assert!(engine.out.outbound.is_empty());
-    }
-
-    /// A joiner, still `Syncing`, is refused a new member and nothing is
-    /// queued or sent; a steward election is the one proposal it may file.
-    #[test]
-    fn propose_add_refuses_while_syncing() {
-        let mut engine = joiner();
-        assert_eq!(engine.phase(), Phase::Syncing);
-        assert!(matches!(
-            engine.propose_add(Timestamp::ZERO, id("dave"), b"kp".to_vec()),
-            Err(ConversationError::ConversationBlocked(_))
-        ));
-        assert!(engine.out.outbound.is_empty());
-        assert_eq!(engine.queues.approved_proposals_count(), 0);
-
-        assert!(engine.propose_election(Timestamp::ZERO).is_ok());
     }
 
     /// An add filed while a round is open lands in the approved queue with

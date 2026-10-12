@@ -20,7 +20,7 @@ use prost::Message;
 use tracing::{debug, info, warn};
 
 use crate::{
-    ConversationError,
+    ConversationError, Refusal,
     engine::{
         consensus::wire::{
             ProposalParams, authorize_fast_path_proposal, control_proposal, control_vote,
@@ -28,7 +28,7 @@ use crate::{
         handle::Engine,
         proposal_kind::{ProposalKind, in_flight_target},
         store::EngineStore,
-        types::{ActionKind, Decision, Event, MemberId, Output, Phase, Timestamp},
+        types::{ActionKind, Decision, Event, MemberId, Output, Timestamp},
     },
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, VotingSession, conversation_update_request,
@@ -52,8 +52,8 @@ impl<St: EngineStore> Engine<St> {
     /// with the proposal in one atomic wire message — no vote request
     /// reaches the router, since the vote is already cast.
     ///
-    /// Errors when the phase forbids new proposals (`Syncing`, or the
-    /// partial freeze during an active emergency). No-ops when a change for
+    /// Errors under the partial freeze of an active emergency. No-ops when a
+    /// change for
     /// the request's target member is already in flight locally. On success
     /// the proposal is queued as `Outbound::Control` and a consensus-timeout
     /// deadline is armed for [`Self::tick_deadlines`] to fire.
@@ -151,8 +151,10 @@ impl<St: EngineStore> Engine<St> {
     /// must be the MLS-authenticated `sender`; anything else is forged and
     /// dropped.
     ///
-    /// Late arrivals are swallowed (logged, `Ok`) so inbound dispatch keeps
-    /// draining.
+    /// A vote for a session this node does not hold is refused and the router
+    /// feeds it again; a vote for a session trimmed after its outcome is
+    /// refused too and expires at the router's TTL. A late or duplicate vote
+    /// for a held session is dropped (logged, `Ok`).
     pub(crate) fn forward_incoming_vote(
         &mut self,
         sender: &[u8],
@@ -169,7 +171,6 @@ impl<St: EngineStore> Engine<St> {
             );
             return Ok(());
         }
-        let outcome_applied_locally = self.queues.is_consensus_outcome_applied(proposal_id);
         let scope = self.conversation_id.clone();
         let now = self.now.as_secs();
         match self.consensus.process_incoming_vote(&scope, vote, now) {
@@ -181,25 +182,22 @@ impl<St: EngineStore> Engine<St> {
                 debug!(
                     conversation = %self.conversation_id,
                     proposal_id,
-                    "late vote dropped: consensus session already resolved"
+                    "late vote dropped: session already resolved"
+                );
+                Ok(())
+            }
+            Err(ConsensusError::DuplicateVote) => {
+                debug!(
+                    conversation = %self.conversation_id,
+                    proposal_id,
+                    "duplicate vote dropped: already counted"
                 );
                 Ok(())
             }
             Err(ConsensusError::SessionNotFound) => {
-                if outcome_applied_locally {
-                    debug!(
-                        conversation = %self.conversation_id,
-                        proposal_id,
-                        "late vote dropped: session trimmed after local resolution"
-                    );
-                } else {
-                    warn!(
-                        conversation = %self.conversation_id,
-                        proposal_id,
-                        "vote for unknown proposal id dropped: no local session and not in resolved cache"
-                    );
-                }
-                Ok(())
+                Err(ConversationError::Refused(Refusal::UnknownSession {
+                    proposal_id,
+                }))
             }
             Err(e) => Err(e.into()),
         }
@@ -592,18 +590,12 @@ impl<St: EngineStore> Engine<St> {
 
     // ── private ──────────────────────────────────────────────────────
 
-    /// Refuse a proposal that cannot be opened right now. A proposal opens in
-    /// every phase but `Syncing`, where only the steward election that ends it
-    /// does; an active emergency also blocks lower-priority proposals.
+    /// Refuse a proposal that cannot be opened right now: an active emergency
+    /// blocks lower-priority proposals.
     pub(crate) fn check_proposal_allowed(
         &self,
         kind: ProposalKind,
     ) -> Result<(), ConversationError> {
-        let state = self.phase;
-        let allowed_here = state != Phase::Syncing || kind.is_steward_election();
-        if !allowed_here {
-            return Err(ConversationError::ConversationBlocked(state.to_string()));
-        }
         if self.queues.partial_freeze_blocks(kind) {
             return Err(ConversationError::PartialFreeze);
         }

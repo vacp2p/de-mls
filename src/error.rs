@@ -2,6 +2,27 @@
 
 use hashgraph_like_consensus::error::ConsensusError;
 
+/// Why an input was refused. A refusal leaves no trace in the engine; the
+/// router feeds the input again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The conversation is `Syncing`: a candidate cannot be judged yet.
+    Syncing,
+    /// No session is held for the proposal.
+    UnknownSession { proposal_id: u32 },
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Syncing => write!(f, "no steward list covers this epoch"),
+            Self::UnknownSession { proposal_id } => {
+                write!(f, "no session for proposal {proposal_id}")
+            }
+        }
+    }
+}
+
 /// Errors from operations on a single conversation — protocol faults and
 /// caller-facing guard failures alike.
 ///
@@ -10,8 +31,8 @@ use hashgraph_like_consensus::error::ConsensusError;
 /// type.
 #[derive(Debug, thiserror::Error)]
 pub enum ConversationError {
-    #[error("Cannot send message: conversation is in {0} state")]
-    ConversationBlocked(String),
+    #[error("refused: {0}")]
+    Refused(Refusal),
 
     #[error(
         "Lower-priority proposal blocked: an emergency criteria proposal is active (RFC partial freeze)"
