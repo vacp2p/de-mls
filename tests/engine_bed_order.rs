@@ -52,3 +52,51 @@ fn votes_that_arrive_before_their_proposal_are_counted() {
         "dave counted the votes and accepted the commit"
     );
 }
+
+/// A joiner that has never held a list takes it from an election filed the
+/// instant it is seated. The answer to its own ask arrives a step later
+/// carrying the same list and is adopted: dave sees `SyncApplied`.
+#[test]
+fn a_joiner_adopts_its_answer_after_it_voted_on_an_election() {
+    let mut bed = Bed::new("conv", "alice", config());
+    bed.seat(0, "bob");
+    let dave = bed.add_pending("dave");
+    let now = bed.now;
+    let key_package = bed.key_package_of(dave);
+    let id = bed.nodes[dave].own.clone();
+    bed.router_mut(0).announce(now, id, key_package);
+    bed.process_until("dave seated", |b| b.is_live(dave) && b.epochs_agree());
+
+    let now = bed.now;
+    let mut filers = Vec::new();
+    for node in bed.live_nodes() {
+        if node == dave {
+            continue;
+        }
+        let mut sent = false;
+        bed.router_mut(node)
+            .act(now, |e| {
+                let out = e.propose_election(now);
+                sent = out.as_ref().is_ok_and(|o| !o.outbound.is_empty());
+                out
+            })
+            .expect("propose_election");
+        if sent {
+            filers.push(node);
+        }
+    }
+    assert_eq!(filers, vec![bed.epoch_steward()], "the epoch steward files");
+
+    bed.process_until("dave adopts the answer to its ask", |b| {
+        b.router(dave)
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::SyncApplied))
+    });
+    assert!(bed.converged());
+    assert!(
+        bed.live_nodes()
+            .iter()
+            .all(|&i| bed.router(i).engine.is_synced())
+    );
+}
