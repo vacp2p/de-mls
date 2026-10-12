@@ -341,12 +341,11 @@ fn an_unexpected_merge_is_adopted_in_full() {
 
 /// While `Syncing`, an adoption moves epoch and members in full but keeps
 /// the phase — a node with no list would install one from an incomplete
-/// picture — and asks no second sync while one is already pending.
+/// picture — and asks the stewards for a sync.
 #[test]
-fn an_adoption_while_syncing_keeps_the_phase_and_asks_once() {
+fn an_adoption_while_syncing_keeps_the_phase_and_asks() {
     let mut e = joiner();
     assert_eq!(e.phase(), Phase::Syncing);
-    assert!(e.timing.sync_deadline.is_some(), "join arms the ask");
 
     let hash = CommitHash::of(b"relayed");
     let out = e
@@ -365,11 +364,13 @@ fn an_adoption_while_syncing_keeps_the_phase_and_asks_once() {
         out.events.contains(&Event::CommitAdopted { hash }),
         "the adoption is reported"
     );
-    assert!(
-        !out.outbound
+    assert_eq!(
+        out.outbound
             .iter()
-            .any(|o| matches!(o, Outbound::Control(_))),
-        "the ask is already pending"
+            .filter(|o| matches!(o, Outbound::Control(_)))
+            .count(),
+        1,
+        "the adoption asks the stewards for a sync"
     );
 }
 

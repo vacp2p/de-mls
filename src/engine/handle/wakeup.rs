@@ -20,7 +20,6 @@ impl<St: EngineStore> Engine<St> {
             .copied()
             .chain(self.timing.pending_auto_votes.values().map(|e| e.fire_at))
             .chain(self.phase_deadline())
-            .chain(self.timing.sync_deadline)
             .chain(
                 self.timing
                     .sync_takeover_anchor

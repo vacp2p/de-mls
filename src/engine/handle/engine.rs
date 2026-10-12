@@ -59,9 +59,6 @@ pub(crate) struct Timing {
     /// The backup steward's answer-turn anchor: the arrival of a request the
     /// epoch steward has the first turn on.
     pub(crate) sync_takeover_anchor: Option<Timestamp>,
-    /// End of the answer turns armed by the last sync request; `None` while
-    /// nothing is awaited or the miss was reported.
-    pub(crate) sync_deadline: Option<Timestamp>,
 }
 
 impl Timing {
@@ -72,7 +69,6 @@ impl Timing {
             pending_consensus_timeouts: HashMap::new(),
             last_commit_round_progress: None,
             sync_takeover_anchor: None,
-            sync_deadline: None,
         }
     }
 }

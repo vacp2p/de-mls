@@ -68,7 +68,7 @@ impl<St: EngineStore> Engine<St> {
         engine.queues.record_join_epoch(engine.own.clone(), epoch);
         engine.begin(now);
         // A joiner holds no steward list: ask for the sync in this very
-        // `Output` and report the answer turns as its wakeup.
+        // `Output`.
         let syncing = engine.start_syncing();
         engine.emit_phase(Some(syncing));
         engine.broadcast_sync_request();
@@ -194,11 +194,7 @@ mod tests {
             1,
             "a joiner asks for a sync"
         );
-        assert_eq!(
-            out.wakeup,
-            Some(engine.config().backup_takeover_window * 2),
-            "a joiner wakes to report the answer missing"
-        );
+        assert_eq!(out.wakeup, None, "nothing is due after the ask");
     }
 
     /// A snapshot written at an epoch behind the group's is stale: scores
@@ -250,18 +246,13 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(
-            out.wakeup,
-            Some(restored.config().backup_takeover_window * 2),
-            "the request it sent arms both answer turns"
-        );
+        assert_eq!(out.wakeup, None, "nothing is due after the ask");
     }
 
-    /// A joiner asks for a sync in the output of its join, reports it
-    /// unanswered once both answer turns have passed, and does not ask
+    /// A joiner asks for a sync in the output of its join and does not ask
     /// again on its own.
     #[test]
-    fn a_joiner_asks_for_a_sync_at_join_and_reports_once() {
+    fn a_joiner_asks_for_a_sync_once_at_join() {
         let (mut engine, out) = Engine::join(
             at(1_000),
             "conv",
@@ -282,20 +273,10 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(out.wakeup, Some(turns));
-
-        let out = engine.tick(at(1_000)).expect("tick");
-        assert!(out.outbound.is_empty());
-        assert_eq!(engine.phase(), Phase::Syncing);
-
-        let out = engine.tick(at(1_000) + turns).expect("tick");
-        assert!(out.outbound.is_empty());
-        assert!(out.events.contains(&Event::SyncUnanswered));
-        assert_eq!(engine.phase(), Phase::Syncing);
+        assert_eq!(out.wakeup, None);
 
         let out = engine.tick(at(1_000) + turns * 2).expect("tick");
         assert!(out.outbound.is_empty());
-        assert!(!out.events.contains(&Event::SyncUnanswered));
         assert_eq!(engine.phase(), Phase::Syncing);
     }
 

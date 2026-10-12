@@ -267,49 +267,13 @@ fn share_conversation_sync_is_noop_without_list() {
     assert!(engine.out.outbound.is_empty());
 }
 
-/// A joiner already asked at `join`: the window it is waiting out reports
-/// once when it passes, and the pull side asks again only when the router
-/// does.
+/// The router's ask goes out as one request, in any phase.
 #[test]
-fn a_sync_request_is_reported_missing_once() {
+fn the_routers_ask_is_one_request() {
     let mut engine = joiner();
-    let turns = engine.config.backup_takeover_window * 2;
-
-    engine.begin(Timestamp::ZERO);
-    engine.drive_sync_request();
-    assert!(engine.out.events.is_empty());
-
-    engine.begin(Timestamp::ZERO + turns);
-    engine.drive_sync_request();
-    assert!(engine.out.events.contains(&Event::SyncUnanswered));
-    assert!(engine.timing.sync_deadline.is_none());
-    assert_eq!(engine.phase(), Phase::Syncing);
-
-    engine.begin(Timestamp::ZERO + turns * 2);
-    engine.drive_sync_request();
-    assert_eq!(
-        engine
-            .out
-            .events
-            .iter()
-            .filter(|e| matches!(e, Event::SyncUnanswered))
-            .count(),
-        1,
-        "reported once, not again on its own"
-    );
-
-    // Drain what accumulated so far: the router's ask below is measured on
-    // its own.
-    engine.finish().expect("finish");
-
-    let out = engine
-        .request_sync(Timestamp::ZERO + turns * 2)
-        .expect("request sync");
-    assert_eq!(out.outbound.len(), 1, "every further ask is the router's");
-
-    engine.begin(Timestamp::ZERO + turns * 3);
-    engine.drive_sync_request();
-    assert!(engine.out.events.contains(&Event::SyncUnanswered));
+    let out = engine.request_sync(Timestamp::ZERO).expect("request sync");
+    assert_eq!(out.outbound.len(), 1);
+    assert_eq!(out.wakeup, None);
 }
 
 /// The sync round-trips: what a steward builds, a member with no list
@@ -333,7 +297,6 @@ fn conversation_sync_round_trips_into_a_joiner() {
     assert_eq!(engine.phase(), Phase::Working);
     assert!(out.events.contains(&Event::SyncApplied));
     assert!(out.events.contains(&Event::PhaseChange(Phase::Working)));
-    assert!(engine.timing.sync_deadline.is_none());
 }
 
 /// Adopting a sync whose `consensus_timeout` sits below this node's own
@@ -431,19 +394,41 @@ fn a_working_node_adopts_a_newer_election() {
     assert_eq!(b.steward_list.election_epoch(), Some(1));
     assert!(b.out.events.contains(&Event::SyncApplied));
     assert_eq!(b.phase(), Phase::Working);
-    assert!(b.timing.sync_deadline.is_none());
 }
 
-/// A current node — its own list is from this same election or a newer one
-/// — still counts the answer against the request it sent: nothing is
-/// adopted, but the pending deadline is settled and no miss follows.
+/// A `Working` node holding a list adopts an answer from the same election:
+/// the answer's timing replaces its own and `SyncApplied` is reported.
 #[test]
-fn a_current_node_counts_an_answer_and_reports_no_miss() {
-    let members = [id("alice"), id("bob"), id("carol")];
-    let mut a = Engine::create(
+fn a_working_node_adopts_an_answer_from_the_same_election() {
+    let members = [id("alice"), id("bob")];
+    let steward_config = EngineConfig {
+        consensus_timeout: Duration::from_secs(5),
+        voting_delay: Duration::from_secs(1),
+        ..EngineConfig::default()
+    };
+    let mut steward = Engine::create(
         at(0),
         "conv",
         id("alice"),
+        1,
+        &members,
+        steward_config,
+        InMemoryStore::default(),
+    )
+    .expect("create")
+    .0;
+    steward.begin(at(0));
+    let sync = decode_sync(
+        &steward
+            .build_conversation_sync()
+            .expect("build")
+            .expect("a list is installed"),
+    );
+
+    let mut a = Engine::create(
+        at(0),
+        "conv",
+        id("bob"),
         1,
         &members,
         EngineConfig::default(),
@@ -451,23 +436,66 @@ fn a_current_node_counts_an_answer_and_reports_no_miss() {
     )
     .expect("create")
     .0;
+    assert_eq!(a.steward_list.election_epoch(), Some(sync.election_epoch));
+    assert_eq!(a.phase(), Phase::Working);
 
-    a.begin(at(0));
-    a.broadcast_sync_request();
-    let bytes = a
-        .build_conversation_sync()
-        .expect("build")
-        .expect("a list is installed");
-    let sync = decode_sync(&bytes);
+    a.begin(at(1));
+    a.on_conversation_sync(sync).expect("adopt");
 
-    a.on_conversation_sync(sync)
-        .expect("answered, nothing newer");
+    assert!(a.out.events.contains(&Event::SyncApplied));
+    assert_eq!(a.config.consensus_timeout, Duration::from_secs(5));
+    assert_eq!(a.phase(), Phase::Working);
+}
+
+/// An answer from an older election than the node's own list is ignored:
+/// no `SyncApplied`, timing untouched.
+#[test]
+fn an_answer_from_an_older_election_is_ignored() {
+    let members = [id("alice"), id("bob")];
+    let steward_config = EngineConfig {
+        consensus_timeout: Duration::from_secs(5),
+        voting_delay: Duration::from_secs(1),
+        ..EngineConfig::default()
+    };
+    let mut steward = Engine::create(
+        at(0),
+        "conv",
+        id("alice"),
+        0,
+        &members,
+        steward_config,
+        InMemoryStore::default(),
+    )
+    .expect("create")
+    .0;
+    steward.begin(at(0));
+    let sync = decode_sync(
+        &steward
+            .build_conversation_sync()
+            .expect("build")
+            .expect("a list is installed"),
+    );
+
+    let mut a = Engine::create(
+        at(0),
+        "conv",
+        id("bob"),
+        1,
+        &members,
+        EngineConfig::default(),
+        InMemoryStore::default(),
+    )
+    .expect("create")
+    .0;
+    assert_eq!(sync.election_epoch, 0);
+    assert_eq!(a.steward_list.election_epoch(), Some(1));
+    let timeout = a.config.consensus_timeout;
+
+    a.begin(at(1));
+    a.on_conversation_sync(sync).expect("answered");
+
     assert!(!a.out.events.contains(&Event::SyncApplied));
-    assert!(a.timing.sync_deadline.is_none());
-
-    a.begin(at(0) + a.config.backup_takeover_window * 2);
-    a.drive_sync_request();
-    assert!(!a.out.events.contains(&Event::SyncUnanswered));
+    assert_eq!(a.config.consensus_timeout, timeout);
 }
 
 /// A candidate held while `Freezing` is re-checked against the newly
@@ -670,19 +698,29 @@ fn a_joiner_seated_after_a_relayed_session_was_filed_does_not_vote() {
     );
 }
 
-/// A node whose list is current ignores the pending work too: neither the
-/// proposal nor the session is taken.
+/// A node whose list is newer than the answer's ignores the pending work
+/// too: neither the proposal nor the session is taken.
 #[test]
-fn a_current_node_ignores_the_pending_work() {
+fn a_node_with_a_newer_list_ignores_the_pending_work() {
     let (_, bytes) = steward_with_pending_work();
     let session_id = decode_sync(&bytes).voting_sessions[0]
         .proposal
         .as_ref()
         .expect("proposal")
         .proposal_id;
-    let mut engine = founder();
+    let mut engine = Engine::create(
+        Timestamp::ZERO,
+        "conv",
+        id("alice"),
+        2,
+        &[id("alice"), id("bob")],
+        EngineConfig::default(),
+        InMemoryStore::default(),
+    )
+    .expect("create")
+    .0;
     engine
-        .handle_control(Timestamp::ZERO, id("bob"), 1, &bytes)
+        .handle_control(Timestamp::ZERO, id("bob"), 2, &bytes)
         .expect("handle control");
 
     assert_eq!(engine.queues.approved_proposals_count(), 0);

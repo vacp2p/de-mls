@@ -112,13 +112,13 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// Ask the stewards for a `ConversationSync`. The engine asks once on its
-    /// own, at `join` and at a stale restart; every other ask is the
-    /// router's, in any phase: after an offline stretch, after
-    /// [`Event::SyncUnanswered`](crate::engine::Event::SyncUnanswered), after
+    /// own, at `join`, at a stale restart and at an adoption; every other ask
+    /// is the router's, on its own clock, in any phase: while it is still not
+    /// synced, after an offline stretch, after
     /// [`Event::CandidateRejected`](crate::engine::Event::CandidateRejected).
-    /// An answer carrying nothing newer is ignored silently; `SyncApplied`
-    /// reports an adoption; `SyncUnanswered` reports two answer turns with no
-    /// valid answer.
+    /// An answer as new as this node's list or newer is adopted and reported
+    /// as [`Event::SyncApplied`](crate::engine::Event::SyncApplied); an older
+    /// one is ignored.
     pub fn request_sync(&mut self, now: Timestamp) -> Result<Output, ConversationError> {
         self.begin(now);
         self.broadcast_sync_request();
@@ -256,15 +256,13 @@ mod tests {
     }
 
     /// The router's ask goes out in any phase, `Working` included: exactly
-    /// one control message, and the answer-turn window is armed as the
-    /// wakeup.
+    /// one control message.
     #[test]
     fn request_sync_asks_in_any_phase() {
         let mut engine = creator();
-        let config = engine.config().clone();
         let out = engine.request_sync(Timestamp::ZERO).expect("request sync");
         assert!(matches!(out.outbound.as_slice(), [Outbound::Control(_)]));
-        assert_eq!(out.wakeup, Some(config.backup_takeover_window * 2));
+        assert_eq!(out.wakeup, None);
     }
 
     /// Scoring an unknown member has nothing to file.

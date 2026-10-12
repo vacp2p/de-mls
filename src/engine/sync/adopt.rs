@@ -21,7 +21,8 @@ use crate::{
 
 impl<St: EngineStore> Engine<St> {
     /// Adopt a steward's `ConversationSync` when this node holds no steward
-    /// list, or one from a strictly older election, in any phase.
+    /// list, or one no newer than the answer's, in any phase. An older
+    /// answer is ignored.
     /// Reconstructs the candidate pool (members minus the carried unsettled
     /// set), re-derives the steward list to verify it, then applies list,
     /// protocol flags, timing and peer scores. A valid answer settles the
@@ -37,14 +38,13 @@ impl<St: EngineStore> Engine<St> {
         {
             return Ok(());
         }
-        // A valid answer settles the request, adopted or not: the requester's
-        // deadline and a backup steward's pending turn.
-        self.timing.sync_deadline = None;
+        // A valid answer settles a backup steward's pending turn, adopted or
+        // not.
         self.timing.sync_takeover_anchor = None;
         if let Some(mine) = self.steward_list.election_epoch()
-            && sync.election_epoch <= mine
+            && sync.election_epoch < mine
         {
-            // Current: nothing newer to adopt.
+            // Older than ours: nothing to adopt.
             return Ok(());
         }
 

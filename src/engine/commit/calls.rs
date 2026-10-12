@@ -170,7 +170,7 @@ impl<St: EngineStore> Engine<St> {
             self.reconcile_list_and_phase();
         }
 
-        if !decided && self.timing.sync_deadline.is_none() {
+        if !decided {
             self.broadcast_sync_request();
         }
 
