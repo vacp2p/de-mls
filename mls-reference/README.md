@@ -138,19 +138,19 @@ MUST.
     election lands it refuses candidates. A refused candidate is held
     (rule 6); a merge in between drops it as stale (rule 14).
 12. A sync is pulled, never pushed. The engine asks once when it holds
-    nothing, at `join` and at a stale restart; every other ask is
-    `request_sync(now)`, the router's call in any phase: after an offline
-    stretch, after `Event::SyncUnanswered`, after
+    nothing, at `join` and at a stale restart, and after an adoption; it
+    keeps no deadline. Every other ask is `request_sync(now)`, the
+    router's call in any phase and on its own clock: while it is still
+    not synced, after an offline stretch, after
     `Event::CandidateRejected`. A synced steward answers with its list,
-    timing, scores, approved work and open votes. A node whose list is
-    older adopts the answer, in any phase, and reports `SyncApplied`; a
-    current node ignores it. An open vote counts the members of the epoch
-    it was filed in: a member seated by then votes, a member seated later
-    only waits for it to end. Two answer turns with no valid answer report
-    `SyncUnanswered` once. A list elected after the node's own epoch is
-    not a valid answer for it (it cannot be recomputed over a member set
-    the node lacks): a node an epoch behind heals through the missing
-    commit (rule 6), not through a sync.
+    timing, scores, approved work and open votes. A node adopts an answer
+    whose list is as new as its own or newer, in any phase, and reports
+    `SyncApplied`; an older one is ignored. An open vote counts the
+    members of the epoch it was filed in: a member seated by then votes,
+    a member seated later only waits for it to end. A list elected after
+    the node's own epoch is not a valid answer for it (it cannot be
+    recomputed over a member set the node lacks): a node an epoch behind
+    heals through the missing commit (rule 6), not through a sync.
 
 **Commits**
 
@@ -236,7 +236,7 @@ and the network. A router written another way should still pass them.
 | 7 | a commit from anyone but the epoch steward is applied; or the substitute's commit, rejected a moment before the skip verdict, is lost and the node stays behind | `engine_bed_liveness::foreign_commit_is_rejected_and_scored`, `engine_bed_liveness::a_substitute_commit_that_beats_the_verdict_is_reported_again_after_the_skip` |
 | 8 | an announcement filed while a round is open is held until the round closes instead of landing in the next commit | `engine_bed_flow::a_proposal_filed_during_a_round_lands_in_the_next_commit` |
 | 9, 10 | an invite lands without the key package checked, or a rejected one lands anyway | `engine_bed_flow::creator_adds_one_then_a_member_adds_another`, `engine_bed_membership::rejected_invite_never_lands` |
-| 11 | a node with no list guesses the steward; at list exhaustion every node enters `Syncing`, the election lands, work resumes | `engine_bed_membership::an_exhausted_steward_list_is_replaced_without_a_stall`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs` |
+| 11, 12 | a node with no list guesses the steward; at list exhaustion every node enters `Syncing`, the election lands, work resumes; a joiner that took the list from the election drops the answer to its own ask and never gets the group's timing and scores | `engine_bed_membership::an_exhausted_steward_list_is_replaced_without_a_stall`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs`, `engine_bed_order::a_joiner_adopts_its_answer_after_it_voted_on_an_election` |
 | 12 | a joiner or a restarted node never learns the list; a silent epoch steward leaves the ask unanswered until the backup takes over; a joiner rejects the commit carrying work approved before its seating, or stays silent on a vote it was counted in | `engine_bed_sync::backup_steward_answers_when_the_epoch_steward_is_silent`, `engine_bed_sync::a_working_member_can_ask_and_learns_it_is_current`, `engine_bed_flow::a_session_open_at_a_seating_commit_reaches_the_new_member`, `engine_bed_flow::a_proposal_filed_after_a_seating_reaches_the_new_member_in_any_order` |
 | 13, 14 | a foreign commit merges, or a discarded one stays staged and merges later | `engine_bed_liveness::foreign_commit_is_rejected_and_scored` |
 | 15, 21 | the engine's member set drifts from the group's; a commit merged on the router's own trust is adopted in full and the node follows the next one | `engine_bed_catch_up::a_member_that_missed_only_the_commit_adopts_it_and_follows_the_next`, `engine_bed_catch_up::two_members_survivor_commits_on_its_own_authority` |
@@ -369,9 +369,9 @@ impl Router {
                 if matches!(e, Event::PhaseChange(Phase::Working)) {
                     next.merge(self.propose_update(now));            // dropped by a merge: file again
                 }
-                // SyncUnanswered and CandidateRejected: the app decides
-                // whether to call request_sync; a stale list and a
-                // misbehaving committer look the same from here.
+                // CandidateRejected: the app decides whether to call
+                // request_sync; a stale list and a misbehaving committer
+                // look the same from here.
                 // CandidateRejected, not the epoch steward: keep it staged,
                 // report it again after StewardSkipped or SyncApplied.
                 // CommitAdopted: informational, the sync ask already rides
