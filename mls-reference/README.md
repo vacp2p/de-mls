@@ -83,22 +83,24 @@ MUST.
    sees it. The cue is not proof, a garbage frame can carry any epoch; what
    settles it is the commit itself (rules 20 and 21), and a cue with no
    commit behind it is ignored.
-6. Control traffic is delivered in the order it was sent and before the
-   commit of the epoch it belongs to. A sync answer brings a new member
-   the approved work and the open votes it could not see. What the
-   answering steward never saw, nobody brings: a node that missed such a
-   proposal rejects the commit and stays at its epoch. A discarded commit
-   cannot be staged again.
+6. Control traffic is delivered at least once, in no particular order.
+   An input the engine refuses (`Err(ConversationError::Refused(_))`) is
+   held by the router and fed again, every held input once, after each
+   `Output` it drives. A payload is held for `consensus_timeout`, a
+   candidate until its epoch merges; the router bounds what it holds per
+   sender. A sync answer brings a new member the approved work and the
+   open votes it could not see. What the answering steward never saw,
+   nobody brings: a node that missed such a proposal rejects the commit
+   and stays at its epoch. A discarded commit cannot be staged again.
 7. A candidate on the wire is the raw commit bytes. The router stages it
    and reports the facts through `handle_candidate`; it never ranks or
-   validates candidates, the group rejecting a foreign or stale commit. A
-   candidate rejected as not the epoch steward's stays staged until the
-   epoch merges: after `Event::StewardSkipped` or `Event::SyncApplied` the
-   router reports its facts again, since the sender may have become the
-   epoch steward; a
-   merged commit earns its sender `SuccessfulCommit`, so an early
-   substitute ends unpenalised. A candidate rejected for its actions is
-   never kept.
+   validates candidates, the group rejecting a foreign or stale commit.
+   A candidate rejected as not the epoch steward's stays staged until
+   the epoch merges: after `Event::StewardSkipped` or
+   `Event::SyncApplied` the router reports its facts again, since the
+   sender may have become the epoch steward; a merged commit earns its
+   sender `SuccessfulCommit`, so an early substitute ends unpenalised. A
+   candidate rejected for its actions is never kept.
 
 **Proposals**
 
@@ -106,10 +108,7 @@ MUST.
    group (a discovery topic, a contact exchange) and never reaches the
    engine as bytes: the router validates the key package, reads the
    joiner's id from it, decides whether it wants the member, and calls
-   `propose_add(now, member, key_package)`. While the engine is `Syncing`
-   the call is refused with `ConversationBlocked`; the router keeps the
-   announcement and proposes it again after `Event::PhaseChange(Phase::Working)`.
-   The engine remembers nothing of a refused call. Any member may propose;
+   `propose_add(now, member, key_package)`. Any member may propose;
    a proposal for a member already covered by another proposal or an
    approval is dropped. A member's own leaf update is filed the same way:
    `propose_update` on the group, then `propose_update(now, bytes)` on the
@@ -136,11 +135,8 @@ MUST.
 11. `Phase::Syncing` means the engine holds no steward list that covers
     the epoch: a joiner, a restart from a stale store, or a list that ran
     out at an epoch boundary. Until it adopts a `ConversationSync` or an
-    election lands it refuses proposals and candidates with
-    `ConversationBlocked`; votes continue. The router keeps a refused
-    candidate staged and calls `handle_candidate` again after it drains
-    `Event::PhaseChange(Phase::Working)` (a refused proposal follows rule
-    8); a merge in between drops the candidate as stale (rule 14).
+    election lands it refuses candidates. A refused candidate is held
+    (rule 6); a merge in between drops it as stale (rule 14).
 12. A sync is pulled, never pushed. The engine asks once when it holds
     nothing, at `join` and at a stale restart; every other ask is
     `request_sync(now)`, the router's call in any phase: after an offline
@@ -197,7 +193,10 @@ MUST.
     executed: the group decided those while this member was away. A commit merges only through
     `Decision::Merge`, exactly as live; nothing is adopted without its
     vote, and a member removed while away gets `Decision::Leave` at that
-    epoch.
+    epoch. A payload the router holds (rule 6) is not consumed: the cursor
+    stays at the oldest held frame until it is accepted or expired, so a
+    restart replays it rather than losing it; the frames after it are
+    replayed twice, which is a no-op.
 21. Adoption is the catch-up when the traffic is gone. A router that
     receives the exact commit the group applied outside the live path (a
     Store node without the control frames, a member relaying it) may stage
@@ -233,7 +232,7 @@ and the network. A router written another way should still pass them.
 |---|---|---|
 | 3, 16 | a decision executed out of order or half-way leaves the group and the engine disagreeing on the epoch | `engine_bed_smoke::creator_seats_two_joiners_and_chat_crosses` |
 | 5 | chat reaches the engine, or a vote is counted for a sender the group never authenticated | `engine_bed_smoke::creator_seats_two_joiners_and_chat_crosses` |
-| 6, 20 | a member that missed the traffic cannot judge the commit; replayed in order with the frame's time it merges through the ordinary path | `engine_bed_catch_up::a_member_offline_through_a_commit_catches_up_by_replay`, `engine_bed_catch_up::a_failed_recovery_vote_stays_failed_on_replay`, `engine_bed_liveness::a_skipped_steward_that_comes_back_follows_the_substitute` |
+| 6, 20 | a member that missed the traffic cannot judge the commit; replayed in order with the frame's time it merges through the ordinary path; a vote delivered before its proposal is lost and the node's verdict splits from the group's | `engine_bed_catch_up::a_member_offline_through_a_commit_catches_up_by_replay`, `engine_bed_catch_up::a_failed_recovery_vote_stays_failed_on_replay`, `engine_bed_liveness::a_skipped_steward_that_comes_back_follows_the_substitute`, `engine_bed_order::votes_that_arrive_before_their_proposal_are_counted` |
 | 7 | a commit from anyone but the epoch steward is applied; or the substitute's commit, rejected a moment before the skip verdict, is lost and the node stays behind | `engine_bed_liveness::foreign_commit_is_rejected_and_scored`, `engine_bed_liveness::a_substitute_commit_that_beats_the_verdict_is_reported_again_after_the_skip` |
 | 8 | an announcement filed while a round is open is held until the round closes instead of landing in the next commit | `engine_bed_flow::a_proposal_filed_during_a_round_lands_in_the_next_commit` |
 | 9, 10 | an invite lands without the key package checked, or a rejected one lands anyway | `engine_bed_flow::creator_adds_one_then_a_member_adds_another`, `engine_bed_membership::rejected_invite_never_lands` |
@@ -244,7 +243,9 @@ and the network. A router written another way should still pass them.
 | 17, 18 | a restart loses the vote in flight, or loads the engine before the group and starts from the wrong epoch | `engine_bed_flow::restart_mid_vote_resumes_and_merges`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs` |
 
 Rules 1, 2, 4 and 19 are preconditions the test suite satisfies by construction
-and have no scenario. Rule 22 has none yet.
+and have no scenario. Rule 22 has none yet. Two clauses have none either:
+the per-sender bound of rule 6 (the bed's members are honest) and the cursor
+clause of rule 20 (the bed never restarts a node while it holds a payload).
 
 ## 4. Reference router
 
@@ -256,9 +257,13 @@ struct Router {
     mls: MlsService,                       // application-owned group
     engine: Engine<KvStore>,
     staged: HashMap<CommitHash, StagedCommit>,
-    announced: Vec<(MemberId, Vec<u8>)>,   // wanted joiners, not yet proposed
-    held: Vec<(CommitHash, StagedFacts)>,  // candidates refused while Syncing
+    held: Vec<Held>,                       // refused inputs, fed again
     update: Option<LeafParams>,            // own leaf change filed, not yet seen landing
+}
+
+enum Held {
+    Candidate { hash: CommitHash, facts: StagedFacts },
+    Control { arrived: Timestamp, sender: MemberId, epoch: u64, bytes: Vec<u8> },
 }
 
 impl Router {
@@ -268,8 +273,18 @@ impl Router {
                 let Some(opened) = self.mls.open(&bytes) else { return };
                 match opened.kind {
                     Kind::Chat    => { self.app.show(opened); return }
-                    Kind::Control => self.engine
-                        .handle_control(now, opened.sender, opened.epoch, &opened.plaintext),
+                    Kind::Control => match self.engine
+                        .handle_control(now, opened.sender.clone(), opened.epoch, &opened.plaintext)
+                    {
+                        Err(ConversationError::Refused(_)) => {
+                            self.held.push(Held::Control {
+                                arrived: now, sender: opened.sender, epoch: opened.epoch,
+                                bytes: opened.plaintext,
+                            });
+                            return
+                        }
+                        out => out,
+                    },
                 }
             }
             Frame::Commit(bytes) => {
@@ -277,7 +292,13 @@ impl Router {
                 if self.staged.contains_key(&hash) { return }             // staged once
                 let Ok(facts) = self.mls.stage(&bytes) else { return };   // authenticates
                 self.staged.insert(hash, facts.staged);
-                self.engine.handle_candidate(now, hash, facts)
+                match self.engine.handle_candidate(now, hash, facts.clone()) {
+                    Err(ConversationError::Refused(_)) => {
+                        self.held.push(Held::Candidate { hash, facts });
+                        return
+                    }
+                    out => out,
+                }
             }
         };
         self.drive(now, out);
@@ -288,28 +309,36 @@ impl Router {
         self.drive(now, out);
     }
 
-    // The announcement arrived outside the group; the router owns it
-    // until the engine has accepted the proposal.
+    // The announcement arrived outside the group; the router validates it
+    // and proposes.
     fn on_announcement(&mut self, now: Timestamp, key_package: Vec<u8>) {
         if self.mls.validate_key_package(&key_package).is_err() { return }
         let Ok(member) = MlsService::key_package_identity(&key_package) else { return };
         if !self.app.wants(&member) { return }
-        self.announced.push((member, key_package));
-        let out = self.propose_announced(now);
-        self.drive(now, out);
+        match self.engine.propose_add(now, member, key_package) {
+            Ok(out) => self.drive(now, out),
+            Err(e) => self.app.report(e),                            // the app's to re-file
+        }
     }
 
-    // Proposes every held announcement; one refused because a round is
-    // open stays held for the next `Working` phase, any other refusal
-    // (already a member, ..) drops it.
-    fn propose_announced(&mut self, now: Timestamp) -> Output {
+    // Feeds every held input once more. Accepted or dropped for good
+    // (`Ok`) leaves the list; refused stays; a fault is reported and
+    // dropped. A control payload older than `consensus_timeout` expires.
+    fn retry_held(&mut self, now: Timestamp) -> Output {
         let mut out = Output::default();
-        let held = std::mem::take(&mut self.announced);
-        for (member, kp) in held {
-            match self.engine.propose_add(now, member.clone(), kp.clone()) {
+        let ttl = self.engine.config().consensus_timeout;
+        for item in std::mem::take(&mut self.held) {
+            let result = match &item {
+                Held::Candidate { hash, facts } =>
+                    self.engine.handle_candidate(now, *hash, facts.clone()),
+                Held::Control { arrived, .. } if now - *arrived >= ttl => continue,
+                Held::Control { sender, epoch, bytes, .. } =>
+                    self.engine.handle_control(now, sender.clone(), *epoch, bytes),
+            };
+            match result {
                 Ok(o) => out.merge(o),
-                Err(ConversationError::ConversationBlocked(_)) => self.announced.push((member, kp)),
-                Err(_) => {}
+                Err(ConversationError::Refused(_)) => self.held.push(item),
+                Err(e) => self.app.report(e),
             }
         }
         out
@@ -338,9 +367,7 @@ impl Router {
                     self.update = None;                              // it landed
                 }
                 if matches!(e, Event::PhaseChange(Phase::Working)) {
-                    next.merge(self.propose_update(now));            // refused or dropped by a merge
-                    next.merge(self.propose_announced(now));         // refused proposals
-                    next.merge(self.retry_held_candidates(now));     // refused candidates
+                    next.merge(self.propose_update(now));            // dropped by a merge: file again
                 }
                 // SyncUnanswered and CandidateRejected: the app decides
                 // whether to call request_sync; a stale list and a
@@ -353,6 +380,7 @@ impl Router {
                 // app files request_recovery.
                 self.app.notify(e);
             }
+            next.merge(self.retry_held(now));                      // refused inputs, once more
             if let Some(d) = out.wakeup { self.timer.arm(d); }
             if next.is_empty() { break }
             out = next;
