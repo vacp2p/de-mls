@@ -119,13 +119,15 @@ MUST.
    `propose_update` on the group, then `propose_update(now, bytes)` on the
    engine, kept and filed again after the same refusal.
 9. An invite proposal carries the joiner's id as the proposer read it from
-   the key package. Every member executes `Decision::ValidateKeyPackage`
-   (full validation plus identity equals the claimed id) and reports
-   `key_package_checked` before its vote proceeds; the engine never parses
-   a key package. A peer's leaf update is checked the same way:
-   `Decision::ValidateUpdate`, `validate_update` (the id it returns
-   equals the member named), `update_checked`; a failed check takes the
-   update out before a commit can carry it.
+   the key package, and the key package bytes themselves; the engine
+   never parses them. `Event::VoteRequested` hands the request to the
+   router, which may validate the key package (full validation plus
+   identity equals the claimed id) before voting YES. A peer's leaf
+   update is approved on arrival and handed to the router as
+   `Event::UpdateProposed`; the router processes it on the group and
+   holds it, since a commit carries a peer's update by reference and
+   every member must hold it before that commit can be built or staged.
+   The group validates key package and update when it processes them.
 10. `Event::ConsensusReached` carries a verdict. `Rejected` is the group's
     decision: the router does not file the same request again this epoch.
     `Failed` is no decision (the timeout passed with neither side at
@@ -242,7 +244,7 @@ and the network. A router written another way should still pass them.
 | 6, 20 | a member that missed the traffic cannot judge the commit; replayed in order with the frame's time it merges through the ordinary path; a vote delivered before its proposal is lost and the node's verdict splits from the group's | `engine_bed_catch_up::a_member_offline_through_a_commit_catches_up_by_replay`, `engine_bed_catch_up::a_failed_recovery_vote_stays_failed_on_replay`, `engine_bed_liveness::a_skipped_steward_that_comes_back_follows_the_substitute`, `engine_bed_order::votes_that_arrive_before_their_proposal_are_counted` |
 | 7 | a commit from anyone but the epoch steward is applied; or the substitute's commit, rejected a moment before the skip verdict, is lost and the node stays behind | `engine_bed_liveness::foreign_commit_is_rejected_and_scored`, `engine_bed_liveness::a_substitute_commit_that_beats_the_verdict_is_reported_again_after_the_skip` |
 | 8 | an announcement filed while a round is open is held until the round closes instead of landing in the next commit | `engine_bed_flow::a_proposal_filed_during_a_round_lands_in_the_next_commit` |
-| 9, 10 | an invite lands without the key package checked, or a rejected one lands anyway | `engine_bed_flow::creator_adds_one_then_a_member_adds_another`, `engine_bed_membership::rejected_invite_never_lands` |
+| 9, 10 | an invite lands without its vote, or a rejected one lands anyway | `engine_bed_flow::creator_adds_one_then_a_member_adds_another`, `engine_bed_membership::rejected_invite_never_lands` |
 | 11, 12 | a node with no list guesses the steward; at list exhaustion every node enters `Syncing`, the election lands, work resumes; a joiner that took the list from the election drops the answer to its own ask and never gets the group's timing and scores | `engine_bed_membership::an_exhausted_steward_list_is_replaced_without_a_stall`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs`, `engine_bed_order::a_joiner_adopts_its_answer_after_it_voted_on_an_election` |
 | 12 | a joiner or a restarted node never learns the list; a silent epoch steward leaves the ask unanswered until the backup takes over; a joiner rejects the commit carrying work approved before its seating, or stays silent on a vote it was counted in | `engine_bed_sync::backup_steward_answers_when_the_epoch_steward_is_silent`, `engine_bed_sync::a_working_member_that_asks_adopts_the_equal_answer`, `engine_bed_flow::a_session_open_at_a_seating_commit_reaches_the_new_member`, `engine_bed_flow::a_proposal_filed_after_a_seating_reaches_the_new_member_in_any_order` |
 | 13, 14 | a foreign commit merges, or a discarded one stays staged and merges later | `engine_bed_liveness::foreign_commit_is_rejected_and_scored` |
@@ -416,15 +418,6 @@ impl Router {
             Decision::Discard { hashes } => {
                 for h in hashes { self.staged.remove(&h); }
                 Output::default()
-            }
-            Decision::ValidateKeyPackage { proposal_id, member, key_package } => {
-                let ok = self.mls.validate_key_package(&key_package).is_ok()
-                    && MlsService::key_package_identity(&key_package) == Ok(member);
-                self.engine.key_package_checked(now, proposal_id, ok, &mut self.publisher)
-            }
-            Decision::ValidateUpdate { proposal_id, member, update } => {
-                let ok = self.mls.validate_update(&update) == Ok(member);
-                self.engine.update_checked(now, proposal_id, ok, &mut self.publisher)
             }
             Decision::Leave => { self.mls.delete(); Output::default() }
         }

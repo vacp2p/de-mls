@@ -28,12 +28,11 @@ use crate::{
         },
         handle::Engine,
         proposal_kind::{ProposalKind, in_flight_target},
-        types::{ActionKind, Decision, Event, MemberId, Output, Timestamp},
+        types::{ActionKind, Event, MemberId, Timestamp},
     },
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, VotingSession, conversation_update_request,
     },
-    traits::Publish,
 };
 
 /// Whether an arriving proposal opened a session here.
@@ -216,11 +215,6 @@ impl<St: EngineStore> Engine<St> {
     /// not buffered, forwarded to consensus, or surfaced for a vote — so
     /// they cannot land before the emergency resolves. The emergency itself
     /// (and any higher-priority proposal) is never blocked.
-    ///
-    /// An invite proposal does not reach a vote until the router has
-    /// validated its key package: the engine asks for
-    /// [`Decision::ValidateKeyPackage`] and waits for
-    /// [`Self::key_package_checked`].
     pub(crate) fn on_incoming_proposal(
         &mut self,
         sender: &[u8],
@@ -355,17 +349,17 @@ impl<St: EngineStore> Engine<St> {
         }
         self.dirty.consensus = true;
 
-        if let Some(req) = decoded.as_ref() {
-            self.queues.track_voting_proposal(proposal_id, req, epoch);
-        }
-
-        // The router checks an accepted update before a commit can carry it.
+        // Approved on arrival: every member holds it on the group so the
+        // commit that carries it can be built and staged.
         if let Some(update) = update {
-            self.decide(Decision::ValidateUpdate {
-                proposal_id,
+            self.emit(Event::UpdateProposed {
                 member: MemberId::from(update.member_id.clone()),
                 update: update.update_bytes.clone(),
             });
+        }
+
+        if let Some(req) = decoded.as_ref() {
+            self.queues.track_voting_proposal(proposal_id, req, epoch);
         }
 
         if expected_voters > 1 {
@@ -384,35 +378,6 @@ impl<St: EngineStore> Engine<St> {
         self.queues
             .join_epoch(&self.own)
             .is_none_or(|joined| epoch >= joined)
-    }
-
-    /// The router checked the update of the proposal `proposal_id`. The
-    /// update is approved on arrival, so a pass has nothing to do; a failure
-    /// takes it out of the approved queue, without a score.
-    pub fn update_checked(
-        &mut self,
-        now: Timestamp,
-        proposal_id: u32,
-        valid: bool,
-        publisher: &mut impl Publish,
-    ) -> Result<Output, ConversationError> {
-        self.begin(now);
-        if !valid {
-            self.drop_unchecked_update(proposal_id);
-        }
-        self.finish(publisher)
-    }
-
-    /// Take the approved leaf update `proposal_id` out of the queue: the
-    /// router did not vouch for it, so no commit may carry it.
-    pub(crate) fn drop_unchecked_update(&mut self, proposal_id: u32) {
-        if self.queues.drop_approved_update(proposal_id) {
-            self.dirty.proposals = true;
-            info!(
-                conversation = %self.conversation_id,
-                proposal_id, "update dropped: it failed validation"
-            );
-        }
     }
 
     /// Every consensus session of this conversation, each proposal carrying
@@ -489,9 +454,8 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// Arm this member's side of a proposal that expects more than one
-    /// voter: a deterministic verdict for a steward election, a
-    /// key-package check for an invite (the vote waits for the router's
-    /// answer), or an auto-vote for anything else — then the
+    /// voter: a deterministic verdict for a steward election, or a vote
+    /// request and an auto-vote for anything else — then the
     /// consensus-timeout deadline. During a replay only the timeout is
     /// armed: the group decided this session without this member, and the
     /// timeout reproduces its verdict.
@@ -511,18 +475,6 @@ impl<St: EngineStore> Engine<St> {
                 let verdict = self.validate_election_list(election)?;
                 self.register_auto_vote(proposal_id, Duration::ZERO, verdict);
             }
-            Some(conversation_update_request::Payload::MemberInvite(invite)) => {
-                // The vote waits for the router's verdict on the key
-                // package; no auto-vote is armed until then, so silence
-                // cannot approve an unvalidated joiner.
-                let member = MemberId::from(invite.member_id.clone());
-                let key_package = invite.key_package_bytes.clone();
-                self.decide(Decision::ValidateKeyPackage {
-                    proposal_id,
-                    member,
-                    key_package,
-                });
-            }
             _ => {
                 if let Some(request) = decoded {
                     self.emit(Event::VoteRequested {
@@ -537,58 +489,6 @@ impl<St: EngineStore> Engine<St> {
         }
         self.register_consensus_timeout(proposal_id, self.config.consensus_timeout);
         Ok(())
-    }
-
-    /// The router validated the key package of the invite proposal
-    /// `proposal_id`; `valid` says whether it passed and matches the claimed
-    /// member id.
-    ///
-    /// A pass releases the vote — the request reaches the router and the
-    /// auto-vote timer arms. A failure votes NO right away, so a bad key
-    /// package costs one round instead of a timeout.
-    pub fn key_package_checked(
-        &mut self,
-        now: Timestamp,
-        proposal_id: u32,
-        valid: bool,
-        publisher: &mut impl Publish,
-    ) -> Result<Output, ConversationError> {
-        self.begin(now);
-        if !valid {
-            info!(
-                conversation = %self.conversation_id,
-                proposal_id, "invite rejected: key package failed validation"
-            );
-            if let Err(e) = self.cast_local_vote(proposal_id, false) {
-                self.report_failure("key_package_checked", &e);
-            }
-            return self.finish(publisher);
-        }
-
-        let scope = self.conversation_id.clone();
-        let stored = self
-            .consensus
-            .storage()
-            .get_active_proposals(&scope)?
-            .into_iter()
-            .find(|p| p.proposal_id == proposal_id);
-        let Some(stored) = stored else {
-            debug!(
-                conversation = %self.conversation_id,
-                proposal_id,
-                "key-package verdict dropped: the session is no longer active"
-            );
-            return self.finish(publisher);
-        };
-        let request = ConversationUpdateRequest::decode(stored.payload.as_slice())?;
-        self.emit(Event::VoteRequested {
-            proposal_id,
-            request,
-        });
-        let delay = self.config.voting_delay;
-        let vote = self.config.liveness_criteria_yes;
-        self.register_auto_vote(proposal_id, delay, vote);
-        self.finish(publisher)
     }
 
     // ── private ──────────────────────────────────────────────────────

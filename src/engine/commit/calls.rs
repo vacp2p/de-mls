@@ -251,8 +251,7 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// The router could not execute a decision. A failed merge closes the
-    /// round with no commit; a failed update check takes the approved update out;
-    /// anything else is reported and dropped.
+    /// round with no commit; anything else is reported and dropped.
     pub fn decision_failed(
         &mut self,
         now: Timestamp,
@@ -269,12 +268,6 @@ impl<St: EngineStore> Engine<St> {
             Decision::BuildCommit { .. } => "build_commit",
             Decision::Discard { .. } => "discard",
             Decision::Leave => "leave",
-            Decision::ValidateKeyPackage { .. } => "validate_key_package",
-            Decision::ValidateUpdate { proposal_id, .. } => {
-                // An update nobody checked is not committed.
-                self.drop_unchecked_update(*proposal_id);
-                "validate_update"
-            }
         };
         self.emit(Event::Error {
             operation: operation.to_owned(),

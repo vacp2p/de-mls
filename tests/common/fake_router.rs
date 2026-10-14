@@ -560,6 +560,13 @@ impl FakeRouter {
             {
                 self.sync_asked = Some(now);
             }
+            // A peer's update is held on the group so the commit that
+            // carries it can be built and staged.
+            for e in &out.events {
+                if let Event::UpdateProposed { update, .. } = e {
+                    self.mls.validate_update(update);
+                }
+            }
             self.events.append(&mut out.events);
             if round_closed && !self.replaying {
                 next.merge(self.file_update(now));
@@ -583,32 +590,6 @@ impl FakeRouter {
 
     fn execute(&mut self, now: Timestamp, decision: Decision) -> Output {
         let result = match decision.clone() {
-            Decision::ValidateKeyPackage {
-                proposal_id,
-                member,
-                key_package,
-            } => {
-                let valid = FakeMls::key_package_identity(&key_package).as_ref() == Some(&member);
-                self.engine.key_package_checked(
-                    now,
-                    proposal_id,
-                    valid,
-                    &mut Sealer::over(&self.mls, &mut self.outbox),
-                )
-            }
-            Decision::ValidateUpdate {
-                proposal_id,
-                member,
-                update,
-            } => {
-                let valid = self.mls.validate_update(&update).as_ref() == Some(&member);
-                self.engine.update_checked(
-                    now,
-                    proposal_id,
-                    valid,
-                    &mut Sealer::over(&self.mls, &mut self.outbox),
-                )
-            }
             Decision::BuildCommit { actions } => {
                 if self.replaying {
                     Ok(Output::default())

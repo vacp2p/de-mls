@@ -80,16 +80,6 @@ impl EngineQueues {
             .is_some_and(|req| change_of(req) == Some((ActionKind::Remove, member_id)))
     }
 
-    /// Remove the approved entry `proposal_id` when it is a `LeafUpdate`;
-    /// `true` when one was removed.
-    pub fn drop_approved_update(&mut self, proposal_id: ProposalId) -> bool {
-        let is_update = self
-            .approved_proposals
-            .get(&proposal_id)
-            .is_some_and(|req| matches!(change_of(req), Some((ActionKind::Update, _))));
-        is_update && self.approved_proposals.shift_remove(&proposal_id).is_some()
-    }
-
     /// True iff `approved_proposals` already holds a change of `kind` for
     /// `member_id`, whatever its proposal id. A queued `Remove` of a member
     /// also makes it ineligible as steward: MLS forbids a member from

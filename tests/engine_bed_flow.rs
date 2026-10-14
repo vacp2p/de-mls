@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use common::fake_router::Bed;
 use de_mls::EngineConfig;
-use de_mls::engine::{Decision, Event, Phase, Verdict};
+use de_mls::engine::{Event, Phase, Verdict};
+use de_mls::protos::de_mls::messages::v1::conversation_update_request;
 
 fn fast() -> EngineConfig {
     EngineConfig {
@@ -309,32 +310,36 @@ fn a_proposal_filed_after_a_seating_reaches_the_new_member_in_any_order() {
     bed.router_mut(proposer)
         .announce(now, dave_id.clone(), kp_dave);
 
-    let checks_dave = |b: &Bed| {
-        b.router(carol).decisions.iter().any(|d| {
-            matches!(
-                d,
-                Decision::ValidateKeyPackage { member, .. } if *member == dave_id
-            )
-        })
+    let votes_on_dave = |b: &Bed| {
+        b.router(carol)
+            .events
+            .iter()
+            .filter(|e| match e {
+                Event::VoteRequested { request, .. } => matches!(
+                    &request.payload,
+                    Some(conversation_update_request::Payload::MemberInvite(invite))
+                        if invite.member_id == dave_id.as_bytes()
+                ),
+                _ => false,
+            })
+            .count()
     };
     while bed.now + Duration::from_millis(10) < proposer_frame_at {
         bed.process(Duration::from_millis(10));
     }
     assert!(
-        checks_dave(&bed),
+        votes_on_dave(&bed) > 0,
         "the answer reached carol before the proposer's frame did"
     );
 
     bed.process_until("dave seated", |b| b.is_live(dave) && b.epochs_agree());
     assert!(bed.converged() && bed.membership_agrees());
     assert_eq!(bed.router(0).mls.members().len(), 4);
-    let dave_checks = bed
-        .router(carol)
-        .decisions
-        .iter()
-        .filter(|d| matches!(d, Decision::ValidateKeyPackage { member, .. } if *member == dave_id))
-        .count();
-    assert_eq!(dave_checks, 1, "the late duplicate frame was a no-op");
+    assert_eq!(
+        votes_on_dave(&bed),
+        1,
+        "the late duplicate frame was a no-op"
+    );
     for n in bed.live_nodes() {
         assert!(
             !bed.router(n)

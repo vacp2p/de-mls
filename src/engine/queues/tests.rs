@@ -104,19 +104,6 @@ fn has_approved_change_matches_kind_and_member() {
     assert!(!queues.has_approved_change(ActionKind::Remove, &member(2)));
 }
 
-#[test]
-fn drop_approved_update_removes_only_an_update() {
-    let mut queues = EngineQueues::new();
-    queues.insert_approved_proposal(1, update_request(&member(2)));
-    insert_remove_member(&mut queues, &member(3), 2);
-
-    assert!(!queues.drop_approved_update(2));
-    assert!(!queues.drop_approved_update(9));
-    assert!(queues.drop_approved_update(1));
-    assert!(!queues.has_approved_change(ActionKind::Update, &member(2)));
-    assert_eq!(queues.approved_proposals().len(), 1);
-}
-
 /// A landed invite and removal and every update are dropped; an invite whose
 /// member did not land stays.
 #[test]
