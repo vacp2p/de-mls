@@ -3,14 +3,15 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    convert::Infallible,
     time::Duration,
 };
 
-use de_mls::EngineConfig;
 use de_mls::engine::{
     Action, CandidateRejection, CommitHash, Decision, DecisionFailure, Engine, Event,
-    InMemoryStore, MemberId, Outbound, Output, Phase, StagedFacts, Timestamp,
+    InMemoryStore, MemberId, Output, Phase, StagedFacts, Timestamp,
 };
+use de_mls::{EngineConfig, Publish};
 
 use crate::common::{
     fake_mls::{FakeMls, Kind, WelcomeDraft},
@@ -31,6 +32,36 @@ enum Held {
         epoch: u64,
         bytes: Vec<u8>,
     },
+}
+
+/// What the engine publishes through: every message is sealed by the group
+/// at the current epoch and queued as a frame, the way the application
+/// sends.
+pub struct Sealer<'a> {
+    mls: &'a FakeMls,
+    outbox: &'a mut Vec<Frame>,
+}
+
+impl<'a> Sealer<'a> {
+    pub fn over(mls: &'a FakeMls, outbox: &'a mut Vec<Frame>) -> Self {
+        Self { mls, outbox }
+    }
+
+    /// Frames queued so far, for a caller that wants to know whether a
+    /// call published anything.
+    pub fn sent(&self) -> usize {
+        self.outbox.len()
+    }
+}
+
+impl Publish for Sealer<'_> {
+    type Error = Infallible;
+
+    fn publish(&mut self, bytes: &[u8]) -> Result<(), Infallible> {
+        let sealed = self.mls.seal(Kind::Control, bytes);
+        self.outbox.push(Frame::Sealed(sealed));
+        Ok(())
+    }
 }
 
 /// One node: its group, its engine, and the bookkeeping the router contract
@@ -68,8 +99,7 @@ pub struct FakeRouter {
     /// Set until this member's own leaf update is reported as landed; filed
     /// again when a round closes.
     pending_update: bool,
-    /// Set for the span of `replay`: outbound is dropped and a
-    /// `Decision::BuildCommit` is skipped, since the group decided those
+    /// Set for the span of `replay`: a `Decision::BuildCommit` is skipped, since the group decided those
     /// while this router was away.
     replaying: bool,
 }
@@ -83,6 +113,7 @@ impl FakeRouter {
         config: EngineConfig,
     ) -> Self {
         let mls = FakeMls::create(conversation_id, own.clone());
+        let mut outbox = Vec::new();
         let (engine, out) = Engine::create(
             now,
             conversation_id,
@@ -91,9 +122,10 @@ impl FakeRouter {
             &mls.members(),
             config,
             InMemoryStore::default(),
+            &mut Sealer::over(&mls, &mut outbox),
         )
         .expect("engine create");
-        let mut router = Self::over(mls, engine);
+        let mut router = Self::over(mls, engine, outbox);
         router.drive(now, out);
         router
     }
@@ -102,6 +134,7 @@ impl FakeRouter {
     /// adopts the first `ConversationSync` a steward broadcasts.
     pub fn join(now: Timestamp, own: MemberId, welcome: &Welcome, config: EngineConfig) -> Self {
         let mls = FakeMls::from_welcome(own.clone(), &welcome.snapshot);
+        let mut outbox = Vec::new();
         let (engine, out) = Engine::join(
             now,
             mls.conversation_id(),
@@ -110,20 +143,21 @@ impl FakeRouter {
             &mls.members(),
             config,
             InMemoryStore::default(),
+            &mut Sealer::over(&mls, &mut outbox),
         )
         .expect("engine join");
-        let mut router = Self::over(mls, engine);
+        let mut router = Self::over(mls, engine, outbox);
         router.sync_asked = Some(now);
         router.drive(now, out);
         router
     }
 
-    fn over(mls: FakeMls, engine: Engine<InMemoryStore>) -> Self {
+    fn over(mls: FakeMls, engine: Engine<InMemoryStore>, outbox: Vec<Frame>) -> Self {
         Self {
             mls,
             engine,
             welcomes: HashMap::new(),
-            outbox: Vec::new(),
+            outbox,
             events: Vec::new(),
             decisions: Vec::new(),
             chats: Vec::new(),
@@ -145,7 +179,12 @@ impl FakeRouter {
     /// Announce a key package for `member`, the router's job: propose it
     /// right away.
     pub fn announce(&mut self, now: Timestamp, member: MemberId, key_package: Vec<u8>) {
-        match self.engine.propose_add(now, member, key_package) {
+        match self.engine.propose_add(
+            now,
+            member,
+            key_package,
+            &mut Sealer::over(&self.mls, &mut self.outbox),
+        ) {
             Ok(out) => self.drive(now, out),
             // A refusal (an emergency in flight, a member already seated) is
             // the app's to re-file: reported, not held.
@@ -175,7 +214,11 @@ impl FakeRouter {
             return Output::default();
         }
         let update = self.mls.propose_update();
-        match self.engine.propose_update(now, update) {
+        match self.engine.propose_update(
+            now,
+            update,
+            &mut Sealer::over(&self.mls, &mut self.outbox),
+        ) {
             Ok(out) => out,
             Err(de_mls::ConversationError::Refused(_)) => Output::default(),
             Err(e) => {
@@ -213,9 +256,13 @@ impl FakeRouter {
                     epoch,
                     bytes,
                     ..
-                } => self
-                    .engine
-                    .handle_control(now, sender.clone(), *epoch, bytes),
+                } => self.engine.handle_control(
+                    now,
+                    sender.clone(),
+                    *epoch,
+                    bytes,
+                    &mut Sealer::over(&self.mls, &mut self.outbox),
+                ),
             };
             match result {
                 Ok(o) => out.merge(o),
@@ -253,7 +300,12 @@ impl FakeRouter {
         hash: CommitHash,
         facts: StagedFacts,
     ) -> Option<Output> {
-        match self.engine.handle_candidate(now, hash, facts.clone()) {
+        match self.engine.handle_candidate(
+            now,
+            hash,
+            facts.clone(),
+            &mut Sealer::over(&self.mls, &mut self.outbox),
+        ) {
             Ok(out) => {
                 let not_the_steward = out.events.iter().any(|e| {
                     matches!(
@@ -324,6 +376,7 @@ impl FakeRouter {
             self.mls.epoch(),
             &self.mls.members(),
             store,
+            &mut Sealer::over(&self.mls, &mut self.outbox),
         )
         .expect("engine restore");
         self.engine = engine;
@@ -338,15 +391,17 @@ impl FakeRouter {
     /// Ask the stewards for a sync, as the router's own call, and note when.
     pub fn ask_sync(&mut self, now: Timestamp) {
         self.sync_asked = Some(now);
-        let out = self.engine.request_sync(now);
+        let out = self
+            .engine
+            .request_sync(now, &mut Sealer::over(&self.mls, &mut self.outbox));
         self.finish(now, out);
     }
 
     /// Catch-up as the contract describes it: the retained frames in send
     /// order, every wakeup due before a frame run before it, with the
-    /// frame's time as `now`; outbound and builds dropped and the engine
-    /// given the horizon so it casts no vote, since the group decided all
-    /// of that while this member was away.
+    /// frame's time as `now`; builds dropped and the engine given the horizon so
+    /// it publishes and casts no vote, since the group decided all of that
+    /// while this member was away.
     pub fn replay(&mut self, frames: Vec<(Timestamp, Frame)>, until: Timestamp) {
         self.engine.replay_until(until);
         self.replaying = true;
@@ -391,9 +446,15 @@ impl FakeRouter {
     pub fn act(
         &mut self,
         now: Timestamp,
-        action: impl FnOnce(&mut Engine<InMemoryStore>) -> Result<Output, de_mls::ConversationError>,
+        action: impl FnOnce(
+            &mut Engine<InMemoryStore>,
+            &mut Sealer<'_>,
+        ) -> Result<Output, de_mls::ConversationError>,
     ) -> Result<(), de_mls::ConversationError> {
-        let out = action(&mut self.engine)?;
+        let out = action(
+            &mut self.engine,
+            &mut Sealer::over(&self.mls, &mut self.outbox),
+        )?;
         self.drive(now, out);
         Ok(())
     }
@@ -419,6 +480,7 @@ impl FakeRouter {
                             opened.sender.clone(),
                             opened.epoch,
                             &opened.plaintext,
+                            &mut Sealer::over(&self.mls, &mut self.outbox),
                         ) {
                             Err(de_mls::ConversationError::Refused(_)) => {
                                 self.held.push(Held::Control {
@@ -460,7 +522,9 @@ impl FakeRouter {
         }
         if self.next_wakeup.is_some_and(|due| due <= now) {
             self.next_wakeup = None;
-            let out = self.engine.tick(now);
+            let out = self
+                .engine
+                .tick(now, &mut Sealer::over(&self.mls, &mut self.outbox));
             self.finish(now, out);
         }
     }
@@ -475,13 +539,10 @@ impl FakeRouter {
         }
     }
 
-    /// Router contract, `Output`: outbound, then decisions, then events,
-    /// looping on the report calls' outputs until one is empty.
+    /// Router contract, `Output`: decisions, then events, looping on the
+    /// report calls' outputs until one is empty.
     pub fn drive(&mut self, now: Timestamp, mut out: Output) {
         loop {
-            for o in out.outbound.drain(..) {
-                self.send(o);
-            }
             let mut next = Output::default();
             for decision in out.decisions.drain(..) {
                 self.decisions.push(decision.clone());
@@ -528,15 +589,6 @@ impl FakeRouter {
         }
     }
 
-    fn send(&mut self, outbound: Outbound) {
-        if self.replaying {
-            return;
-        }
-        let Outbound::Control(bytes) = outbound;
-        let sealed = self.mls.seal(Kind::Control, &bytes);
-        self.outbox.push(Frame::Sealed(sealed));
-    }
-
     fn execute(&mut self, now: Timestamp, decision: Decision) -> Output {
         let result = match decision.clone() {
             Decision::ValidateKeyPackage {
@@ -545,7 +597,12 @@ impl FakeRouter {
                 key_package,
             } => {
                 let valid = FakeMls::key_package_identity(&key_package).as_ref() == Some(&member);
-                self.engine.key_package_checked(now, proposal_id, valid)
+                self.engine.key_package_checked(
+                    now,
+                    proposal_id,
+                    valid,
+                    &mut Sealer::over(&self.mls, &mut self.outbox),
+                )
             }
             Decision::ValidateUpdate {
                 proposal_id,
@@ -553,7 +610,12 @@ impl FakeRouter {
                 update,
             } => {
                 let valid = self.mls.validate_update(&update).as_ref() == Some(&member);
-                self.engine.update_checked(now, proposal_id, valid)
+                self.engine.update_checked(
+                    now,
+                    proposal_id,
+                    valid,
+                    &mut Sealer::over(&self.mls, &mut self.outbox),
+                )
             }
             Decision::BuildCommit { actions } => {
                 if self.replaying {
@@ -564,7 +626,11 @@ impl FakeRouter {
                         Err(reason) => {
                             return self
                                 .engine
-                                .decision_failed(now, DecisionFailure { decision, reason })
+                                .decision_failed(
+                                    now,
+                                    DecisionFailure { decision, reason },
+                                    &mut Sealer::over(&self.mls, &mut self.outbox),
+                                )
                                 .unwrap_or_default();
                         }
                     };
@@ -582,6 +648,7 @@ impl FakeRouter {
                             proposal_count: built.proposal_count,
                             self_removed: false,
                         },
+                        &mut Sealer::over(&self.mls, &mut self.outbox),
                     )
                 }
             }
@@ -589,9 +656,13 @@ impl FakeRouter {
                 Ok(applied) => {
                     self.rejected_commits.clear();
                     self.staged_hashes.clear();
-                    let out =
-                        self.engine
-                            .commit_applied(now, hash, applied.epoch, &applied.members);
+                    let out = self.engine.commit_applied(
+                        now,
+                        hash,
+                        applied.epoch,
+                        &applied.members,
+                        &mut Sealer::over(&self.mls, &mut self.outbox),
+                    );
                     if out.is_ok() {
                         self.deliver_welcome(hash);
                     }
@@ -621,6 +692,7 @@ impl FakeRouter {
                         decision,
                         reason: reason.to_string(),
                     },
+                    &mut Sealer::over(&self.mls, &mut self.outbox),
                 )
                 .unwrap_or_default(),
         }
@@ -632,9 +704,13 @@ impl FakeRouter {
         self.mls.stage(&bytes).expect("stage the adopted commit");
         let hash = CommitHash::of(&bytes);
         let applied = self.merge(hash).expect("merge the adopted commit");
-        let out = self
-            .engine
-            .commit_applied(now, hash, applied.epoch, &applied.members);
+        let out = self.engine.commit_applied(
+            now,
+            hash,
+            applied.epoch,
+            &applied.members,
+            &mut Sealer::over(&self.mls, &mut self.outbox),
+        );
         self.finish(now, out);
     }
 
@@ -804,7 +880,13 @@ impl Bed {
         let applied = creator.mls.merge(hash).expect("seed merge");
         let out = creator
             .engine
-            .commit_applied(now, hash, applied.epoch, &applied.members)
+            .commit_applied(
+                now,
+                hash,
+                applied.epoch,
+                &applied.members,
+                &mut Sealer::over(&creator.mls, &mut creator.outbox),
+            )
             .expect("seed commit_applied");
         creator.deliver_welcome(hash);
         creator.drive(now, out);

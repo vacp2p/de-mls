@@ -26,7 +26,7 @@ fn score_removal_commits_alone_and_the_batch_waits() {
     // waiting behind dave's add.
     let now = bed.now;
     bed.router_mut(0)
-        .act(now, |e| e.propose_score_removal(now, carol_id))
+        .act(now, |e, p| e.propose_score_removal(now, carol_id, p))
         .expect("propose score removal of carol");
 
     bed.process_until("carol left", |b| b.router(carol).left);

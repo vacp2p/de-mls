@@ -12,6 +12,7 @@ use crate::{
         store::{Dirty, keys},
         types::{Event, MemberId, Output, Timestamp},
     },
+    traits::Publish,
 };
 
 impl<St: EngineStore> Engine<St> {
@@ -20,6 +21,7 @@ impl<St: EngineStore> Engine<St> {
     /// creation; several are a founding group the router seated in one
     /// commit before calling, all of them settled stewards from `epoch`.
     /// `now` is the router's clock, the one every later call passes.
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         now: Timestamp,
         conversation_id: &str,
@@ -28,6 +30,7 @@ impl<St: EngineStore> Engine<St> {
         members: &[MemberId],
         config: EngineConfig,
         store: St,
+        publisher: &mut impl Publish,
     ) -> Result<(Self, Output), ConversationError> {
         if !members.contains(&own) {
             return Err(ConversationError::EmptyMembersList);
@@ -47,7 +50,7 @@ impl<St: EngineStore> Engine<St> {
         engine.emit(Event::PhaseChange(phase));
         // A fresh store: every key gets its first write.
         engine.dirty = Dirty::ALL;
-        let out = engine.finish()?;
+        let out = engine.finish(publisher)?;
         Ok((engine, out))
     }
 
@@ -56,6 +59,7 @@ impl<St: EngineStore> Engine<St> {
     /// asks a steward for a `ConversationSync` in the returned `Output`, and
     /// adopts the answer. `now` is the router's clock, the one every later
     /// call passes.
+    #[allow(clippy::too_many_arguments)]
     pub fn join(
         now: Timestamp,
         conversation_id: &str,
@@ -64,6 +68,7 @@ impl<St: EngineStore> Engine<St> {
         members: &[MemberId],
         config: EngineConfig,
         store: St,
+        publisher: &mut impl Publish,
     ) -> Result<(Self, Output), ConversationError> {
         let mut engine = Self::assemble(conversation_id, own, epoch, members, config, store)?;
         engine.queues.record_join_epoch(engine.own.clone(), epoch);
@@ -75,7 +80,7 @@ impl<St: EngineStore> Engine<St> {
         engine.broadcast_sync_request();
         // A fresh store: every key gets its first write.
         engine.dirty = Dirty::ALL;
-        let out = engine.finish()?;
+        let out = engine.finish(publisher)?;
         Ok((engine, out))
     }
 
@@ -92,6 +97,7 @@ impl<St: EngineStore> Engine<St> {
         epoch: u64,
         members: &[MemberId],
         store: St,
+        publisher: &mut impl Publish,
     ) -> Result<(Self, Output), ConversationError> {
         let Some((config, snapshot_epoch)) = Self::load_config(&store)? else {
             return Self::join(
@@ -102,6 +108,7 @@ impl<St: EngineStore> Engine<St> {
                 members,
                 EngineConfig::default(),
                 store,
+                publisher,
             );
         };
         let mut engine = Self::assemble(conversation_id, own, epoch, members, config, store)?;
@@ -143,13 +150,14 @@ impl<St: EngineStore> Engine<St> {
             engine.reconcile_list_and_phase();
         }
 
-        let out = engine.finish()?;
+        let out = engine.finish(publisher)?;
         Ok((engine, out))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::traits::InMemoryPublisher;
     use std::time::Duration;
 
     use super::*;
@@ -158,7 +166,7 @@ mod tests {
         engine::{
             InMemoryStore,
             test_support::{id, member},
-            types::{Outbound, Phase},
+            types::Phase,
         },
         protos::de_mls::messages::v1::ConversationUpdateRequest,
     };
@@ -171,6 +179,7 @@ mod tests {
     /// as `join` does, with no error.
     #[test]
     fn restore_without_a_snapshot_joins() {
+        let mut publisher = InMemoryPublisher::default();
         let (engine, out) = Engine::restore(
             Timestamp::ZERO,
             "conv",
@@ -178,6 +187,7 @@ mod tests {
             0,
             &[id("alice"), id("bob")],
             InMemoryStore::default(),
+            &mut publisher,
         )
         .expect("restore over an empty store");
         assert!(!engine.is_synced());
@@ -187,14 +197,7 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::PhaseChange(Phase::Syncing)))
         );
-        assert_eq!(
-            out.outbound
-                .iter()
-                .filter(|o| matches!(o, Outbound::Control(_)))
-                .count(),
-            1,
-            "a joiner asks for a sync"
-        );
+        assert_eq!(publisher.messages.len(), 1, "a joiner asks for a sync");
         assert_eq!(out.wakeup, None, "nothing is due after the ask");
     }
 
@@ -203,6 +206,7 @@ mod tests {
     /// output carries one sync request.
     #[test]
     fn restore_with_a_stale_snapshot_keeps_scores_and_asks_for_sync() {
+        let mut publisher = InMemoryPublisher::default();
         let members = [id("alice"), id("bob")];
         let (mut engine, _) = Engine::create(
             Timestamp::ZERO,
@@ -212,6 +216,7 @@ mod tests {
             &members,
             EngineConfig::default(),
             InMemoryStore::default(),
+            &mut publisher,
         )
         .expect("create");
         engine.begin(at(0));
@@ -227,9 +232,17 @@ mod tests {
         let bob_score = engine.scoring.score_for(&member("bob"));
 
         let store = engine.store().clone();
-        let (restored, out) =
-            Engine::restore(Timestamp::ZERO, "conv", id("alice"), 3, &members, store)
-                .expect("restore");
+        publisher.drain();
+        let (restored, out) = Engine::restore(
+            Timestamp::ZERO,
+            "conv",
+            id("alice"),
+            3,
+            &members,
+            store,
+            &mut publisher,
+        )
+        .expect("restore");
 
         assert_eq!(restored.scoring.score_for(&member("bob")), bob_score);
         assert!(restored.steward_list.current_list().is_none());
@@ -240,13 +253,7 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::PhaseChange(Phase::Syncing)))
         );
-        assert_eq!(
-            out.outbound
-                .iter()
-                .filter(|o| matches!(o, Outbound::Control(_)))
-                .count(),
-            1
-        );
+        assert_eq!(publisher.messages.len(), 1);
         assert_eq!(out.wakeup, None, "nothing is due after the ask");
     }
 
@@ -254,6 +261,7 @@ mod tests {
     /// again on its own.
     #[test]
     fn a_joiner_asks_for_a_sync_once_at_join() {
+        let mut publisher = InMemoryPublisher::default();
         let (mut engine, out) = Engine::join(
             at(1_000),
             "conv",
@@ -262,22 +270,20 @@ mod tests {
             &[id("alice"), id("bob")],
             EngineConfig::default(),
             InMemoryStore::default(),
+            &mut publisher,
         )
         .expect("join");
         let turns = engine.config().backup_takeover_window * 2;
 
         assert_eq!(engine.phase(), Phase::Syncing);
-        assert_eq!(
-            out.outbound
-                .iter()
-                .filter(|o| matches!(o, Outbound::Control(_)))
-                .count(),
-            1
-        );
+        assert_eq!(publisher.messages.len(), 1);
         assert_eq!(out.wakeup, None);
 
-        let out = engine.tick(at(1_000) + turns * 2).expect("tick");
-        assert!(out.outbound.is_empty());
+        publisher.drain();
+        engine
+            .tick(at(1_000) + turns * 2, &mut publisher)
+            .expect("tick");
+        assert!(publisher.messages.is_empty());
         assert_eq!(engine.phase(), Phase::Syncing);
     }
 
@@ -285,6 +291,7 @@ mod tests {
     /// election from the restart, on the restart's clock.
     #[test]
     fn restore_with_an_exhausted_list_files_the_election() {
+        let mut publisher = InMemoryPublisher::default();
         let members = [id("alice"), id("bob"), id("carol"), id("dave")];
         let (mut engine, _) = Engine::create(
             at(0),
@@ -294,6 +301,7 @@ mod tests {
             &members,
             EngineConfig::default(),
             InMemoryStore::default(),
+            &mut publisher,
         )
         .expect("create");
         // The list installed at creation has `sn_max` (2) members and covers
@@ -303,8 +311,17 @@ mod tests {
         engine.flush().expect("flush");
 
         let store = engine.store().clone();
-        let (restored, out) =
-            Engine::restore(at(100), "conv", id("alice"), 4, &members, store).expect("restore");
+        publisher.drain();
+        let (restored, out) = Engine::restore(
+            at(100),
+            "conv",
+            id("alice"),
+            4,
+            &members,
+            store,
+            &mut publisher,
+        )
+        .expect("restore");
 
         assert_eq!(restored.phase(), Phase::Syncing);
         assert!(
@@ -313,10 +330,7 @@ mod tests {
                 .any(|e| matches!(e, Event::PhaseChange(Phase::Syncing)))
         );
         assert_eq!(
-            out.outbound
-                .iter()
-                .filter(|o| matches!(o, Outbound::Control(_)))
-                .count(),
+            publisher.messages.len(),
             1,
             "alice is the first eligible member of the exhausted list, so files the election"
         );

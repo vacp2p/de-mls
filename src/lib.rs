@@ -32,8 +32,9 @@
 //! Every driving call — `handle_control`, `handle_candidate`, the report
 //! calls (`commit_applied`, `decision_failed`, `key_package_checked`), the
 //! local actions, and `tick` — returns an [`Output`]: decisions to execute
-//! against the group, bytes to seal and send, events to observe, and the
-//! next wakeup. Executing a decision leads to a report call that returns
+//! against the group, events to observe, and the next wakeup. Control
+//! messages leave during the call, through the [`Publish`] the call
+//! received. Executing a decision leads to a report call that returns
 //! its own `Output`, so the router loops until one is empty. A candidate on
 //! the wire is the raw MLS commit bytes: the router stages it and hands the
 //! facts the group learned straight to `handle_candidate`, which keeps at
@@ -44,6 +45,7 @@
 //! struct Router {
 //!     mls: MlsService,             // application-owned group
 //!     engine: Engine<KvStore>,
+//!     publisher: Sender,           // implements `Publish`
 //! }
 //!
 //! impl Router {
@@ -51,17 +53,17 @@
 //!         let out = match frame {
 //!             Frame::Sealed(bytes) => {
 //!                 let opened = self.mls.open(&bytes);
-//!                 self.engine.handle_control(now, opened.sender, opened.epoch, &opened.plaintext)
+//!                 self.engine.handle_control(now, opened.sender, opened.epoch, &opened.plaintext, &mut self.publisher)
 //!             }
 //!             Frame::Commit(bytes) => {
 //!                 let facts = self.mls.stage(&bytes);      // authenticates the sender
-//!                 self.engine.handle_candidate(now, CommitHash::of(&bytes), facts)
+//!                 self.engine.handle_candidate(now, CommitHash::of(&bytes), facts, &mut self.publisher)
 //!             }
 //!         };
 //!         self.drive(now, out)
 //!     }
 //!
-//!     // Seals and sends `outbound`, executes `decisions` in order — a
+//!     // Executes `decisions` in order — a
 //!     // `BuildCommit` builds on the group, broadcasts the commit bytes, and
 //!     // reports it back through `handle_candidate`, whose own Output feeds
 //!     // back in the same way — then hands `events` to the application.

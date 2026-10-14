@@ -204,15 +204,6 @@ pub enum Decision {
     Leave,
 }
 
-/// Bytes the router puts on the wire.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outbound {
-    /// A `ControlMessage`; seal at the current epoch and broadcast. The only
-    /// kind: a candidate is broadcast by the router as raw commit bytes, not
-    /// through this variant.
-    Control(Vec<u8>),
-}
-
 /// The lifecycle phase of a conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -337,15 +328,14 @@ pub enum Event {
     CommitAdopted { hash: CommitHash },
 }
 
-/// Everything one driving call produced. The router executes it completely,
-/// in order: `outbound`, then `decisions`, then `events`; see the router
-/// contract.
+/// What one driving call left for the router: decisions to execute, events
+/// to observe, the next wakeup. The router executes it completely, in
+/// order: `decisions`, then `events`; see the router contract. Messages for
+/// the group go out through [`crate::traits::Publish`] during the call.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Output {
     /// Execute against the group, in order.
     pub decisions: Vec<Decision>,
-    /// Seal and send.
-    pub outbound: Vec<Outbound>,
     /// Observe.
     pub events: Vec<Event>,
     /// Call [`super::Engine::tick`] no later than this.
@@ -356,13 +346,12 @@ impl Output {
     /// True when nothing is left to execute. `wakeup` alone does not count:
     /// a timer is armed, not work.
     pub fn is_empty(&self) -> bool {
-        self.decisions.is_empty() && self.outbound.is_empty() && self.events.is_empty()
+        self.decisions.is_empty() && self.events.is_empty()
     }
 
     /// Append `other`'s work after this one's and keep the earlier wakeup.
     pub fn merge(&mut self, other: Output) {
         self.decisions.extend(other.decisions);
-        self.outbound.extend(other.outbound);
         self.events.extend(other.events);
         self.wakeup = match (self.wakeup, other.wakeup) {
             (Some(a), Some(b)) => Some(a.min(b)),

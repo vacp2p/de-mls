@@ -75,9 +75,10 @@ fn a_joiner_adopts_its_answer_after_it_voted_on_an_election() {
         }
         let mut sent = false;
         bed.router_mut(node)
-            .act(now, |e| {
-                let out = e.propose_election(now);
-                sent = out.as_ref().is_ok_and(|o| !o.outbound.is_empty());
+            .act(now, |e, p| {
+                let before = p.sent();
+                let out = e.propose_election(now, p);
+                sent = p.sent() > before;
                 out
             })
             .expect("propose_election");

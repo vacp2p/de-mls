@@ -7,6 +7,7 @@ use crate::engine::{
     handle::Engine,
     types::{MemberId, Timestamp},
 };
+use crate::traits::InMemoryPublisher;
 
 /// A member id as the group would issue it: a signature key.
 pub(crate) fn member(name: &str) -> Vec<u8> {
@@ -20,6 +21,7 @@ pub(crate) fn id(name: &str) -> MemberId {
 /// A one-member conversation: the creator is its own steward list, so it
 /// is the epoch steward at every epoch.
 pub(crate) fn creator() -> Engine<InMemoryStore> {
+    let mut publisher = InMemoryPublisher::default();
     Engine::create(
         Timestamp::ZERO,
         "conv",
@@ -28,6 +30,7 @@ pub(crate) fn creator() -> Engine<InMemoryStore> {
         &[id("alice")],
         EngineConfig::default(),
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("create")
     .0
@@ -36,6 +39,7 @@ pub(crate) fn creator() -> Engine<InMemoryStore> {
 /// A two-member founding group, seen from alice: both members are
 /// settled stewards from `epoch`.
 pub(crate) fn founder() -> Engine<InMemoryStore> {
+    let mut publisher = InMemoryPublisher::default();
     Engine::create(
         Timestamp::ZERO,
         "conv",
@@ -44,6 +48,7 @@ pub(crate) fn founder() -> Engine<InMemoryStore> {
         &[id("alice"), id("bob")],
         EngineConfig::default(),
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("create")
     .0
@@ -52,6 +57,7 @@ pub(crate) fn founder() -> Engine<InMemoryStore> {
 /// A member seated by a welcome: starts in `Syncing` with no steward list
 /// until a sync is adopted, so it is neither steward nor epoch steward.
 pub(crate) fn joiner() -> Engine<InMemoryStore> {
+    let mut publisher = InMemoryPublisher::default();
     Engine::join(
         Timestamp::ZERO,
         "conv",
@@ -60,6 +66,7 @@ pub(crate) fn joiner() -> Engine<InMemoryStore> {
         &[id("alice"), id("bob")],
         EngineConfig::default(),
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("join")
     .0
