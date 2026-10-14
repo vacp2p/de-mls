@@ -1,8 +1,6 @@
-//! The one storage trait the engine takes: a per-conversation key-value
-//! store of bytes. The engine defines the keys ([`keys`]) and owns every
-//! encoding; the integrator supplies durability.
-
-use std::{collections::HashMap, convert::Infallible, error::Error};
+//! The keys the engine writes to its [`crate::traits::EngineStore`] and
+//! the per-call record of which ones changed. The engine owns every
+//! encoding; the application supplies durability.
 
 /// Keys the engine writes. Each holds one protobuf message.
 pub mod keys {
@@ -20,23 +18,6 @@ pub mod keys {
     pub const CONSENSUS: &str = "consensus";
     /// Config and the epoch the snapshot was written at.
     pub const META: &str = "meta";
-}
-
-/// Durable bytes under engine-defined keys, scoped to one conversation.
-///
-/// The engine writes only the key whose state changed, at the end of the
-/// driving call that changed it, and reads every key back on construction.
-/// The router makes a call's writes durable before sending that call's
-/// outbound.
-pub trait EngineStore {
-    /// Backend I/O error. [`Infallible`] for a backend that cannot fail.
-    type Error: Error + Send + Sync + 'static;
-
-    /// The bytes under `key`, or `None` if never written.
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Self::Error>;
-
-    /// Replace the bytes under `key`.
-    fn put(&mut self, key: &str, value: &[u8]) -> Result<(), Self::Error>;
 }
 
 /// Which keys the current driving call changed; flushed by `finish`.
@@ -62,38 +43,4 @@ impl Dirty {
         consensus: true,
         meta: true,
     };
-}
-
-/// Process-lifetime store for tests and integrators without persistence.
-#[derive(Debug, Clone, Default)]
-pub struct InMemoryStore {
-    entries: HashMap<String, Vec<u8>>,
-}
-
-impl EngineStore for InMemoryStore {
-    type Error = Infallible;
-
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Infallible> {
-        Ok(self.entries.get(key).cloned())
-    }
-
-    fn put(&mut self, key: &str, value: &[u8]) -> Result<(), Infallible> {
-        self.entries.insert(key.to_string(), value.to_vec());
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn in_memory_round_trip() {
-        let mut store = InMemoryStore::default();
-        assert_eq!(store.get(keys::META).unwrap(), None);
-        store.put(keys::META, b"x").unwrap();
-        assert_eq!(store.get(keys::META).unwrap().as_deref(), Some(&b"x"[..]));
-        store.put(keys::META, b"y").unwrap();
-        assert_eq!(store.get(keys::META).unwrap().as_deref(), Some(&b"y"[..]));
-    }
 }

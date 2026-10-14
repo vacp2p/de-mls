@@ -10,8 +10,8 @@ use tracing::info;
 use crate::{
     ConversationError, ElectionDecision,
     engine::{
+        EngineStore,
         handle::Engine,
-        store::EngineStore,
         types::{ActionKind, Phase},
     },
     protos::de_mls::messages::v1::{

@@ -9,8 +9,8 @@
 use crate::{
     ConversationError,
     engine::{
+        EngineStore,
         handle::Engine,
-        store::EngineStore,
         types::{MemberId, Output, Timestamp},
     },
     protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberInvite},

@@ -6,7 +6,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     ConversationError,
-    engine::{handle::Engine, store::EngineStore},
+    engine::{EngineStore, handle::Engine},
 };
 
 impl<St: EngineStore> Engine<St> {

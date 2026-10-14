@@ -5,8 +5,8 @@
 use crate::{
     ConversationError, ScoreEvent, ScoreOp,
     engine::{
+        EngineStore,
         handle::{Engine, PendingMerge},
-        store::EngineStore,
         types::{CandidateRejection, Decision, Event, MemberId},
     },
 };

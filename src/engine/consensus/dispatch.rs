@@ -13,9 +13,9 @@ use tracing::{debug, info, warn};
 use crate::{
     ConversationError,
     engine::{
+        EngineStore,
         consensus::apply::{ApplyOutcome, apply_outcome},
         handle::Engine,
-        store::EngineStore,
         types::{Event, MemberId, Verdict},
     },
     peer_scoring::emergency_score_ops,

@@ -84,6 +84,10 @@ pub mod peer_scoring;
 /// Steward-list plug-in: deterministic list and rotation queries.
 pub mod steward_list;
 
+/// The three traits the application implements: [`GroupView`],
+/// [`EngineStore`], [`Publish`].
+pub mod traits;
+
 /// Library error types.
 pub mod error;
 
@@ -96,3 +100,4 @@ pub use engine::*;
 pub use error::*;
 pub use peer_scoring::*;
 pub use steward_list::*;
+pub use traits::*;

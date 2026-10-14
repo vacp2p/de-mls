@@ -3,7 +3,7 @@
 //! leaving `Syncing` are phase transitions and live with the others.
 
 use crate::{
-    engine::{consensus::wire::control_bytes, handle::Engine, store::EngineStore},
+    engine::{EngineStore, consensus::wire::control_bytes, handle::Engine},
     protos::de_mls::messages::v1::{ConversationSyncRequest, control_message},
 };
 

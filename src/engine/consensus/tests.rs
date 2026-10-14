@@ -10,10 +10,10 @@ use prost::Message;
 
 use crate::{
     engine::{
+        InMemoryStore,
         config::EngineConfig,
         consensus::{MemberSigner, wire::authorize_fast_path_proposal},
         handle::Engine,
-        store::InMemoryStore,
         test_support::founder,
         types::{
             ActionKind, Decision, DecisionFailure, Event, MemberId, Outbound, Output, Timestamp,

@@ -2,9 +2,9 @@
 //! engine's test modules.
 
 use crate::engine::{
+    InMemoryStore,
     config::EngineConfig,
     handle::Engine,
-    store::InMemoryStore,
     types::{MemberId, Timestamp},
 };
 

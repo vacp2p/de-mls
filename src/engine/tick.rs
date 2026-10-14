@@ -6,8 +6,8 @@ use tracing::info;
 use crate::{
     ConversationError,
     engine::{
+        EngineStore,
         handle::Engine,
-        store::EngineStore,
         types::{Event, Output, Phase, Timestamp},
     },
 };
@@ -100,8 +100,8 @@ mod tests {
     use super::*;
     use crate::{
         engine::{
+            InMemoryStore,
             config::EngineConfig,
-            store::InMemoryStore,
             types::{Action, CommitHash, Decision, MemberId, Phase, StagedFacts},
         },
         protos::de_mls::messages::v1::{
