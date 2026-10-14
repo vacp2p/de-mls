@@ -65,15 +65,17 @@ MUST.
    `tick(now)` is called no later than the `wakeup` of the last `Output`.
 3. Every `Output` is executed completely before the next driving call,
    in this order: execute `decisions` in the order given, then handle
-   `events`. Control messages do not wait for the `Output`: the engine
-   hands each one to the `Publish` the call received, before the call
-   returns; the implementation seals it at the current epoch and sends
-   it to the group. A report
-   call made while executing a decision returns its own `Output`, which
-   is executed the same way; the router loops until an `Output` is empty.
+   `events`. Control messages do not wait for the `Output`: every
+   driving call and constructor takes a `Publish` as its last argument
+   (left out of the signatures below) and the engine hands each message
+   to it before the call returns; the implementation seals it at the
+   current epoch and sends it to the group. A report call made while
+   executing a decision returns its own `Output`, which is executed the
+   same way; the router loops until an `Output` is empty.
 4. A decision the router could not execute (an MLS error on merge, a
-   missing staged commit) is reported with `decision_failed(now, decision,
-   reason)` before any other engine call. The engine discards and moves on.
+   missing staged commit) is reported with `decision_failed(now,
+   DecisionFailure { decision, reason })` before any other engine call.
+   The engine discards and moves on.
 
 **Inbound**
 
@@ -141,7 +143,7 @@ MUST.
     election lands it refuses candidates. A refused candidate is held
     (rule 6); a merge in between drops it as stale (rule 14).
 12. A sync is pulled, never pushed. The engine asks once when it holds
-    nothing, at `join` and at a stale restart, and after an adoption; it
+    nothing, when added, at a stale restart, and after an adoption; it
     keeps no deadline. Every other ask is `request_sync(now)`, the
     router's call in any phase and on its own clock: while it is still
     not synced, after an offline stretch, after
@@ -163,9 +165,11 @@ MUST.
 14. Staged commits are held by hash. `Decision::Discard` drops the named
     ones; after a merge every remaining staged commit is dropped as stale.
     A loser clears its own pending commit before merging the winner.
-15. After a merge, `commit_applied(now, hash, epoch, members)` is called
-    before any other engine call, one call per merged commit, in merge
-    order. A hash the engine did not decide is an adoption (rule 21).
+15. After a merge, `commit_applied(now, hash, group)` is called before
+    any other engine call, one call per merged commit, in merge order;
+    the engine reads the new epoch and member set from `group`, its
+    `GroupView`, inside that call and at no other time. A hash the
+    engine did not decide is an adoption (rule 21).
 16. After `Decision::BuildCommit` the router builds, keeps the commit
     pending, broadcasts the commit bytes, and reports it through
     `handle_candidate` with the facts the build returned. The welcome
@@ -177,13 +181,13 @@ MUST.
     writes a call's state before it publishes that call's messages, so a
     node never sends a vote it can forget.
 18. On restart the router loads the group first, then
-    `Engine::restore(now, conversation_id, own, epoch, members, store,
-    publisher)`; on join it opens the welcome first, then `Engine::join(now,
-    conversation_id, own, epoch, members, config, store, publisher)`. Either way it
-    executes the returned `Output`. A joiner, a store the engine never
-    wrote, and a store from another epoch all start in `Syncing`: that
-    `Output` carries the sync request and reports the end of the answer
-    turns as its wakeup.
+    `Engine::open(now, group, config, store)`, `group` being the
+    `GroupView` over the loaded group; on join it opens the welcome first,
+    then the same `Engine::open` over a store never written. Either way
+    it executes the returned `Output`. A joiner, a store the engine never
+    wrote, and a store from another epoch all start in `Syncing`: the
+    sync request is published during the call and the `Output` reports
+    the end of the answer turns as its wakeup.
 19. Exactly one live group instance per storage scope.
 20. Catch-up is the live path replayed. A member that comes back fetches
     the frames the group published since the last one it consumed, sorted
@@ -240,7 +244,7 @@ and the network. A router written another way should still pass them.
 | 8 | an announcement filed while a round is open is held until the round closes instead of landing in the next commit | `engine_bed_flow::a_proposal_filed_during_a_round_lands_in_the_next_commit` |
 | 9, 10 | an invite lands without the key package checked, or a rejected one lands anyway | `engine_bed_flow::creator_adds_one_then_a_member_adds_another`, `engine_bed_membership::rejected_invite_never_lands` |
 | 11, 12 | a node with no list guesses the steward; at list exhaustion every node enters `Syncing`, the election lands, work resumes; a joiner that took the list from the election drops the answer to its own ask and never gets the group's timing and scores | `engine_bed_membership::an_exhausted_steward_list_is_replaced_without_a_stall`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs`, `engine_bed_order::a_joiner_adopts_its_answer_after_it_voted_on_an_election` |
-| 12 | a joiner or a restarted node never learns the list; a silent epoch steward leaves the ask unanswered until the backup takes over; a joiner rejects the commit carrying work approved before its seating, or stays silent on a vote it was counted in | `engine_bed_sync::backup_steward_answers_when_the_epoch_steward_is_silent`, `engine_bed_sync::a_working_member_can_ask_and_learns_it_is_current`, `engine_bed_flow::a_session_open_at_a_seating_commit_reaches_the_new_member`, `engine_bed_flow::a_proposal_filed_after_a_seating_reaches_the_new_member_in_any_order` |
+| 12 | a joiner or a restarted node never learns the list; a silent epoch steward leaves the ask unanswered until the backup takes over; a joiner rejects the commit carrying work approved before its seating, or stays silent on a vote it was counted in | `engine_bed_sync::backup_steward_answers_when_the_epoch_steward_is_silent`, `engine_bed_sync::a_working_member_that_asks_adopts_the_equal_answer`, `engine_bed_flow::a_session_open_at_a_seating_commit_reaches_the_new_member`, `engine_bed_flow::a_proposal_filed_after_a_seating_reaches_the_new_member_in_any_order` |
 | 13, 14 | a foreign commit merges, or a discarded one stays staged and merges later | `engine_bed_liveness::foreign_commit_is_rejected_and_scored` |
 | 15, 21 | the engine's member set drifts from the group's; a commit merged on the router's own trust is adopted in full and the node follows the next one | `engine_bed_catch_up::a_member_that_missed_only_the_commit_adopts_it_and_follows_the_next`, `engine_bed_catch_up::two_members_survivor_commits_on_its_own_authority` |
 | 17, 18 | a restart loses the vote in flight, or loads the engine before the group and starts from the wrong epoch | `engine_bed_flow::restart_mid_vote_resumes_and_merges`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs` |
@@ -257,7 +261,7 @@ Error handling and the store are elided.
 
 ```rust
 struct Router {
-    mls: MlsService,                       // application-owned group
+    mls: MlsService,                       // application-owned group, implements `GroupView`
     engine: Engine<KvStore>,
     publisher: Sender,                     // implements `Publish`: seals at the current epoch, sends
     staged: HashMap<CommitHash, StagedCommit>,
@@ -398,16 +402,16 @@ impl Router {
                 self.engine.handle_candidate(now, built.hash, built.facts, &mut self.publisher)
             }
             Decision::Merge { hash } => {
-                let applied = if self.mls.pending_hash() == Some(hash) {
-                    self.mls.merge_pending()
+                if self.mls.pending_hash() == Some(hash) {
+                    self.mls.merge_pending();
                 } else {
                     self.mls.clear_pending();
                     let staged = self.staged.remove(&hash).expect("staged");
-                    self.mls.merge_staged(staged)
-                };
+                    self.mls.merge_staged(staged);
+                }
                 self.staged.clear();                                 // the rest are stale
                 if let Some(w) = self.mls.take_welcome(hash) { self.inbox.deliver(w); }
-                self.engine.commit_applied(now, hash, applied.epoch, applied.members, &mut self.publisher)
+                self.engine.commit_applied(now, hash, &self.mls, &mut self.publisher)
             }
             Decision::Discard { hashes } => {
                 for h in hashes { self.staged.remove(&h); }

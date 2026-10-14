@@ -10,7 +10,7 @@ use crate::{
     DEFAULT_PEER_SCORE, Decision, Engine, EngineConfig, Event, InMemoryStore, StewardList,
     StewardListConfig,
     engine::{
-        test_support::{creator, founder, id, joiner, member},
+        test_support::{creator, founder, group, id, joiner, member, view},
         types::{ActionKind, CommitHash, Phase, StagedFacts, Timestamp},
     },
     protos::de_mls::messages::v1::{
@@ -223,10 +223,7 @@ fn a_synced_non_steward_ignores_sync_request_and_arms_nothing() {
     let mut publisher = InMemoryPublisher::default();
     let mut engine = Engine::create(
         Timestamp::ZERO,
-        "conv",
-        id("bob"),
-        0,
-        &[id("alice"), id("bob")],
+        &group("bob", 0, &["alice", "bob"]),
         EngineConfig::default(),
         InMemoryStore::default(),
         &mut publisher,
@@ -316,10 +313,7 @@ fn adopting_a_sync_clamps_voting_delay_below_its_timeout() {
     };
     let mut steward = Engine::create(
         Timestamp::ZERO,
-        "conv",
-        id("alice"),
-        1,
-        &[id("alice"), id("bob")],
+        &group("alice", 1, &["alice", "bob"]),
         founder_config,
         InMemoryStore::default(),
         &mut publisher,
@@ -336,12 +330,9 @@ fn adopting_a_sync_clamps_voting_delay_below_its_timeout() {
         voting_delay: Duration::from_secs(10),
         ..EngineConfig::default()
     };
-    let mut engine = Engine::join(
+    let mut engine = Engine::open(
         Timestamp::ZERO,
-        "conv",
-        id("bob"),
-        1,
-        &[id("alice"), id("bob")],
+        &group("bob", 1, &["alice", "bob"]),
         joiner_config,
         InMemoryStore::default(),
         &mut publisher,
@@ -366,10 +357,7 @@ fn a_working_node_adopts_a_newer_election() {
     // covers epochs 0-1: setting its epoch to 1 leaves it `Working`.
     let mut b = Engine::create(
         at(0),
-        "conv",
-        id("alice"),
-        0,
-        &members,
+        &view(id("alice"), 0, &members),
         EngineConfig::default(),
         InMemoryStore::default(),
         &mut publisher,
@@ -381,10 +369,7 @@ fn a_working_node_adopts_a_newer_election() {
 
     let a = Engine::create(
         at(0),
-        "conv",
-        id("alice"),
-        1,
-        &members,
+        &view(id("alice"), 1, &members),
         EngineConfig::default(),
         InMemoryStore::default(),
         &mut publisher,
@@ -419,10 +404,7 @@ fn a_working_node_adopts_an_answer_from_the_same_election() {
     };
     let mut steward = Engine::create(
         at(0),
-        "conv",
-        id("alice"),
-        1,
-        &members,
+        &view(id("alice"), 1, &members),
         steward_config,
         InMemoryStore::default(),
         &mut publisher,
@@ -439,10 +421,7 @@ fn a_working_node_adopts_an_answer_from_the_same_election() {
 
     let mut a = Engine::create(
         at(0),
-        "conv",
-        id("bob"),
-        1,
-        &members,
+        &view(id("bob"), 1, &members),
         EngineConfig::default(),
         InMemoryStore::default(),
         &mut publisher,
@@ -473,10 +452,7 @@ fn an_answer_from_an_older_election_is_ignored() {
     };
     let mut steward = Engine::create(
         at(0),
-        "conv",
-        id("alice"),
-        0,
-        &members,
+        &view(id("alice"), 0, &members),
         steward_config,
         InMemoryStore::default(),
         &mut publisher,
@@ -493,10 +469,7 @@ fn an_answer_from_an_older_election_is_ignored() {
 
     let mut a = Engine::create(
         at(0),
-        "conv",
-        id("bob"),
-        1,
-        &members,
+        &view(id("bob"), 1, &members),
         EngineConfig::default(),
         InMemoryStore::default(),
         &mut publisher,
@@ -524,10 +497,7 @@ fn adopting_a_newer_list_drops_a_candidate_from_the_old_steward() {
     let members = [id("alice"), id("bob"), id("carol")];
     let mut b = Engine::create(
         at(0),
-        "conv",
-        id("alice"),
-        0,
-        &members,
+        &view(id("alice"), 0, &members),
         EngineConfig::default(),
         InMemoryStore::default(),
         &mut publisher,
@@ -538,10 +508,7 @@ fn adopting_a_newer_list_drops_a_candidate_from_the_old_steward() {
 
     let a = Engine::create(
         at(0),
-        "conv",
-        id("alice"),
-        1,
-        &members,
+        &view(id("alice"), 1, &members),
         EngineConfig::default(),
         InMemoryStore::default(),
         &mut publisher,
@@ -687,12 +654,9 @@ fn a_joiner_seated_after_a_relayed_session_was_filed_does_not_vote() {
         .expect("proposal")
         .proposal_id;
 
-    let mut engine = Engine::join(
+    let mut engine = Engine::open(
         Timestamp::ZERO,
-        "conv",
-        id("bob"),
-        2,
-        &[id("alice"), id("bob")],
+        &group("bob", 2, &["alice", "bob"]),
         EngineConfig::default(),
         InMemoryStore::default(),
         &mut publisher,
@@ -734,10 +698,7 @@ fn a_node_with_a_newer_list_ignores_the_pending_work() {
         .proposal_id;
     let mut engine = Engine::create(
         Timestamp::ZERO,
-        "conv",
-        id("alice"),
-        2,
-        &[id("alice"), id("bob")],
+        &group("alice", 2, &["alice", "bob"]),
         EngineConfig::default(),
         InMemoryStore::default(),
         &mut publisher,

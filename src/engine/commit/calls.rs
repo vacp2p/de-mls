@@ -21,7 +21,7 @@ use crate::{
         },
     },
     scoring_member_diff,
-    traits::Publish,
+    traits::{GroupView, Publish},
 };
 
 impl<St: EngineStore> Engine<St> {
@@ -98,8 +98,8 @@ impl<St: EngineStore> Engine<St> {
         self.finish(publisher)
     }
 
-    /// The router merged `hash`; the group is now at `epoch` with `members`.
-    /// The engine moves its own view only here.
+    /// The router merged `hash`; the engine reads the group's new epoch and
+    /// member set from `group`. The engine moves its own view only here.
     ///
     /// A hash the engine did not decide is an adoption: the router merged on
     /// its own trust; the engine takes the group's facts in full, reports
@@ -108,11 +108,12 @@ impl<St: EngineStore> Engine<St> {
         &mut self,
         now: Timestamp,
         hash: CommitHash,
-        epoch: u64,
-        members: &[MemberId],
+        group: &impl GroupView,
         publisher: &mut impl Publish,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
+        let epoch = group.epoch();
+        let members = group.members();
         let mut adopted: Vec<Vec<u8>> = members.iter().map(|m| m.as_bytes().to_vec()).collect();
         adopted.sort();
         adopted.dedup();

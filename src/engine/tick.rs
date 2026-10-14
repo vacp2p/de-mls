@@ -108,6 +108,7 @@ mod tests {
         engine::{
             InMemoryStore,
             config::EngineConfig,
+            test_support::group,
             types::{Action, CommitHash, Decision, MemberId, Phase, StagedFacts},
         },
         protos::de_mls::messages::v1::{
@@ -129,10 +130,7 @@ mod tests {
         let mut publisher = InMemoryPublisher::default();
         Engine::<InMemoryStore>::create(
             at(0),
-            "conv",
-            id("alice"),
-            0,
-            &[id("alice")],
+            &group("alice", 0, &["alice"]),
             EngineConfig::default(),
             InMemoryStore::default(),
             &mut publisher,

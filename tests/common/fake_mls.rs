@@ -4,7 +4,10 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use de_mls::engine::{Action, CommitHash, MemberId, StagedFacts};
+use de_mls::{
+    GroupView,
+    engine::{Action, CommitHash, MemberId, StagedFacts},
+};
 use sha2::{Digest, Sha256};
 
 /// What a sealed frame is about, so the router can branch before touching
@@ -59,13 +62,6 @@ pub struct Built {
     pub actions: Vec<Action>,
     pub commit: Vec<u8>,
     pub welcome: Option<WelcomeDraft>,
-}
-
-/// What `merge` returns.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Applied {
-    pub epoch: u64,
-    pub members: Vec<MemberId>,
 }
 
 /// Past-epoch window the contract pins (`max_past_epochs`).
@@ -463,7 +459,7 @@ impl FakeMls {
 
     /// Merge the pending own commit or a staged one. Merging a remote clears
     /// the pending own commit first; every other staged commit is then stale.
-    pub fn merge(&mut self, hash: CommitHash) -> Result<Applied, String> {
+    pub fn merge(&mut self, hash: CommitHash) -> Result<(), String> {
         let commit = match self.pending.take() {
             Some((h, c)) if h == hash => c,
             other => {
@@ -477,10 +473,7 @@ impl FakeMls {
         self.apply(&commit, hash);
         self.own_update = None;
         self.held_updates.clear();
-        Ok(Applied {
-            epoch: self.epoch,
-            members: self.members(),
-        })
+        Ok(())
     }
 
     pub fn discard(&mut self, hash: CommitHash) {
@@ -553,4 +546,22 @@ fn chain(previous: [u8; 32], hash: CommitHash) -> [u8; 32] {
     hasher.update(previous);
     hasher.update(hash.as_bytes());
     hasher.finalize().into()
+}
+
+impl GroupView for FakeMls {
+    fn conversation_id(&self) -> &str {
+        FakeMls::conversation_id(self)
+    }
+
+    fn own_id(&self) -> MemberId {
+        self.own.clone()
+    }
+
+    fn epoch(&self) -> u64 {
+        FakeMls::epoch(self)
+    }
+
+    fn members(&self) -> Vec<MemberId> {
+        FakeMls::members(self)
+    }
 }

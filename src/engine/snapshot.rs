@@ -1,5 +1,5 @@
 //! Encoding engine state under the store keys and reading it back. The
-//! write side runs in `finish`; the read side in `Engine::restore`.
+//! write side runs in `finish`; the read side in `Engine::open`.
 
 use std::time::Duration;
 
@@ -252,6 +252,7 @@ mod tests {
         Decision, Event, ScoreEvent, ScoreOp,
         engine::{
             InMemoryStore,
+            test_support::view,
             types::{ActionKind, MemberId, Timestamp},
         },
         protos::de_mls::messages::v1::{
@@ -296,7 +297,7 @@ mod tests {
         }
     }
 
-    /// Every key round-trips through `flush` and `Engine::restore`: the
+    /// Every key round-trips through `flush` and `Engine::open`: the
     /// steward list, the approved queue and its urgent target, a join
     /// epoch, a skipped steward, a moved score, and an open consensus
     /// session (recomputed via `on_incoming_proposal`, matching the path
@@ -310,10 +311,7 @@ mod tests {
         let members: Vec<MemberId> = (1..=4).map(|i| MemberId::from(member(i))).collect();
         let (mut engine, _) = Engine::create(
             Timestamp::ZERO,
-            "conv",
-            members[0].clone(),
-            0,
-            &members,
+            &view(members[0].clone(), 0, &members),
             EngineConfig::default(),
             InMemoryStore::default(),
             &mut publisher,
@@ -350,12 +348,10 @@ mod tests {
         engine.flush().expect("flush");
 
         let store = engine.store().clone();
-        let (restored, out) = Engine::restore(
+        let (restored, out) = Engine::open(
             Timestamp::from_duration_since_epoch(Duration::from_secs(3)),
-            "conv",
-            members[0].clone(),
-            0,
-            &members,
+            &view(members[0].clone(), 0, &members),
+            EngineConfig::default(),
             store,
             &mut publisher,
         )
@@ -448,10 +444,7 @@ mod tests {
         let members: Vec<MemberId> = (1..=4).map(|i| MemberId::from(member(i))).collect();
         let (mut engine, _) = Engine::create(
             Timestamp::ZERO,
-            "conv",
-            members[0].clone(),
-            0,
-            &members,
+            &view(members[0].clone(), 0, &members),
             EngineConfig::default(),
             InMemoryStore::default(),
             &mut publisher,
@@ -482,12 +475,10 @@ mod tests {
 
         engine.dirty = Dirty::ALL;
         engine.flush().expect("flush");
-        let (restored, _) = Engine::restore(
+        let (restored, _) = Engine::open(
             Timestamp::ZERO,
-            "conv",
-            members[0].clone(),
-            0,
-            &members,
+            &view(members[0].clone(), 0, &members),
+            EngineConfig::default(),
             engine.store().clone(),
             &mut publisher,
         )

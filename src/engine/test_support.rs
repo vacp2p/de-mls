@@ -7,7 +7,7 @@ use crate::engine::{
     handle::Engine,
     types::{MemberId, Timestamp},
 };
-use crate::traits::InMemoryPublisher;
+use crate::traits::{InMemoryGroupView, InMemoryPublisher};
 
 /// A member id as the group would issue it: a signature key.
 pub(crate) fn member(name: &str) -> Vec<u8> {
@@ -18,16 +18,29 @@ pub(crate) fn id(name: &str) -> MemberId {
     MemberId::from(member(name))
 }
 
+/// A group view for the conversation `"conv"`, seen from `own`.
+pub(crate) fn view(own: MemberId, epoch: u64, members: &[MemberId]) -> InMemoryGroupView {
+    InMemoryGroupView {
+        conversation_id: "conv".into(),
+        own_id: own,
+        epoch,
+        members: members.to_vec(),
+    }
+}
+
+/// [`view`] over member names.
+pub(crate) fn group(own: &str, epoch: u64, members: &[&str]) -> InMemoryGroupView {
+    let members: Vec<MemberId> = members.iter().map(|m| id(m)).collect();
+    view(id(own), epoch, &members)
+}
+
 /// A one-member conversation: the creator is its own steward list, so it
 /// is the epoch steward at every epoch.
 pub(crate) fn creator() -> Engine<InMemoryStore> {
     let mut publisher = InMemoryPublisher::default();
     Engine::create(
         Timestamp::ZERO,
-        "conv",
-        id("alice"),
-        1,
-        &[id("alice")],
+        &group("alice", 1, &["alice"]),
         EngineConfig::default(),
         InMemoryStore::default(),
         &mut publisher,
@@ -42,10 +55,7 @@ pub(crate) fn founder() -> Engine<InMemoryStore> {
     let mut publisher = InMemoryPublisher::default();
     Engine::create(
         Timestamp::ZERO,
-        "conv",
-        id("alice"),
-        1,
-        &[id("alice"), id("bob")],
+        &group("alice", 1, &["alice", "bob"]),
         EngineConfig::default(),
         InMemoryStore::default(),
         &mut publisher,
@@ -58,12 +68,9 @@ pub(crate) fn founder() -> Engine<InMemoryStore> {
 /// until a sync is adopted, so it is neither steward nor epoch steward.
 pub(crate) fn joiner() -> Engine<InMemoryStore> {
     let mut publisher = InMemoryPublisher::default();
-    Engine::join(
+    Engine::open(
         Timestamp::ZERO,
-        "conv",
-        id("bob"),
-        1,
-        &[id("alice"), id("bob")],
+        &group("bob", 1, &["alice", "bob"]),
         EngineConfig::default(),
         InMemoryStore::default(),
         &mut publisher,

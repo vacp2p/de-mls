@@ -30,7 +30,7 @@ use crate::{
         types::{CommitHash, Decision, Event, MemberId, Output, Phase, StagedFacts, Timestamp},
     },
     peer_scoring::PeerScoringService,
-    traits::Publish,
+    traits::{GroupView, Publish},
 };
 
 /// The consensus service the engine runs: in-memory sessions, the engine's
@@ -117,7 +117,7 @@ pub struct Engine<St: EngineStore> {
     /// steward's, once [`Engine::handle_candidate`] accepts it. Ephemeral: a
     /// restart rejoins the next round rather than resuming this one.
     pub(crate) round_candidate: Option<(CommitHash, StagedFacts)>,
-    /// Set by the router after [`Engine::restore`]: a call whose `now` is
+    /// Set by the router after [`Engine::open`]: a call whose `now` is
     /// before it replays frames the group already decided on. `None` live.
     pub(crate) replay_until: Option<Timestamp>,
 }
@@ -126,13 +126,14 @@ impl<St: EngineStore> Engine<St> {
     /// Assemble an engine over the facts the router supplied. Installs no
     /// steward list; the constructors do that.
     pub(crate) fn assemble(
-        conversation_id: &str,
-        own: MemberId,
-        epoch: u64,
-        members: &[MemberId],
+        group: &impl GroupView,
         config: EngineConfig,
         store: St,
     ) -> Result<Self, ConversationError> {
+        let conversation_id = group.conversation_id();
+        let own = group.own_id();
+        let epoch = group.epoch();
+        let members = group.members();
         config.validate()?;
         let scoring =
             PeerScoringService::new(crate::default_score_deltas(), config.scoring.clone());
@@ -215,7 +216,7 @@ impl<St: EngineStore> Engine<St> {
 
     /// Calls whose `now` is before `until` replay frames the group already
     /// decided on: the engine casts no vote and asks for none. Called once
-    /// after [`Engine::restore`], before the first replayed frame.
+    /// after [`Engine::open`], before the first replayed frame.
     pub fn replay_until(&mut self, until: Timestamp) {
         self.replay_until = Some(until);
     }

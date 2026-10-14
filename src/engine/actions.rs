@@ -122,7 +122,7 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// Ask the stewards for a `ConversationSync`. The engine asks once on its
-    /// own, at `join`, at a stale restart and at an adoption; every other ask
+    /// own, when added, at a stale restart and at an adoption; every other ask
     /// is the router's, on its own clock, in any phase: while it is still not
     /// synced, after an offline stretch, after
     /// [`Event::CandidateRejected`](crate::engine::Event::CandidateRejected).
