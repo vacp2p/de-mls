@@ -74,11 +74,11 @@
 //! router and a fake group over this exact loop and stay honest where this
 //! sketch cannot.
 
-/// The [`Engine`](engine::Engine) handle: facts in, [`Output`](engine::Output)
+/// The [`Engine`] handle: facts in, [`Output`]
 /// out, no MLS inside.
 pub mod engine;
 
-/// Peer scoring: vocabulary and the library-owned [`PeerScoringService`](peer_scoring::PeerScoringService).
+/// Peer scoring: vocabulary and the library-owned [`PeerScoringService`].
 pub mod peer_scoring;
 
 /// Steward-list plug-in: deterministic list and rotation queries.

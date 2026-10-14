@@ -1,4 +1,4 @@
-//! The policy engine: facts in, [`Output`](crate::engine::Output) out, no MLS inside.
+//! The policy engine: facts in, [`Output`] out, no MLS inside.
 //!
 //! An application-owned router owns the MLS group, opens every frame, hands
 //! the engine control bytes with the MLS-authenticated sender, and executes
