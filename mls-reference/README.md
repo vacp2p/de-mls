@@ -1,0 +1,448 @@
+# MLS service contract (reference)
+
+The group operations the protocol engine delegates to the application, the
+guarantees each one carries, and an OpenMLS 0.8.1 implementation that satisfies
+them.
+
+Nothing in this contract is called by the engine. Every operation is called by
+the router against the application's own group-owning code. "MLS service" below
+means that code, organised however the application likes. The application
+already owns the group config builder, the provider and signer, key-package
+minting, validation and identity, and welcome delivery; the rest is new code,
+with `src/reference.rs` as the worked example. Each line is a MUST unless
+marked SHOULD; the rationale is attached because the reference will be
+reorganised.
+
+## 1. Group configuration
+
+- Wire format MUST be pure ciphertext for application messages; commits MAY be
+  public or private, the candidate envelope carries them in the clear either way.
+- `max_past_epochs` MUST be at least the commit-round depth (3) so control
+  messages sealed just before a merge still open. `out_of_order_tolerance` and
+  `maximum_forward_distance` MUST allow gossip reordering (reference: 64 / 1000).
+- Ratchet-tree extension MUST be on; welcomes carry the tree.
+- Padding, ciphersuite, capabilities, group-context extensions are the
+  application's.
+
+`src/group_config.rs` pins these on both construction paths, stamped onto the
+application's builder last so they always win.
+
+## 2. Operations and their guarantees
+
+| op | returns | requirement |
+|---|---|---|
+| `create(config)` | group, epoch, members | group id MUST equal the conversation id bytes |
+| `open_welcome(welcome)` | group, conversation id, epoch, members, or "not for me" | MUST distinguish "not addressed to me" from failure |
+| `load(conversation id)` | group | |
+| `members()` | `[member_id]` | member id = the leaf's signature key: unique within a group by MLS, identical on every node, stable while the member keeps its key |
+| `epoch()`, `own_id()` | | read from the group, never cached |
+| `seal(plaintext)` | ciphertext | MUST persist the ratchet before returning |
+| `open(ciphertext)` | `{sender, epoch, plaintext}` or drop | MUST return the sender from the MLS signature, never from the payload; MUST drop group-id mismatch, epochs newer than current, older than `current - past_window`, and older than own join; MUST NOT process commit or proposal content here |
+| `key_package_identity(bytes)` | member id (the leaf's signature key) | parse only; the same value the member has after seating |
+| `validate_key_package(bytes)` | ok / error | full MLS validation |
+| `propose_update(params)` | update bytes | MUST build an Update proposal for our own leaf and hold it outside the proposal store, a non-empty store blocks `seal`; never the signature key |
+| `validate_update(bytes)` | the sender's member id, or error | the same bytes validate once; MUST fail unless they are an Update proposal for this group and the current epoch; MUST hold it outside the proposal store |
+| `build_commit(actions)` | `{hash, actions, proposal_count, commit_bytes, welcome?}` | adds and removes MUST be inline, held updates ride by reference; MUST force a self-update; MUST validate every key package; MUST stay pending and MUST NOT merge; removes of non-members MUST be skipped and reported; an update nobody holds MUST fail the build; our own held update rides in the commit itself, not as an action; `actions` reports the commit's own order |
+| `stage(commit_bytes)` | `{sender, epoch, actions, proposal_count, self_removed}` | MUST NOT apply; the same bytes stage once; MUST hold several staged commits at once; MUST reject group-id mismatch and past epochs; `actions` lists adds, removes and updates by member id in commit order; a commit that refers to an update this node does not hold MUST fail with a distinct error |
+| `merge(hash)` | `{epoch, members}` | own pending commit MUST be cleared before merging a remote one; MUST persist before returning; MUST drop every held update |
+| `discard(hash)`, `clear_pending()` | | |
+| `commit_hash(bytes)` | hash | one function, same on every node |
+| `delete()` | | idempotent teardown after `Decision::Leave` |
+| welcome delivery | | delivers the welcome; the joiner's engine asks for its sync itself |
+
+## 3. Router contract
+
+The router is application code. It is the only caller of the engine and the
+only caller of the group. These rules are what make the split safe; each is a
+MUST.
+
+**Driving**
+
+1. One engine per conversation, driven from one thread at a time. Calls
+   never interleave.
+2. `now` is monotonic per conversation. The constructors take the same
+   clock, and a deadline armed at construction is measured against it.
+   `tick(now)` is called no later than the `wakeup` of the last `Output`.
+3. Every `Output` is executed completely before the next driving call,
+   in this order: seal and send `outbound` (at the current epoch), then
+   execute `decisions` in the order given, then handle `events`. A report
+   call made while executing a decision returns its own `Output`, which
+   is executed the same way; the router loops until an `Output` is empty.
+4. A decision the router could not execute (an MLS error on merge, a
+   missing staged commit) is reported with `decision_failed(now, decision,
+   reason)` before any other engine call. The engine discards and moves on.
+
+**Inbound**
+
+5. Sealed frames are opened first. Chat content never reaches the engine.
+   A control payload reaches it only with the sender MLS-authenticated and
+   the epoch it was sealed at; one the router could not authenticate never
+   does. The router never reads, interprets or generates control bytes.
+   A frame the group cannot open because it was sealed at a newer epoch is
+   the router's cue that this node is behind (rule 20); the engine never
+   sees it. The cue is not proof, a garbage frame can carry any epoch; what
+   settles it is the commit itself (rules 20 and 21), and a cue with no
+   commit behind it is ignored.
+6. Control traffic is delivered at least once, in no particular order.
+   An input the engine refuses (`Err(ConversationError::Refused(_))`) is
+   held by the router and fed again, every held input once, after each
+   `Output` it drives. A payload is held for `consensus_timeout`, a
+   candidate until its epoch merges; the router bounds what it holds per
+   sender. A sync answer brings a new member the approved work and the
+   open votes it could not see. What the answering steward never saw,
+   nobody brings: a node that missed such a proposal rejects the commit
+   and stays at its epoch. A discarded commit cannot be staged again.
+7. A candidate on the wire is the raw commit bytes. The router stages it
+   and reports the facts through `handle_candidate`; it never ranks or
+   validates candidates, the group rejecting a foreign or stale commit.
+   A candidate rejected as not the epoch steward's stays staged until
+   the epoch merges: after `Event::StewardSkipped` or
+   `Event::SyncApplied` the router reports its facts again, since the
+   sender may have become the epoch steward; a merged commit earns its
+   sender `SuccessfulCommit`, so an early substitute ends unpenalised. A
+   candidate rejected for its actions is never kept.
+
+**Proposals**
+
+8. A key-package announcement is the router's. It arrives outside the
+   group (a discovery topic, a contact exchange) and never reaches the
+   engine as bytes: the router validates the key package, reads the
+   joiner's id from it, decides whether it wants the member, and calls
+   `propose_add(now, member, key_package)`. Any member may propose;
+   a proposal for a member already covered by another proposal or an
+   approval is dropped. A member's own leaf update is filed the same way:
+   `propose_update` on the group, then `propose_update(now, bytes)` on the
+   engine, kept and filed again after the same refusal.
+9. An invite proposal carries the joiner's id as the proposer read it from
+   the key package. Every member executes `Decision::ValidateKeyPackage`
+   (full validation plus identity equals the claimed id) and reports
+   `key_package_checked` before its vote proceeds; the engine never parses
+   a key package. A peer's leaf update is checked the same way:
+   `Decision::ValidateUpdate`, `validate_update` (the id it returns
+   equals the member named), `update_checked`; a failed check takes the
+   update out before a commit can carry it.
+10. `Event::ConsensusReached` carries a verdict. `Rejected` is the group's
+    decision: the router does not file the same request again this epoch.
+    `Failed` is no decision (the timeout passed with neither side at
+    threshold): filing again is the router's call, and the engine treats
+    the new filing like a first one. `Approved` work lands in a later
+    commit; `MembersChanged` reports what landed, `MemberUpdated` for a
+    leaf update. An update that did not land is gone with its epoch: the
+    owner files a fresh one.
+
+**Sync**
+
+11. `Phase::Syncing` means the engine holds no steward list that covers
+    the epoch: a joiner, a restart from a stale store, or a list that ran
+    out at an epoch boundary. Until it adopts a `ConversationSync` or an
+    election lands it refuses candidates. A refused candidate is held
+    (rule 6); a merge in between drops it as stale (rule 14).
+12. A sync is pulled, never pushed. The engine asks once when it holds
+    nothing, at `join` and at a stale restart, and after an adoption; it
+    keeps no deadline. Every other ask is `request_sync(now)`, the
+    router's call in any phase and on its own clock: while it is still
+    not synced, after an offline stretch, after
+    `Event::CandidateRejected`. A synced steward answers with its list,
+    timing, scores, approved work and open votes. A node adopts an answer
+    whose list is as new as its own or newer, in any phase, and reports
+    `SyncApplied`; an older one is ignored. An open vote counts the
+    members of the epoch it was filed in: a member seated by then votes,
+    a member seated later only waits for it to end. A list elected after
+    the node's own epoch is not a valid answer for it (it cannot be
+    recomputed over a member set the node lacks): a node an epoch behind
+    heals through the missing commit (rule 6), not through a sync.
+
+**Commits**
+
+13. The epoch advances only by executing `Decision::Merge`. No
+    self-update, add, remove, external commit or merge of a pending commit
+    outside one.
+14. Staged commits are held by hash. `Decision::Discard` drops the named
+    ones; after a merge every remaining staged commit is dropped as stale.
+    A loser clears its own pending commit before merging the winner.
+15. After a merge, `commit_applied(now, hash, epoch, members)` is called
+    before any other engine call, one call per merged commit, in merge
+    order. A hash the engine did not decide is an adoption (rule 21).
+16. After `Decision::BuildCommit` the router builds, keeps the commit
+    pending, broadcasts the commit bytes, and reports it through
+    `handle_candidate` with the facts the build returned. The welcome
+    carries nothing but the MLS welcome.
+
+**Storage and restart**
+
+17. The `EngineStore` write of a driving call is durable before the
+    `outbound` of the same `Output` is sent. A node must not send a vote
+    it can forget.
+18. On restart the router loads the group first, then
+    `Engine::restore(now, conversation_id, own, epoch, members, store)`;
+    on join it opens the welcome first, then `Engine::join(now,
+    conversation_id, own, epoch, members, config, store)`. Either way it
+    executes the returned `Output`. A joiner, a store the engine never
+    wrote, and a store from another epoch all start in `Syncing`: that
+    `Output` carries the sync request and reports the end of the answer
+    turns as its wakeup.
+19. Exactly one live group instance per storage scope.
+20. Catch-up is the live path replayed. A member that comes back fetches
+    the frames the group published since the last one it consumed, sorted
+    by send time, restores the engine at that cursor's time, tells it the
+    present with `replay_until(present)`, and feeds them through the
+    ordinary calls with each frame's time as `now`, running every wakeup
+    due before a frame before the frame itself, then the wakeups due up to
+    the present. Before the present the engine casts no vote and asks for
+    none, every `outbound` is dropped and `Decision::BuildCommit` is not
+    executed: the group decided those while this member was away. A commit merges only through
+    `Decision::Merge`, exactly as live; nothing is adopted without its
+    vote, and a member removed while away gets `Decision::Leave` at that
+    epoch. A payload the router holds (rule 6) is not consumed: the cursor
+    stays at the oldest held frame until it is accepted or expired, so a
+    restart replays it rather than losing it; the frames after it are
+    replayed twice, which is a no-op.
+21. Adoption is the catch-up when the traffic is gone. A router that
+    receives the exact commit the group applied outside the live path (a
+    Store node without the control frames, a member relaying it) may stage
+    and merge it on the group without a decision and report
+    `commit_applied`. The trust is the router's: nothing is judged. The
+    engine adopts the group's facts in full, reports `CommitAdopted`,
+    keeps `Syncing` if it is there, and asks the stewards for a sync in
+    the same `Output`; the router executes that `Output` as any other. A
+    commit other than the one the group applied leaves the node on a
+    different epoch state, the next frames fail to open, and the node
+    rejoins. With two members no vote can pass while one is away, so this
+    is also how the survivor moves the group, and how the returning member
+    learns which commit was applied.
+
+**Liveness**
+
+22. On `CommitMissing` the router first checks whether someone in the
+    group has the epoch steward's commit, and calls `request_recovery`
+    only if nobody does. The commit may exist and have missed this node;
+    a member that has it sends the bytes again, and unless already
+    staged they enter as any commit (rule 7).
+
+### 3.1 Why each rule is a must
+
+The rules do not say how to write the router; they say what a router
+must do for the engine's decisions to hold on every node. Each one has a
+scenario in `tests/` that fails without it, on a fake router over a fake
+group with no cryptography. The scenarios assert only what a router can
+observe: its own group, its engine's events and decisions, its chats,
+and the network. A router written another way should still pass them.
+
+| rule | without it | scenario |
+|---|---|---|
+| 3, 16 | a decision executed out of order or half-way leaves the group and the engine disagreeing on the epoch | `engine_bed_smoke::creator_seats_two_joiners_and_chat_crosses` |
+| 5 | chat reaches the engine, or a vote is counted for a sender the group never authenticated | `engine_bed_smoke::creator_seats_two_joiners_and_chat_crosses` |
+| 6, 20 | a member that missed the traffic cannot judge the commit; replayed in order with the frame's time it merges through the ordinary path; a vote delivered before its proposal is lost and the node's verdict splits from the group's | `engine_bed_catch_up::a_member_offline_through_a_commit_catches_up_by_replay`, `engine_bed_catch_up::a_failed_recovery_vote_stays_failed_on_replay`, `engine_bed_liveness::a_skipped_steward_that_comes_back_follows_the_substitute`, `engine_bed_order::votes_that_arrive_before_their_proposal_are_counted` |
+| 7 | a commit from anyone but the epoch steward is applied; or the substitute's commit, rejected a moment before the skip verdict, is lost and the node stays behind | `engine_bed_liveness::foreign_commit_is_rejected_and_scored`, `engine_bed_liveness::a_substitute_commit_that_beats_the_verdict_is_reported_again_after_the_skip` |
+| 8 | an announcement filed while a round is open is held until the round closes instead of landing in the next commit | `engine_bed_flow::a_proposal_filed_during_a_round_lands_in_the_next_commit` |
+| 9, 10 | an invite lands without the key package checked, or a rejected one lands anyway | `engine_bed_flow::creator_adds_one_then_a_member_adds_another`, `engine_bed_membership::rejected_invite_never_lands` |
+| 11, 12 | a node with no list guesses the steward; at list exhaustion every node enters `Syncing`, the election lands, work resumes; a joiner that took the list from the election drops the answer to its own ask and never gets the group's timing and scores | `engine_bed_membership::an_exhausted_steward_list_is_replaced_without_a_stall`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs`, `engine_bed_order::a_joiner_adopts_its_answer_after_it_voted_on_an_election` |
+| 12 | a joiner or a restarted node never learns the list; a silent epoch steward leaves the ask unanswered until the backup takes over; a joiner rejects the commit carrying work approved before its seating, or stays silent on a vote it was counted in | `engine_bed_sync::backup_steward_answers_when_the_epoch_steward_is_silent`, `engine_bed_sync::a_working_member_can_ask_and_learns_it_is_current`, `engine_bed_flow::a_session_open_at_a_seating_commit_reaches_the_new_member`, `engine_bed_flow::a_proposal_filed_after_a_seating_reaches_the_new_member_in_any_order` |
+| 13, 14 | a foreign commit merges, or a discarded one stays staged and merges later | `engine_bed_liveness::foreign_commit_is_rejected_and_scored` |
+| 15, 21 | the engine's member set drifts from the group's; a commit merged on the router's own trust is adopted in full and the node follows the next one | `engine_bed_catch_up::a_member_that_missed_only_the_commit_adopts_it_and_follows_the_next`, `engine_bed_catch_up::two_members_survivor_commits_on_its_own_authority` |
+| 17, 18 | a restart loses the vote in flight, or loads the engine before the group and starts from the wrong epoch | `engine_bed_flow::restart_mid_vote_resumes_and_merges`, `engine_bed_flow::restart_with_a_stale_snapshot_resyncs` |
+
+Rules 1, 2, 4 and 19 are preconditions the test suite satisfies by construction
+and have no scenario. Rule 22 has none yet. Two clauses have none either:
+the per-sender bound of rule 6 (the bed's members are honest) and the cursor
+clause of rule 20 (the bed never restarts a node while it holds a payload).
+
+## 4. Reference router
+
+Not a component we ship; an example of the loop the contract describes.
+Error handling and the store are elided.
+
+```rust
+struct Router {
+    mls: MlsService,                       // application-owned group
+    engine: Engine<KvStore>,
+    staged: HashMap<CommitHash, StagedCommit>,
+    held: Vec<Held>,                       // refused inputs, fed again
+    update: Option<LeafParams>,            // own leaf change filed, not yet seen landing
+}
+
+enum Held {
+    Candidate { hash: CommitHash, facts: StagedFacts },
+    Control { arrived: Timestamp, sender: MemberId, epoch: u64, bytes: Vec<u8> },
+}
+
+impl Router {
+    fn on_frame(&mut self, now: Timestamp, frame: Frame) {
+        let out = match frame {
+            Frame::Sealed(bytes) => {
+                let Some(opened) = self.mls.open(&bytes) else { return };
+                match opened.kind {
+                    Kind::Chat    => { self.app.show(opened); return }
+                    Kind::Control => match self.engine
+                        .handle_control(now, opened.sender.clone(), opened.epoch, &opened.plaintext)
+                    {
+                        Err(ConversationError::Refused(_)) => {
+                            self.held.push(Held::Control {
+                                arrived: now, sender: opened.sender, epoch: opened.epoch,
+                                bytes: opened.plaintext,
+                            });
+                            return
+                        }
+                        out => out,
+                    },
+                }
+            }
+            Frame::Commit(bytes) => {
+                let hash = CommitHash::of(&bytes);
+                if self.staged.contains_key(&hash) { return }             // staged once
+                let Ok(facts) = self.mls.stage(&bytes) else { return };   // authenticates
+                self.staged.insert(hash, facts.staged);
+                match self.engine.handle_candidate(now, hash, facts.clone()) {
+                    Err(ConversationError::Refused(_)) => {
+                        self.held.push(Held::Candidate { hash, facts });
+                        return
+                    }
+                    out => out,
+                }
+            }
+        };
+        self.drive(now, out);
+    }
+
+    fn on_wakeup(&mut self, now: Timestamp) {
+        let out = self.engine.tick(now);
+        self.drive(now, out);
+    }
+
+    // The announcement arrived outside the group; the router validates it
+    // and proposes.
+    fn on_announcement(&mut self, now: Timestamp, key_package: Vec<u8>) {
+        if self.mls.validate_key_package(&key_package).is_err() { return }
+        let Ok(member) = MlsService::key_package_identity(&key_package) else { return };
+        if !self.app.wants(&member) { return }
+        match self.engine.propose_add(now, member, key_package) {
+            Ok(out) => self.drive(now, out),
+            Err(e) => self.app.report(e),                            // the app's to re-file
+        }
+    }
+
+    // Feeds every held input once more. Accepted or dropped for good
+    // (`Ok`) leaves the list; refused stays; a fault is reported and
+    // dropped. A control payload older than `consensus_timeout` expires.
+    fn retry_held(&mut self, now: Timestamp) -> Output {
+        let mut out = Output::default();
+        let ttl = self.engine.config().consensus_timeout;
+        for item in std::mem::take(&mut self.held) {
+            let result = match &item {
+                Held::Candidate { hash, facts } =>
+                    self.engine.handle_candidate(now, *hash, facts.clone()),
+                Held::Control { arrived, .. } if now - *arrived >= ttl => continue,
+                Held::Control { sender, epoch, bytes, .. } =>
+                    self.engine.handle_control(now, sender.clone(), *epoch, bytes),
+            };
+            match result {
+                Ok(o) => out.merge(o),
+                Err(ConversationError::Refused(_)) => self.held.push(item),
+                Err(e) => self.app.report(e),
+            }
+        }
+        out
+    }
+
+    // The update is wanted until `MemberUpdated` names us; a merge drops
+    // the filed one, landed or not, so the next `Working` files it again.
+    fn propose_update(&mut self, now: Timestamp) -> Output {
+        let Some(params) = self.update.clone() else { return Output::default() };
+        let Ok(bytes) = self.mls.propose_update(params) else { return Output::default() };
+        match self.engine.propose_update(now, bytes) {
+            Ok(out) => out,
+            Err(_) => Output::default(),                             // blocked: next `Working`
+        }
+    }
+
+    fn drive(&mut self, now: Timestamp, mut out: Output) {
+        loop {
+            for o in out.outbound.drain(..) { self.send(o); }       // sealed at current epoch
+            let mut next = Output::default();
+            for d in out.decisions.drain(..) {
+                next.merge(self.execute(now, d));                    // report calls return Output
+            }
+            for e in out.events.drain(..) {
+                if matches!(&e, Event::MemberUpdated { member } if *member == self.mls.own_id()) {
+                    self.update = None;                              // it landed
+                }
+                if matches!(e, Event::PhaseChange(Phase::Working)) {
+                    next.merge(self.propose_update(now));            // dropped by a merge: file again
+                }
+                // CandidateRejected: the app decides whether to call
+                // request_sync; a stale list and a misbehaving committer
+                // look the same from here.
+                // CandidateRejected, not the epoch steward: keep it staged,
+                // report it again after StewardSkipped or SyncApplied.
+                // CommitAdopted: informational, the sync ask already rides
+                // in this same Output.
+                // CommitMissing: look for the steward's commit before the
+                // app files request_recovery.
+                self.app.notify(e);
+            }
+            next.merge(self.retry_held(now));                      // refused inputs, once more
+            if let Some(d) = out.wakeup { self.timer.arm(d); }
+            if next.is_empty() { break }
+            out = next;
+        }
+    }
+
+    fn execute(&mut self, now: Timestamp, d: Decision) -> Output {
+        match d {
+            Decision::BuildCommit { actions } => {
+                let built = self.mls.build_commit(&actions);          // stays pending
+                self.broadcast_commit(&built.commit);
+                self.engine.handle_candidate(now, built.hash, built.facts)
+            }
+            Decision::Merge { hash } => {
+                let applied = if self.mls.pending_hash() == Some(hash) {
+                    self.mls.merge_pending()
+                } else {
+                    self.mls.clear_pending();
+                    let staged = self.staged.remove(&hash).expect("staged");
+                    self.mls.merge_staged(staged)
+                };
+                self.staged.clear();                                 // the rest are stale
+                if let Some(w) = self.mls.take_welcome(hash) { self.inbox.deliver(w); }
+                self.engine.commit_applied(now, hash, applied.epoch, applied.members)
+            }
+            Decision::Discard { hashes } => {
+                for h in hashes { self.staged.remove(&h); }
+                Output::default()
+            }
+            Decision::ValidateKeyPackage { proposal_id, member, key_package } => {
+                let ok = self.mls.validate_key_package(&key_package).is_ok()
+                    && MlsService::key_package_identity(&key_package) == Ok(member);
+                self.engine.key_package_checked(now, proposal_id, ok)
+            }
+            Decision::ValidateUpdate { proposal_id, member, update } => {
+                let ok = self.mls.validate_update(&update) == Ok(member);
+                self.engine.update_checked(now, proposal_id, ok)
+            }
+            Decision::Leave => { self.mls.delete(); Output::default() }
+        }
+    }
+}
+```
+
+## How to use this crate
+
+Implement `GroupOps` for your MLS service. The trait is the contract table in
+section 2, one method per row; the doc comment on each method carries that
+row's requirement. Construction is not on the trait, because creating, joining
+and loading need your provider, signer, credential and configuration — the
+requirements for it are on `Reference::create`, `Reference::open_welcome` and
+`Reference::load`.
+
+Then run the conformance suite against your type. `tests/conformance.rs`
+reaches an implementation only through the `Suite` trait at the top of the
+file, which says how to mint a member, stand a group up, and read a group's
+epoch authenticator. Write a second `Suite` impl for your service and point the
+`#[test]` functions at it; every case is already generic. A green suite is what
+"done" means for this contract.
+
+`Reference` itself is a worked example rather than a dependency: copy it, fold
+it into your group code, replace what does not fit. It owns its provider and
+signer, because `GroupOps` takes neither — an application sharing one provider
+across conversations passes a handle to it and keeps exactly one live instance
+per storage scope.

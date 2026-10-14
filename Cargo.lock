@@ -1210,15 +1210,10 @@ dependencies = [
 
 [[package]]
 name = "de-mls"
-version = "4.0.0"
+version = "5.0.0"
 dependencies = [
- "alloy",
  "hashgraph-like-consensus",
  "indexmap 2.14.0",
- "openmls",
- "openmls_basic_credential",
- "openmls_rust_crypto",
- "openmls_traits",
  "prost",
  "prost-build",
  "sha2 0.11.0",
@@ -1667,9 +1662,9 @@ dependencies = [
 
 [[package]]
 name = "hashgraph-like-consensus"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cba53b85cc33f28262bbd9c258bbbf3f3b66501ef7cc2b7137712215fdf7cbf5"
+checksum = "bc3bd0b5b88d149deaf66734a210bba76c60f03812c3172367116ae139983b92"
 dependencies = [
  "alloy",
  "alloy-signer",
@@ -2292,6 +2287,18 @@ name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
+
+[[package]]
+name = "mls-reference"
+version = "0.1.0"
+dependencies = [
+ "openmls",
+ "openmls_basic_credential",
+ "openmls_rust_crypto",
+ "openmls_traits",
+ "sha2 0.11.0",
+ "thiserror",
+]
 
 [[package]]
 name = "multimap"

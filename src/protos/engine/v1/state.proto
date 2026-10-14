@@ -1,0 +1,55 @@
+// src/protos/engine/v1/state.proto
+
+syntax = "proto3";
+
+package de_mls.engine.v1;
+
+import "messages/v1/application.proto";
+
+// Engine state under the store keys (`engine::store::keys`). A local
+// encoding: nothing here goes on the wire.
+
+message StewardListState {
+  repeated bytes members = 1;
+  uint64 election_epoch = 2;
+  uint32 retry_round = 3;
+  uint32 sn_min = 4;
+  uint32 sn_max = 5;
+}
+
+message ProposalsState {
+  repeated de_mls.messages.v1.ApprovedProposal approved = 1; // FIFO order
+  bytes urgent_commit_target = 2;                           // empty when none
+}
+
+message JoinEpoch {
+  bytes member_id = 1;
+  uint64 epoch = 2;
+}
+
+message JoinEpochsState {
+  repeated JoinEpoch entries = 1;
+}
+
+message SkippedStewardsState {
+  repeated bytes stewards = 1;
+}
+
+message ScoresState {
+  repeated de_mls.messages.v1.PeerScore scores = 1;
+}
+
+message ConsensusState {
+  repeated de_mls.messages.v1.VotingSession sessions = 1;
+}
+
+message MetaState {
+  uint64 snapshot_epoch = 1;
+  de_mls.messages.v1.TimingConfig timing = 2;
+  uint64 voting_delay_ms = 3;
+  bool liveness_criteria_yes = 4;
+  uint64 max_consensus_sessions = 5;
+  uint32 sn_min = 6;
+  uint32 sn_max = 7;
+  int64 default_peer_score = 8;
+}

@@ -1,0 +1,616 @@
+//! Opening proposals, casting votes, and the adapters that talk to the
+//! consensus service.
+//!
+//! Everything runs inline on the driving call: opening a proposal starts the
+//! consensus session right away, while the time-based follow-ups (auto-votes,
+//! consensus timeouts) wait as deadlines that `tick_deadlines` fires on a
+//! later tick — see [`crate::engine::consensus::deadlines`]. Wire-level
+//! construction (control-message encoding, session opening) lives in
+//! [`crate::engine::consensus::wire`]. Wire messages leave as
+//! `Outbound::Control` bytes the router seals; nothing here touches a group.
+
+use std::time::Duration;
+
+use hashgraph_like_consensus::{
+    error::ConsensusError,
+    protos::consensus::v1::{Proposal, Vote},
+    storage::ConsensusStorage,
+};
+use prost::Message;
+use tracing::{debug, info, warn};
+
+use crate::{
+    ConversationError, Refusal,
+    engine::{
+        consensus::wire::{
+            ProposalParams, authorize_fast_path_proposal, control_proposal, control_vote,
+        },
+        handle::Engine,
+        proposal_kind::{ProposalKind, in_flight_target},
+        store::EngineStore,
+        types::{ActionKind, Decision, Event, MemberId, Output, Timestamp},
+    },
+    protos::de_mls::messages::v1::{
+        ConversationUpdateRequest, VotingSession, conversation_update_request,
+    },
+};
+
+/// Whether an arriving proposal opened a session here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Arrival {
+    /// A session was opened for it.
+    Opened,
+    /// Nothing opened: this node already holds it, applied its outcome, or
+    /// refuses it under the partial freeze or the one-update rule.
+    Ignored,
+}
+
+impl<St: EngineStore> Engine<St> {
+    // ── opening a round ──────────────────────────────────────────────
+
+    /// Open a consensus vote for `request`, bundling this member's own YES
+    /// with the proposal in one atomic wire message — no vote request
+    /// reaches the router, since the vote is already cast.
+    ///
+    /// Errors under the partial freeze of an active emergency. No-ops when a
+    /// change for
+    /// the request's target member is already in flight locally. On success
+    /// the proposal is queued as `Outbound::Control` and a consensus-timeout
+    /// deadline is armed for [`Self::tick_deadlines`] to fire.
+    ///
+    /// An invite the engine opens itself carries no key-package decision: the
+    /// router validated the key package before calling.
+    pub(crate) fn initiate_proposal(
+        &mut self,
+        request: ConversationUpdateRequest,
+    ) -> Result<(), ConversationError> {
+        // One in-flight change per member (local dedup): don't open a second
+        // session for a target already being voted on or approved here. A
+        // cross-node duplicate — two members proposing the same target — is
+        // caught later at approval by `has_approved_*`.
+        if let Some(target) = in_flight_target(&request)
+            && self.queues.active_proposal_targets().contains(&target)
+        {
+            info!(
+                conversation = %self.conversation_id,
+                member = ?target,
+                "proposal skipped: a change for this member is already in flight"
+            );
+            return Ok(());
+        }
+
+        let kind = ProposalKind::of(&request);
+        self.check_proposal_allowed(kind)?;
+        let expected_voters = self.members.len() as u32;
+
+        let liveness_criteria_yes = self.config.liveness_criteria_yes;
+        let consensus_timeout = self.config.consensus_timeout;
+
+        let (proposal_id, _) = self.submit_proposal(
+            &request,
+            ProposalParams {
+                expected_voters,
+                proposal_expiration: self.config.proposal_expiration,
+                consensus_timeout,
+                liveness_criteria_yes,
+            },
+        )?;
+
+        self.queues
+            .track_voting_proposal(proposal_id, &request, self.epoch);
+        // Removed again by `handle_consensus_outcome` if an outcome lands
+        // before the deadline fires.
+        self.register_consensus_timeout(proposal_id, consensus_timeout);
+
+        // The proposal goes out with the filer's YES inside it: whoever files
+        // a change wants it. Peers have no session for it yet, so a separate
+        // Vote message would be dropped on arrival.
+        let scope = self.conversation_id.clone();
+        let now = self.now.as_secs();
+        let proposal = self
+            .consensus
+            .cast_vote_and_get_proposal(&scope, proposal_id, true, now)?;
+        info!(
+            conversation = %self.conversation_id,
+            proposal_id,
+            actor = "owner",
+            "YES vote cast (bundled at submit)"
+        );
+        self.send_control(control_proposal(proposal));
+        self.dirty.consensus = true;
+
+        Ok(())
+    }
+
+    // ── voting ───────────────────────────────────────────────────────
+
+    /// Cast this member's vote in the local session and queue the Vote
+    /// control message. The manual path and the auto-vote timer share it;
+    /// the consensus library can't tell them apart. A pending auto-vote for
+    /// the same proposal is dropped, so a manual choice wins.
+    pub(crate) fn cast_local_vote(
+        &mut self,
+        proposal_id: u32,
+        vote: bool,
+    ) -> Result<(), ConversationError> {
+        self.cancel_auto_vote(proposal_id);
+        let scope = self.conversation_id.clone();
+        let choice = if vote { "YES" } else { "NO" };
+        info!(
+            conversation = %self.conversation_id,
+            proposal_id, choice, "vote cast"
+        );
+        let now = self.now.as_secs();
+        let vote_msg = self.consensus.cast_vote(&scope, proposal_id, vote, now)?;
+        self.send_control(control_vote(vote_msg));
+        self.dirty.consensus = true;
+        Ok(())
+    }
+
+    /// Feed a peer's vote into the local consensus session. The vote owner
+    /// must be the MLS-authenticated `sender`; anything else is forged and
+    /// dropped.
+    ///
+    /// A vote for a session this node does not hold is refused and the router
+    /// feeds it again; a vote for a session trimmed after its outcome is
+    /// refused too and expires at the router's TTL. A late or duplicate vote
+    /// for a held session is dropped (logged, `Ok`).
+    pub(crate) fn forward_incoming_vote(
+        &mut self,
+        sender: &[u8],
+        vote: Vote,
+    ) -> Result<(), ConversationError> {
+        let proposal_id = vote.proposal_id;
+        if vote.vote_owner != sender {
+            warn!(
+                conversation = %self.conversation_id,
+                proposal_id,
+                owner = ?vote.vote_owner,
+                sender = ?sender,
+                "vote dropped: owner is not the authenticated sender"
+            );
+            return Ok(());
+        }
+        let scope = self.conversation_id.clone();
+        let now = self.now.as_secs();
+        match self.consensus.process_incoming_vote(&scope, vote, now) {
+            Ok(()) => {
+                self.dirty.consensus = true;
+                Ok(())
+            }
+            Err(ConsensusError::SessionNotActive) => {
+                debug!(
+                    conversation = %self.conversation_id,
+                    proposal_id,
+                    "late vote dropped: session already resolved"
+                );
+                Ok(())
+            }
+            Err(ConsensusError::DuplicateVote) => {
+                debug!(
+                    conversation = %self.conversation_id,
+                    proposal_id,
+                    "duplicate vote dropped: already counted"
+                );
+                Ok(())
+            }
+            Err(ConsensusError::SessionNotFound) => {
+                Err(ConversationError::Refused(Refusal::UnknownSession {
+                    proposal_id,
+                }))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    // ── inbound proposals ────────────────────────────────────────────
+
+    /// A peer's proposal arrived from the MLS-authenticated `sender`.
+    ///
+    /// Before forwarding to consensus, intent is mirrored into local state:
+    /// an emergency proposal sets the partial-freeze flag.
+    ///
+    /// RFC §"Partial Freeze Semantics": while an emergency proposal is
+    /// unfinalized, lower-priority proposals from peers MUST be dropped —
+    /// not buffered, forwarded to consensus, or surfaced for a vote — so
+    /// they cannot land before the emergency resolves. The emergency itself
+    /// (and any higher-priority proposal) is never blocked.
+    ///
+    /// An invite proposal does not reach a vote until the router has
+    /// validated its key package: the engine asks for
+    /// [`Decision::ValidateKeyPackage`] and waits for
+    /// [`Self::key_package_checked`].
+    pub(crate) fn on_incoming_proposal(
+        &mut self,
+        sender: &[u8],
+        proposal: Proposal,
+        epoch: u64,
+    ) -> Result<(), ConversationError> {
+        if proposal.proposal_owner != sender {
+            warn!(
+                conversation = %self.conversation_id,
+                proposal_id = proposal.proposal_id,
+                owner = ?proposal.proposal_owner,
+                sender = ?sender,
+                "proposal dropped: owner is not the authenticated sender"
+            );
+            return Ok(());
+        }
+        if !authorize_fast_path_proposal(&proposal, sender) {
+            warn!(
+                conversation = %self.conversation_id,
+                proposal_id = proposal.proposal_id,
+                sender = ?sender,
+                "single-voter proposal dropped: only self-removal may bypass peer voting"
+            );
+            return Ok(());
+        }
+        self.admit_proposal(proposal, epoch)?;
+        Ok(())
+    }
+
+    /// Open the session for `proposal`, sealed at `epoch`, however it
+    /// arrived: a live frame, a relayed session or a restored one. A copy
+    /// this node already holds or applied changes nothing.
+    ///
+    /// The members of `epoch` are its voters: this member votes when it was
+    /// seated by then and has not voted already; otherwise only the
+    /// consensus timeout is armed.
+    pub(crate) fn admit_proposal(
+        &mut self,
+        proposal: Proposal,
+        epoch: u64,
+    ) -> Result<Arrival, ConversationError> {
+        if self
+            .queues
+            .is_consensus_outcome_applied(proposal.proposal_id)
+        {
+            debug!(
+                conversation = %self.conversation_id,
+                proposal_id = proposal.proposal_id,
+                "proposal dropped: its outcome is applied here"
+            );
+            return Ok(Arrival::Ignored);
+        }
+        let decoded = match ConversationUpdateRequest::decode(proposal.payload.as_slice()) {
+            Ok(req) => Some(req),
+            Err(e) => {
+                debug!(
+                    proposal_id = proposal.proposal_id,
+                    error = %e,
+                    "incoming proposal payload failed to decode; treated as opaque commit"
+                );
+                None
+            }
+        };
+        let kind = decoded
+            .as_ref()
+            .map(ProposalKind::of)
+            .unwrap_or(ProposalKind::Commit);
+
+        if self.queues.partial_freeze_blocks(kind) {
+            debug!(
+                conversation = %self.conversation_id,
+                proposal_id = proposal.proposal_id,
+                ?kind,
+                "dropping lower-priority proposal: active emergency partial-freeze"
+            );
+            return Ok(Arrival::Ignored);
+        }
+
+        let update = match decoded.as_ref().and_then(|r| r.payload.as_ref()) {
+            Some(conversation_update_request::Payload::LeafUpdate(update)) => Some(update),
+            _ => None,
+        };
+        // One update per member per epoch, with exactly one voter.
+        if let Some(update) = update
+            && (proposal.expected_voters_count != 1
+                || self
+                    .queues
+                    .has_approved_change(ActionKind::Update, &update.member_id))
+        {
+            debug!(
+                conversation = %self.conversation_id,
+                proposal_id = proposal.proposal_id,
+                member = ?update.member_id,
+                "update proposal dropped: not single-voter, or its owner already has one"
+            );
+            return Ok(Arrival::Ignored);
+        }
+
+        let proposal_id = proposal.proposal_id;
+        let expected_voters = proposal.expected_voters_count;
+        let expiration_timestamp = proposal.expiration_timestamp;
+        let already_voted = proposal.votes.iter().any(|v| v.vote_owner == self.own);
+
+        // Consensus validation runs before any queue mirroring, so a proposal
+        // that fails it (expired or otherwise mis-stamped) leaves no local
+        // trace — a crafted timestamp can't arm the partial freeze.
+        let scope = self.conversation_id.clone();
+        let local_now = self.now.as_secs();
+        if let Err(e) = self
+            .consensus
+            .process_incoming_proposal(&scope, proposal, local_now)
+        {
+            if matches!(e, ConsensusError::ProposalAlreadyExist) {
+                info!(
+                    conversation = %self.conversation_id,
+                    proposal_id,
+                    "proposal already in flight, duplicate dropped"
+                );
+                return Ok(Arrival::Ignored);
+            }
+            if matches!(e, ConsensusError::ProposalExpired) {
+                self.emit(Event::Error {
+                    operation: "incoming_proposal".to_string(),
+                    message: format!(
+                        "proposal {proposal_id} expired on arrival \
+                         (expiration {expiration_timestamp}, local now {local_now}); \
+                         possible clock skew"
+                    ),
+                });
+            }
+            return Err(e.into());
+        }
+        self.dirty.consensus = true;
+
+        if let Some(req) = decoded.as_ref() {
+            self.queues.track_voting_proposal(proposal_id, req, epoch);
+        }
+
+        // The router checks an accepted update before a commit can carry it.
+        if let Some(update) = update {
+            self.decide(Decision::ValidateUpdate {
+                proposal_id,
+                member: MemberId::from(update.member_id.clone()),
+                update: update.update_bytes.clone(),
+            });
+        }
+
+        if expected_voters > 1 {
+            if self.is_voter_since(epoch) && !already_voted {
+                self.arm_local_vote(proposal_id, decoded)?;
+            } else {
+                self.register_consensus_timeout(proposal_id, self.config.consensus_timeout);
+            }
+        }
+        Ok(Arrival::Opened)
+    }
+
+    /// Whether this member was seated when a proposal sealed at `epoch` was
+    /// filed, so it is among the voters the proposer counted.
+    fn is_voter_since(&self, epoch: u64) -> bool {
+        self.queues
+            .join_epoch(&self.own)
+            .is_none_or(|joined| epoch >= joined)
+    }
+
+    /// The router checked the update of the proposal `proposal_id`. The
+    /// update is approved on arrival, so a pass has nothing to do; a failure
+    /// takes it out of the approved queue, without a score.
+    pub fn update_checked(
+        &mut self,
+        now: Timestamp,
+        proposal_id: u32,
+        valid: bool,
+    ) -> Result<Output, ConversationError> {
+        self.begin(now);
+        if !valid {
+            self.drop_unchecked_update(proposal_id);
+        }
+        self.finish()
+    }
+
+    /// Take the approved leaf update `proposal_id` out of the queue: the
+    /// router did not vouch for it, so no commit may carry it.
+    pub(crate) fn drop_unchecked_update(&mut self, proposal_id: u32) {
+        if self.queues.drop_approved_update(proposal_id) {
+            self.dirty.proposals = true;
+            info!(
+                conversation = %self.conversation_id,
+                proposal_id, "update dropped: it failed validation"
+            );
+        }
+    }
+
+    /// Every consensus session of this conversation, each proposal carrying
+    /// every vote seen so far and the deadline this node holds for it. A
+    /// session with no armed deadline (its vote resolves on arrival) gets a
+    /// fresh one from now.
+    pub(crate) fn voting_sessions(&self) -> Result<Vec<VotingSession>, ConversationError> {
+        let scope = self.conversation_id.clone();
+        let fresh = self.now + self.config.consensus_timeout;
+        Ok(self
+            .consensus
+            .storage()
+            .list_scope_sessions(&scope)?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|session| {
+                let mut proposal = session.proposal;
+                proposal.votes = session.votes.into_values().collect();
+                let deadline = self
+                    .timing
+                    .pending_consensus_timeouts
+                    .get(&proposal.proposal_id)
+                    .copied()
+                    .unwrap_or(fresh);
+                let filed_epoch = self
+                    .queues
+                    .voting_epoch(proposal.proposal_id)
+                    .unwrap_or(self.epoch);
+                VotingSession {
+                    proposal: Some(proposal),
+                    deadline_ms: deadline.as_millis(),
+                    filed_epoch,
+                }
+            })
+            .collect())
+    }
+
+    /// Admit `sessions` as live frames would be, lowest `ProposalKind` first
+    /// so an emergency's partial freeze can never block a lower-priority
+    /// session that was already open. A session that fails to open is logged
+    /// and dropped rather than failing the rest.
+    ///
+    /// A session opened here keeps the consensus-timeout deadline it had, so
+    /// this node resolves the vote no earlier than its holder. One this node
+    /// held already keeps its own deadline.
+    pub(crate) fn admit_sessions(&mut self, mut sessions: Vec<VotingSession>) {
+        sessions.sort_by_key(session_kind);
+        for session in sessions {
+            let Some(proposal) = session.proposal else {
+                continue;
+            };
+            let proposal_id = proposal.proposal_id;
+            match self.admit_proposal(proposal, session.filed_epoch) {
+                Ok(Arrival::Opened) => {
+                    let deadline = Timestamp::from_duration_since_epoch(Duration::from_millis(
+                        session.deadline_ms,
+                    ));
+                    // Absent when the bundled votes already resolved the
+                    // session, or it has a single voter.
+                    if let Some(held) = self.timing.pending_consensus_timeouts.get_mut(&proposal_id)
+                    {
+                        *held = deadline;
+                    }
+                }
+                Ok(Arrival::Ignored) => {}
+                Err(e) => warn!(
+                    conversation = %self.conversation_id,
+                    proposal_id,
+                    error = %e,
+                    "session dropped"
+                ),
+            }
+        }
+    }
+
+    /// Arm this member's side of a proposal that expects more than one
+    /// voter: a deterministic verdict for a steward election, a
+    /// key-package check for an invite (the vote waits for the router's
+    /// answer), or an auto-vote for anything else — then the
+    /// consensus-timeout deadline. During a replay only the timeout is
+    /// armed: the group decided this session without this member, and the
+    /// timeout reproduces its verdict.
+    fn arm_local_vote(
+        &mut self,
+        proposal_id: u32,
+        decoded: Option<ConversationUpdateRequest>,
+    ) -> Result<(), ConversationError> {
+        if self.is_replaying() {
+            self.register_consensus_timeout(proposal_id, self.config.consensus_timeout);
+            return Ok(());
+        }
+        match decoded.as_ref().and_then(|r| r.payload.as_ref()) {
+            Some(conversation_update_request::Payload::StewardElection(election)) => {
+                // Recomputed locally, so no vote request reaches the
+                // router: the verdict is deterministic.
+                let verdict = self.validate_election_list(election)?;
+                self.register_auto_vote(proposal_id, Duration::ZERO, verdict);
+            }
+            Some(conversation_update_request::Payload::MemberInvite(invite)) => {
+                // The vote waits for the router's verdict on the key
+                // package; no auto-vote is armed until then, so silence
+                // cannot approve an unvalidated joiner.
+                let member = MemberId::from(invite.member_id.clone());
+                let key_package = invite.key_package_bytes.clone();
+                self.decide(Decision::ValidateKeyPackage {
+                    proposal_id,
+                    member,
+                    key_package,
+                });
+            }
+            _ => {
+                if let Some(request) = decoded {
+                    self.emit(Event::VoteRequested {
+                        proposal_id,
+                        request,
+                    });
+                }
+                let delay = self.config.voting_delay;
+                let vote = self.config.liveness_criteria_yes;
+                self.register_auto_vote(proposal_id, delay, vote);
+            }
+        }
+        self.register_consensus_timeout(proposal_id, self.config.consensus_timeout);
+        Ok(())
+    }
+
+    /// The router validated the key package of the invite proposal
+    /// `proposal_id`; `valid` says whether it passed and matches the claimed
+    /// member id.
+    ///
+    /// A pass releases the vote — the request reaches the router and the
+    /// auto-vote timer arms. A failure votes NO right away, so a bad key
+    /// package costs one round instead of a timeout.
+    pub fn key_package_checked(
+        &mut self,
+        now: Timestamp,
+        proposal_id: u32,
+        valid: bool,
+    ) -> Result<Output, ConversationError> {
+        self.begin(now);
+        if !valid {
+            info!(
+                conversation = %self.conversation_id,
+                proposal_id, "invite rejected: key package failed validation"
+            );
+            if let Err(e) = self.cast_local_vote(proposal_id, false) {
+                self.report_failure("key_package_checked", &e);
+            }
+            return self.finish();
+        }
+
+        let scope = self.conversation_id.clone();
+        let stored = self
+            .consensus
+            .storage()
+            .get_active_proposals(&scope)?
+            .into_iter()
+            .find(|p| p.proposal_id == proposal_id);
+        let Some(stored) = stored else {
+            debug!(
+                conversation = %self.conversation_id,
+                proposal_id,
+                "key-package verdict dropped: the session is no longer active"
+            );
+            return self.finish();
+        };
+        let request = ConversationUpdateRequest::decode(stored.payload.as_slice())?;
+        self.emit(Event::VoteRequested {
+            proposal_id,
+            request,
+        });
+        let delay = self.config.voting_delay;
+        let vote = self.config.liveness_criteria_yes;
+        self.register_auto_vote(proposal_id, delay, vote);
+        self.finish()
+    }
+
+    // ── private ──────────────────────────────────────────────────────
+
+    /// Refuse a proposal that cannot be opened right now: an active emergency
+    /// blocks lower-priority proposals.
+    pub(crate) fn check_proposal_allowed(
+        &self,
+        kind: ProposalKind,
+    ) -> Result<(), ConversationError> {
+        if self.queues.partial_freeze_blocks(kind) {
+            return Err(ConversationError::PartialFreeze);
+        }
+        Ok(())
+    }
+}
+
+/// The `ProposalKind` a persisted session's payload decodes to, `Commit`
+/// (the lowest) for one that fails to decode.
+fn session_kind(session: &VotingSession) -> ProposalKind {
+    session
+        .proposal
+        .as_ref()
+        .and_then(|p| ConversationUpdateRequest::decode(p.payload.as_slice()).ok())
+        .as_ref()
+        .map(ProposalKind::of)
+        .unwrap_or(ProposalKind::Commit)
+}
