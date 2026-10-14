@@ -5,8 +5,8 @@
 use std::time::Duration;
 
 use crate::engine::{
+    EngineStore,
     handle::{AutoVoteEntry, Engine},
-    store::EngineStore,
     types::{Phase, Timestamp},
 };
 

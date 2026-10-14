@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tracing::info;
 
-use crate::engine::{handle::Engine, store::EngineStore, types::Phase};
+use crate::engine::{EngineStore, handle::Engine, types::Phase};
 
 impl<St: EngineStore> Engine<St> {
     pub(crate) fn start_working(&mut self) -> Phase {

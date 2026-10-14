@@ -17,7 +17,7 @@ use std::time::Duration;
 use crate::{
     ConversationError,
     engine::{
-        handle::Engine, proposal_kind::ProposalKind, store::EngineStore, types::ActionKind,
+        EngineStore, handle::Engine, proposal_kind::ProposalKind, types::ActionKind,
         util::single_voter_proposal_id,
     },
     protos::de_mls::messages::v1::{

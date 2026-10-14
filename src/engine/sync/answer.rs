@@ -7,7 +7,7 @@ use tracing::info;
 
 use crate::{
     ConversationError,
-    engine::{consensus::wire::control_bytes, handle::Engine, store::EngineStore},
+    engine::{EngineStore, consensus::wire::control_bytes, handle::Engine},
     protos::de_mls::messages::v1::{
         ConversationSync, JoinEpoch, PeerScore, TimingConfig, control_message,
     },

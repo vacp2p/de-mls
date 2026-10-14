@@ -5,9 +5,10 @@ use prost::Message;
 use crate::{
     Action, ConversationError,
     engine::{
+        EngineStore, InMemoryStore,
         config::EngineConfig,
         handle::{Engine, PendingMerge},
-        store::{EngineStore, InMemoryStore, keys},
+        store::keys,
         test_support::{id, joiner, member},
         types::{
             ActionKind, CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId,

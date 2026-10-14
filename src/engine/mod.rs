@@ -25,13 +25,14 @@ mod timestamp;
 mod types;
 mod util;
 
+pub use crate::traits::{EngineStore, InMemoryStore};
 pub use config::{
     DEFAULT_BACKUP_TAKEOVER_WINDOW, DEFAULT_COMMIT_BATCH_WINDOW, DEFAULT_CONSENSUS_TIMEOUT,
     DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_CONSENSUS_SESSIONS, DEFAULT_PROPOSAL_EXPIRATION,
     DEFAULT_VOTING_DELAY, EngineConfig,
 };
 pub use handle::Engine;
-pub use store::{EngineStore, InMemoryStore, keys};
+pub use store::keys;
 pub use timestamp::Timestamp;
 pub use types::{
     Action, CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId,

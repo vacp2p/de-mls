@@ -12,9 +12,9 @@ use tracing::{debug, info, warn};
 use crate::{
     ConversationError, Refusal, ScoreEvent, ScoreOp,
     engine::{
+        EngineStore,
         handle::Engine,
         queues::EngineQueues,
-        store::EngineStore,
         types::{
             ActionKind, CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId,
             MembershipDelta, Output, Phase, StagedFacts, Timestamp,

@@ -13,8 +13,8 @@ use prost::Message;
 use crate::{
     ConversationError,
     engine::{
+        EngineStore,
         handle::Engine,
-        store::EngineStore,
         types::{MemberId, Output, Timestamp},
     },
     protos::de_mls::messages::v1::{ControlMessage, control_message},
@@ -83,8 +83,9 @@ mod tests {
     use crate::{
         Refusal,
         engine::{
+            InMemoryStore,
             consensus::{MemberSigner, wire::control_bytes},
-            store::{InMemoryStore, keys},
+            store::keys,
             test_support::*,
             types::Event,
         },

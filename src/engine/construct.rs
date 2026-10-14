@@ -6,9 +6,10 @@ use tracing::warn;
 use crate::{
     ConversationError,
     engine::{
+        EngineStore,
         config::EngineConfig,
         handle::Engine,
-        store::{Dirty, EngineStore, keys},
+        store::{Dirty, keys},
         types::{Event, MemberId, Output, Timestamp},
     },
 };
@@ -155,7 +156,7 @@ mod tests {
     use crate::{
         ScoreEvent, ScoreOp,
         engine::{
-            store::InMemoryStore,
+            InMemoryStore,
             test_support::{id, member},
             types::{Outbound, Phase},
         },

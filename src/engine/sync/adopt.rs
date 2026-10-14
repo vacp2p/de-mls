@@ -10,9 +10,9 @@ use crate::{
     ConversationError, DEFAULT_PEER_SCORE, ScoreSnapshot, ScoringConfig, StewardList,
     StewardListConfig,
     engine::{
+        EngineStore,
         handle::Engine,
         queues::Admission,
-        store::EngineStore,
         types::{Decision, Event, Phase},
         util::member_set,
     },

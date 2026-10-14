@@ -19,12 +19,13 @@ use tracing::warn;
 use crate::{
     ConversationError, ScoreChange, ScoreOp, ScoreSnapshot, StewardListService,
     engine::{
+        EngineStore,
         config::EngineConfig,
         consensus::MemberSigner,
         consensus::{OutcomeBus, OutcomeReceiver},
         phase_timer::PhaseTimer,
         queues::EngineQueues,
-        store::{Dirty, EngineStore},
+        store::Dirty,
         types::{
             CommitHash, Decision, Event, MemberId, Outbound, Output, Phase, StagedFacts, Timestamp,
         },

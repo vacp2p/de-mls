@@ -8,9 +8,10 @@ use prost::Message;
 use crate::{
     ConversationError, ScoringConfig, StewardList, StewardListConfig,
     engine::{
+        EngineStore,
         config::EngineConfig,
         handle::Engine,
-        store::{Dirty, EngineStore, keys},
+        store::{Dirty, keys},
     },
     protos::de_mls::{
         engine::v1::{
@@ -249,7 +250,7 @@ mod tests {
     use crate::{
         Decision, Event, ScoreEvent, ScoreOp,
         engine::{
-            store::InMemoryStore,
+            InMemoryStore,
             types::{ActionKind, MemberId, Timestamp},
         },
         protos::de_mls::messages::v1::{

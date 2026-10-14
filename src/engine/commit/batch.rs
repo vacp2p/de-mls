@@ -7,9 +7,9 @@ use tracing::info;
 use crate::{
     ConversationError,
     engine::{
+        EngineStore,
         handle::Engine,
         proposal_kind::ProposalKind,
-        store::EngineStore,
         types::{Action, Decision, MemberId, Phase},
     },
     protos::de_mls::messages::v1::conversation_update_request::Payload,

@@ -22,12 +22,12 @@ use tracing::{debug, info, warn};
 use crate::{
     ConversationError, Refusal,
     engine::{
+        EngineStore,
         consensus::wire::{
             ProposalParams, authorize_fast_path_proposal, control_proposal, control_vote,
         },
         handle::Engine,
         proposal_kind::{ProposalKind, in_flight_target},
-        store::EngineStore,
         types::{ActionKind, Decision, Event, MemberId, Output, Timestamp},
     },
     protos::de_mls::messages::v1::{
