@@ -244,6 +244,7 @@ impl<St: EngineStore> Engine<St> {
 
 #[cfg(test)]
 mod tests {
+    use crate::traits::InMemoryPublisher;
     use hashgraph_like_consensus::protos::consensus::v1::Proposal;
 
     use super::*;
@@ -304,6 +305,7 @@ mod tests {
     /// engine already voted on is not armed for a vote again on restore.
     #[test]
     fn each_key_round_trips() {
+        let mut publisher = InMemoryPublisher::default();
         let opened = Timestamp::from_duration_since_epoch(Duration::from_millis(250));
         let members: Vec<MemberId> = (1..=4).map(|i| MemberId::from(member(i))).collect();
         let (mut engine, _) = Engine::create(
@@ -314,6 +316,7 @@ mod tests {
             &members,
             EngineConfig::default(),
             InMemoryStore::default(),
+            &mut publisher,
         )
         .expect("create");
         engine.begin(opened);
@@ -354,6 +357,7 @@ mod tests {
             0,
             &members,
             store,
+            &mut publisher,
         )
         .expect("restore");
 
@@ -440,6 +444,7 @@ mod tests {
     /// partial freeze cannot drop it.
     #[test]
     fn restore_admits_sessions_lowest_kind_first() {
+        let mut publisher = InMemoryPublisher::default();
         let members: Vec<MemberId> = (1..=4).map(|i| MemberId::from(member(i))).collect();
         let (mut engine, _) = Engine::create(
             Timestamp::ZERO,
@@ -449,6 +454,7 @@ mod tests {
             &members,
             EngineConfig::default(),
             InMemoryStore::default(),
+            &mut publisher,
         )
         .expect("create");
         engine.begin(Timestamp::ZERO);
@@ -483,6 +489,7 @@ mod tests {
             0,
             &members,
             engine.store().clone(),
+            &mut publisher,
         )
         .expect("restore");
 

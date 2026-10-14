@@ -14,6 +14,7 @@ use crate::{
         types::{MemberId, Output, Timestamp},
     },
     protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberInvite},
+    traits::Publish,
 };
 
 impl<St: EngineStore> Engine<St> {
@@ -27,13 +28,14 @@ impl<St: EngineStore> Engine<St> {
         now: Timestamp,
         member: MemberId,
         key_package: Vec<u8>,
+        publisher: &mut impl Publish,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
         if self.is_member(member.as_bytes()) {
             return Err(ConversationError::AlreadyMember);
         }
         self.initiate_proposal(invite(&member, key_package))?;
-        self.finish()
+        self.finish(publisher)
     }
 
     /// Propose removing `member`. The requester's intent is the removal, so
@@ -42,6 +44,7 @@ impl<St: EngineStore> Engine<St> {
         &mut self,
         now: Timestamp,
         member: MemberId,
+        publisher: &mut impl Publish,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
         if !self.is_member(member.as_bytes()) {
@@ -50,7 +53,7 @@ impl<St: EngineStore> Engine<St> {
         self.initiate_proposal(ConversationUpdateRequest::remove_member(
             member.as_bytes().to_vec(),
         ))?;
-        self.finish()
+        self.finish(publisher)
     }
 
     /// Ask the group to remove `member` because its peer score is too low.
@@ -69,19 +72,24 @@ impl<St: EngineStore> Engine<St> {
         &mut self,
         now: Timestamp,
         member: MemberId,
+        publisher: &mut impl Publish,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
         self.file_score_removal_ecp(member.as_bytes())?;
-        self.finish()
+        self.finish(publisher)
     }
 
     /// Leave the conversation. The engine stays live until a commit merges
     /// the removal; that commit lands as
     /// [`Decision::Leave`](crate::engine::Decision::Leave).
-    pub fn leave(&mut self, now: Timestamp) -> Result<Output, ConversationError> {
+    pub fn leave(
+        &mut self,
+        now: Timestamp,
+        publisher: &mut impl Publish,
+    ) -> Result<Output, ConversationError> {
         self.begin(now);
         self.initiate_self_leave()?;
-        self.finish()
+        self.finish(publisher)
     }
 
     /// File `update`, the MLS Update proposal this member signed for its own
@@ -91,10 +99,11 @@ impl<St: EngineStore> Engine<St> {
         &mut self,
         now: Timestamp,
         update: Vec<u8>,
+        publisher: &mut impl Publish,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
         self.initiate_leaf_update(update)?;
-        self.finish()
+        self.finish(publisher)
     }
 
     /// Cast this member's vote on `proposal_id`, replacing the auto-vote that
@@ -104,11 +113,12 @@ impl<St: EngineStore> Engine<St> {
         now: Timestamp,
         proposal_id: u32,
         approve: bool,
+        publisher: &mut impl Publish,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
         self.cancel_auto_vote(proposal_id);
         self.cast_local_vote(proposal_id, approve)?;
-        self.finish()
+        self.finish(publisher)
     }
 
     /// Ask the stewards for a `ConversationSync`. The engine asks once on its
@@ -119,29 +129,41 @@ impl<St: EngineStore> Engine<St> {
     /// An answer as new as this node's list or newer is adopted and reported
     /// as [`Event::SyncApplied`](crate::engine::Event::SyncApplied); an older
     /// one is ignored.
-    pub fn request_sync(&mut self, now: Timestamp) -> Result<Output, ConversationError> {
+    pub fn request_sync(
+        &mut self,
+        now: Timestamp,
+        publisher: &mut impl Publish,
+    ) -> Result<Output, ConversationError> {
         self.begin(now);
         self.broadcast_sync_request();
-        self.finish()
+        self.finish(publisher)
     }
 
     /// File the deadlock emergency proposal: on ⌈2n/3⌉ YES the silent epoch
     /// steward is skipped for this epoch and the next eligible steward on the
     /// list takes over. Any member may call it, any time approved work is
     /// waiting for a commit.
-    pub fn request_recovery(&mut self, now: Timestamp) -> Result<Output, ConversationError> {
+    pub fn request_recovery(
+        &mut self,
+        now: Timestamp,
+        publisher: &mut impl Publish,
+    ) -> Result<Output, ConversationError> {
         self.begin(now);
         self.file_deadlock_ecp()?;
-        self.finish()
+        self.finish(publisher)
     }
 
     /// Elect a fresh steward list now, even if the current one still
     /// nominally covers the epoch — for when `CommitMissing` keeps reporting
     /// `steward: None` because every remaining steward has been skipped.
-    pub fn propose_election(&mut self, now: Timestamp) -> Result<Output, ConversationError> {
+    pub fn propose_election(
+        &mut self,
+        now: Timestamp,
+        publisher: &mut impl Publish,
+    ) -> Result<Output, ConversationError> {
         self.begin(now);
         self.initiate_steward_election()?;
-        self.finish()
+        self.finish(publisher)
     }
 }
 
@@ -159,31 +181,34 @@ mod tests {
     use super::*;
     use crate::engine::{
         test_support::{creator, id},
-        types::{ActionKind, Outbound, Phase},
+        types::{ActionKind, Event, Phase},
     };
+    use crate::traits::InMemoryPublisher;
 
     /// Adding someone already seated is refused, and nothing moves.
     #[test]
     fn propose_add_refuses_an_existing_member() {
+        let mut publisher = InMemoryPublisher::default();
         let mut engine = creator();
         assert!(matches!(
-            engine.propose_add(Timestamp::ZERO, id("alice"), b"kp".to_vec()),
+            engine.propose_add(Timestamp::ZERO, id("alice"), b"kp".to_vec(), &mut publisher),
             Err(ConversationError::AlreadyMember)
         ));
-        assert!(engine.out.outbound.is_empty());
+        assert!(engine.pending_control.is_empty());
     }
 
     /// An add filed while a round is open lands in the approved queue with
     /// one control message out; the phase does not move.
     #[test]
     fn propose_add_lands_while_freezing() {
+        let mut publisher = InMemoryPublisher::default();
         let mut engine = creator();
         engine.begin(Timestamp::ZERO);
         engine.start_freezing();
-        let out = engine
-            .propose_add(Timestamp::ZERO, id("dave"), b"kp".to_vec())
+        engine
+            .propose_add(Timestamp::ZERO, id("dave"), b"kp".to_vec(), &mut publisher)
             .expect("propose add");
-        assert!(matches!(out.outbound.as_slice(), [Outbound::Control(_)]));
+        assert!(matches!(publisher.messages.as_slice(), [_]));
         assert_eq!(engine.phase(), Phase::Freezing);
         assert_eq!(engine.queues.approved_proposals_count(), 1);
     }
@@ -192,6 +217,7 @@ mod tests {
     /// open: one control message out, the phase unchanged.
     #[test]
     fn vote_lands_while_freezing() {
+        let mut publisher = InMemoryPublisher::default();
         use hashgraph_like_consensus::protos::consensus::v1::Proposal;
         use prost::Message;
 
@@ -218,8 +244,10 @@ mod tests {
         engine.start_freezing();
         engine.out = Output::default();
 
-        let out = engine.vote(Timestamp::ZERO, 7, true).expect("vote");
-        assert!(matches!(out.outbound.as_slice(), [Outbound::Control(_)]));
+        engine
+            .vote(Timestamp::ZERO, 7, true, &mut publisher)
+            .expect("vote");
+        assert!(matches!(publisher.messages.as_slice(), [_]));
         assert_eq!(engine.phase(), Phase::Freezing);
     }
 
@@ -227,30 +255,33 @@ mod tests {
     /// message out; a second call in the epoch is a no-op.
     #[test]
     fn propose_update_lands_approved_and_repeats_as_a_no_op() {
+        let mut publisher = InMemoryPublisher::default();
         let mut engine = creator();
-        let out = engine
-            .propose_update(Timestamp::ZERO, b"upd".to_vec())
+        engine
+            .propose_update(Timestamp::ZERO, b"upd".to_vec(), &mut publisher)
             .expect("propose update");
-        assert!(matches!(out.outbound.as_slice(), [Outbound::Control(_)]));
+        assert!(matches!(publisher.messages.as_slice(), [_]));
         assert!(
             engine
                 .queues
                 .has_approved_change(ActionKind::Update, engine.own.as_slice())
         );
 
-        let out = engine
-            .propose_update(Timestamp::ZERO, b"other".to_vec())
+        publisher.drain();
+        engine
+            .propose_update(Timestamp::ZERO, b"other".to_vec(), &mut publisher)
             .expect("repeat");
-        assert!(out.outbound.is_empty());
+        assert!(publisher.messages.is_empty());
         assert_eq!(engine.queues.approved_proposals_count(), 1);
     }
 
     /// Removing someone who isn't here is refused.
     #[test]
     fn propose_remove_refuses_a_stranger() {
+        let mut publisher = InMemoryPublisher::default();
         let mut engine = creator();
         assert!(matches!(
-            engine.propose_remove(Timestamp::ZERO, id("ghost")),
+            engine.propose_remove(Timestamp::ZERO, id("ghost"), &mut publisher),
             Err(ConversationError::MemberGone)
         ));
     }
@@ -259,18 +290,22 @@ mod tests {
     /// one control message.
     #[test]
     fn request_sync_asks_in_any_phase() {
+        let mut publisher = InMemoryPublisher::default();
         let mut engine = creator();
-        let out = engine.request_sync(Timestamp::ZERO).expect("request sync");
-        assert!(matches!(out.outbound.as_slice(), [Outbound::Control(_)]));
+        let out = engine
+            .request_sync(Timestamp::ZERO, &mut publisher)
+            .expect("request sync");
+        assert!(matches!(publisher.messages.as_slice(), [_]));
         assert_eq!(out.wakeup, None);
     }
 
     /// Scoring an unknown member has nothing to file.
     #[test]
     fn score_removal_refuses_an_unscored_member() {
+        let mut publisher = InMemoryPublisher::default();
         let mut engine = creator();
         assert!(matches!(
-            engine.propose_score_removal(Timestamp::ZERO, id("ghost")),
+            engine.propose_score_removal(Timestamp::ZERO, id("ghost"), &mut publisher),
             Err(ConversationError::InvalidConversationUpdateRequest)
         ));
     }
@@ -278,15 +313,53 @@ mod tests {
     /// `propose_election` puts a steward-election proposal on the wire.
     #[test]
     fn propose_election_puts_an_election_proposal_on_the_wire() {
+        let mut publisher = InMemoryPublisher::default();
         let mut engine = creator();
-        let out = engine
-            .propose_election(Timestamp::ZERO)
+        engine
+            .propose_election(Timestamp::ZERO, &mut publisher)
             .expect("propose election");
         assert!(
-            out.outbound
-                .iter()
-                .any(|o| matches!(o, Outbound::Control(_))),
+            !publisher.messages.is_empty(),
             "an election proposal goes out as a control message"
         );
+    }
+
+    /// A publisher that cannot hand the message to delivery.
+    struct FailingPublisher;
+
+    impl Publish for FailingPublisher {
+        type Error = std::io::Error;
+
+        fn publish(&mut self, _bytes: &[u8]) -> Result<(), Self::Error> {
+            Err(std::io::Error::other("group closed"))
+        }
+    }
+
+    /// A publish error becomes an `Event::Error`; the call still succeeds.
+    #[test]
+    fn a_publish_error_is_reported_and_the_call_succeeds() {
+        let mut engine = creator();
+        let out = engine
+            .request_sync(Timestamp::ZERO, &mut FailingPublisher)
+            .expect("the call succeeds");
+        assert!(out.events.iter().any(|e| matches!(
+            e,
+            Event::Error { operation, .. } if operation == "publish"
+        )));
+    }
+
+    /// While replaying, the messages a call queues are dropped.
+    #[test]
+    fn replaying_publishes_nothing() {
+        let mut publisher = InMemoryPublisher::default();
+        let mut engine = creator();
+        engine.replay_until(Timestamp::from_duration_since_epoch(
+            std::time::Duration::from_secs(10),
+        ));
+        engine
+            .request_sync(Timestamp::ZERO, &mut publisher)
+            .expect("request sync");
+        assert!(publisher.messages.is_empty());
+        assert!(engine.pending_control.is_empty());
     }
 }

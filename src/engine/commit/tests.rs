@@ -1,3 +1,4 @@
+use crate::traits::InMemoryPublisher;
 use std::time::Duration;
 
 use prost::Message;
@@ -12,7 +13,7 @@ use crate::{
         test_support::{id, joiner, member},
         types::{
             ActionKind, CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId,
-            Outbound, Phase, StagedFacts, Timestamp,
+            Phase, StagedFacts, Timestamp,
         },
     },
     protos::de_mls::{
@@ -31,6 +32,7 @@ fn at(secs: u64) -> Timestamp {
 /// An engine over `members`, the first of which is this node. `create`
 /// installs the steward list over all of them at epoch 0.
 fn engine(members: &[&str]) -> Engine<InMemoryStore> {
+    let mut publisher = InMemoryPublisher::default();
     let ids: Vec<MemberId> = members.iter().map(|m| id(m)).collect();
     let (engine, _) = Engine::<InMemoryStore>::create(
         at(0),
@@ -40,6 +42,7 @@ fn engine(members: &[&str]) -> Engine<InMemoryStore> {
         &ids,
         EngineConfig::default(),
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("create");
     engine
@@ -68,6 +71,7 @@ fn removal(target: &str) -> ConversationUpdateRequest {
 /// nothing is discarded and nobody is scored.
 #[test]
 fn a_candidate_while_syncing_is_refused_and_kept() {
+    let mut publisher = InMemoryPublisher::default();
     let mut e = joiner();
     let before = e.scoring.score_for(&member("alice"));
     let hash = CommitHash::of(b"commit");
@@ -81,6 +85,7 @@ fn a_candidate_while_syncing_is_refused_and_kept() {
             proposal_count: 0,
             self_removed: false,
         },
+        &mut publisher,
     );
     assert!(matches!(result, Err(ConversationError::Refused(_))));
     assert!(e.round_candidate.is_none());
@@ -93,6 +98,7 @@ fn a_candidate_while_syncing_is_refused_and_kept() {
 /// sight, with no score against its sender: staleness is not misbehaviour.
 #[test]
 fn a_stale_epoch_candidate_is_discarded_without_a_score() {
+    let mut publisher = InMemoryPublisher::default();
     let mut e = engine(&["alice", "bob"]);
     let before = e.scoring.score_for(&member("bob")).unwrap();
     let hash = CommitHash::of(b"commit");
@@ -107,6 +113,7 @@ fn a_stale_epoch_candidate_is_discarded_without_a_score() {
                 proposal_count: 0,
                 self_removed: false,
             },
+            &mut publisher,
         )
         .unwrap();
     assert_eq!(
@@ -122,6 +129,7 @@ fn a_stale_epoch_candidate_is_discarded_without_a_score() {
 /// `Event::CandidateRejected` so the router has a cue to `request_sync`.
 #[test]
 fn a_non_epoch_steward_candidate_is_rejected_and_scored() {
+    let mut publisher = InMemoryPublisher::default();
     let mut e = engine(&["alice", "bob", "carol"]);
     let es = e.expected_steward().unwrap();
     let impostor = ["alice", "bob", "carol"]
@@ -142,6 +150,7 @@ fn a_non_epoch_steward_candidate_is_rejected_and_scored() {
                 proposal_count: 0,
                 self_removed: false,
             },
+            &mut publisher,
         )
         .unwrap();
     assert!(out.decisions.is_empty(), "the candidate stays staged");
@@ -160,6 +169,7 @@ fn a_non_epoch_steward_candidate_is_rejected_and_scored() {
 /// accepts it.
 #[test]
 fn the_epoch_stewards_candidate_merges_only_at_window_close() {
+    let mut publisher = InMemoryPublisher::default();
     let mut e = engine(&["alice"]);
     e.queues.insert_approved_proposal(7, invite("bob"));
     e.begin(at(0));
@@ -180,13 +190,14 @@ fn the_epoch_stewards_candidate_merges_only_at_window_close() {
             proposal_count: 1,
             self_removed: false,
         },
+        &mut publisher,
     )
     .unwrap();
     assert!(e.round_candidate.is_some(), "held, not merged yet");
 
     e.start_selection();
     e.close_round().unwrap();
-    let out = e.finish().unwrap();
+    let out = e.finish(&mut publisher).unwrap();
     assert!(
         out.decisions
             .iter()
@@ -199,6 +210,7 @@ fn the_epoch_stewards_candidate_merges_only_at_window_close() {
 /// same way a peer's is, merges with the facts it carried.
 #[test]
 fn the_own_commit_reported_through_handle_candidate_merges() {
+    let mut publisher = InMemoryPublisher::default();
     let mut e = engine(&["alice"]);
     e.queues.insert_approved_proposal(7, invite("bob"));
     e.begin(at(0));
@@ -219,6 +231,7 @@ fn the_own_commit_reported_through_handle_candidate_merges() {
                 proposal_count: 1,
                 self_removed: false,
             },
+            &mut publisher,
         )
         .unwrap();
     assert!(out.events.contains(&Event::CommitRoundProgress {
@@ -233,14 +246,14 @@ fn the_own_commit_reported_through_handle_candidate_merges() {
             .as_ref()
             .is_some_and(|m| { m.facts.sender == id("alice") && m.facts.actions.len() == 1 })
     );
-    let out = e.finish().unwrap();
+    let out = e.finish(&mut publisher).unwrap();
     assert!(matches!(
         out.decisions.as_slice(),
         [Decision::Merge { hash: h }] if *h == hash
     ));
 
     let out = e
-        .commit_applied(at(0), hash, 1, &[id("alice"), id("bob")])
+        .commit_applied(at(0), hash, 1, &[id("alice"), id("bob")], &mut publisher)
         .unwrap();
     assert_eq!(e.epoch(), 1);
     assert!(e.members().contains(&id("bob")));
@@ -282,13 +295,14 @@ fn the_own_commit_reported_through_handle_candidate_merges() {
 /// not land stays, the urgent target with it.
 #[test]
 fn an_unexpected_merge_is_adopted_in_full() {
+    let mut publisher = InMemoryPublisher::default();
     let mut e = engine(&["alice", "bob", "carol"]);
     e.queues.insert_approved_proposal(7, invite("dave"));
     e.queues.insert_approved_proposal(8, removal("carol"));
     e.queues.set_urgent_commit_target(member("carol"));
     let hash = CommitHash::of(b"surprise");
     let out = e
-        .commit_applied(at(0), hash, 4, &[id("alice"), id("carol")])
+        .commit_applied(at(0), hash, 4, &[id("alice"), id("carol")], &mut publisher)
         .unwrap();
     assert_eq!(e.epoch(), 4);
     assert_eq!(e.members(), vec![id("alice"), id("carol")]);
@@ -330,10 +344,7 @@ fn an_unexpected_merge_is_adopted_in_full() {
         "the urgent target stays until its removal lands"
     );
     assert_eq!(
-        out.outbound
-            .iter()
-            .filter(|o| matches!(o, Outbound::Control(_)))
-            .count(),
+        publisher.messages.len(),
         1,
         "the adoption asks the stewards for a sync"
     );
@@ -345,6 +356,7 @@ fn an_unexpected_merge_is_adopted_in_full() {
 /// picture — and asks the stewards for a sync.
 #[test]
 fn an_adoption_while_syncing_keeps_the_phase_and_asks() {
+    let mut publisher = InMemoryPublisher::default();
     let mut e = joiner();
     assert_eq!(e.phase(), Phase::Syncing);
 
@@ -355,6 +367,7 @@ fn an_adoption_while_syncing_keeps_the_phase_and_asks() {
             hash,
             e.epoch() + 1,
             &[id("alice"), id("bob"), id("carol")],
+            &mut publisher,
         )
         .unwrap();
 
@@ -366,10 +379,7 @@ fn an_adoption_while_syncing_keeps_the_phase_and_asks() {
         "the adoption is reported"
     );
     assert_eq!(
-        out.outbound
-            .iter()
-            .filter(|o| matches!(o, Outbound::Control(_)))
-            .count(),
+        publisher.messages.len(),
         1,
         "the adoption asks the stewards for a sync"
     );
@@ -379,6 +389,7 @@ fn an_adoption_while_syncing_keeps_the_phase_and_asks() {
 /// `Leave`.
 #[test]
 fn a_commit_that_removes_us_asks_the_router_to_leave() {
+    let mut publisher = InMemoryPublisher::default();
     let mut e = engine(&["alice", "bob"]);
     e.queues.insert_approved_proposal(7, removal("alice"));
     let hash = CommitHash::of(b"commit");
@@ -394,7 +405,9 @@ fn a_commit_that_removes_us_asks_the_router_to_leave() {
             self_removed: true,
         },
     });
-    let out = e.commit_applied(at(0), hash, 1, &[id("bob")]).unwrap();
+    let out = e
+        .commit_applied(at(0), hash, 1, &[id("bob")], &mut publisher)
+        .unwrap();
     assert_eq!(out.decisions, vec![Decision::Leave]);
 }
 
@@ -403,6 +416,7 @@ fn a_commit_that_removes_us_asks_the_router_to_leave() {
 /// queued, and scores it `CensorshipInactivity`.
 #[test]
 fn a_silent_epoch_steward_yields_commit_missing_and_keeps_the_batch() {
+    let mut publisher = InMemoryPublisher::default();
     let mut e = engine(&["alice", "bob"]);
     if e.expected_steward().unwrap() == e.own {
         // The member set is the same either way; swapping which one is
@@ -416,7 +430,7 @@ fn a_silent_epoch_steward_yields_commit_missing_and_keeps_the_batch() {
     e.begin(at(0));
     let before = e.scoring.score_for(&es).unwrap();
     e.close_round_without_commit().unwrap();
-    let out = e.finish().unwrap();
+    let out = e.finish(&mut publisher).unwrap();
 
     assert!(out.events.iter().any(|ev| matches!(
         ev,
@@ -437,6 +451,7 @@ fn a_silent_epoch_steward_yields_commit_missing_and_keeps_the_batch() {
 /// and the round then reports the same miss it would for an absent candidate.
 #[test]
 fn a_mismatching_candidate_is_discarded_and_commit_missing_follows() {
+    let mut publisher = InMemoryPublisher::default();
     let mut e = engine(&["alice"]);
     e.queues.insert_approved_proposal(7, invite("bob"));
     let hash = CommitHash::of(b"commit");
@@ -453,13 +468,14 @@ fn a_mismatching_candidate_is_discarded_and_commit_missing_follows() {
             proposal_count: 1,
             self_removed: false,
         },
+        &mut publisher,
     )
     .unwrap();
 
     e.start_selection();
     let before = e.scoring.score_for(&member("alice")).unwrap();
     e.close_round().unwrap();
-    let out = e.finish().unwrap();
+    let out = e.finish(&mut publisher).unwrap();
 
     assert!(
         out.decisions
@@ -490,6 +506,7 @@ fn a_mismatching_candidate_is_discarded_and_commit_missing_follows() {
 /// the next round.
 #[test]
 fn a_failed_merge_closes_the_round_without_a_commit() {
+    let mut publisher = InMemoryPublisher::default();
     let mut e = engine(&["alice", "bob", "carol"]);
     e.queues.insert_approved_proposal(7, invite("dave"));
     let es = e.expected_steward().unwrap();
@@ -511,11 +528,12 @@ fn a_failed_merge_closes_the_round_without_a_commit() {
             proposal_count: 1,
             self_removed: false,
         },
+        &mut publisher,
     )
     .unwrap();
     e.start_selection();
     e.close_round().unwrap();
-    let _ = e.finish().unwrap();
+    let _ = e.finish(&mut publisher).unwrap();
     assert!(e.pending_merge.is_some());
 
     let out = e
@@ -525,6 +543,7 @@ fn a_failed_merge_closes_the_round_without_a_commit() {
                 decision: Decision::Merge { hash },
                 reason: "no such staged commit".to_owned(),
             },
+            &mut publisher,
         )
         .unwrap();
     assert!(
@@ -564,6 +583,7 @@ fn steward_engine() -> Engine<InMemoryStore> {
 /// A peer's approved update alone opens a build, and the action names it.
 #[test]
 fn an_update_only_batch_builds_an_update_action() {
+    let mut publisher = InMemoryPublisher::default();
     let mut e = steward_engine();
     let peer = if e.own == member("alice") {
         "bob"
@@ -575,7 +595,7 @@ fn an_update_only_batch_builds_an_update_action() {
 
     assert!(e.request_own_candidate().unwrap());
     assert_eq!(
-        e.finish().unwrap().decisions,
+        e.finish(&mut publisher).unwrap().decisions,
         vec![Decision::BuildCommit {
             actions: vec![Action::Update { member: id(peer) }],
         }]
@@ -586,6 +606,7 @@ fn an_update_only_batch_builds_an_update_action() {
 /// actions but still happens.
 #[test]
 fn an_own_update_only_batch_builds_with_no_actions() {
+    let mut publisher = InMemoryPublisher::default();
     let mut e = steward_engine();
     let own = if e.own == member("alice") {
         "alice"
@@ -597,7 +618,7 @@ fn an_own_update_only_batch_builds_with_no_actions() {
 
     assert!(e.request_own_candidate().unwrap());
     assert_eq!(
-        e.finish().unwrap().decisions,
+        e.finish(&mut publisher).unwrap().decisions,
         vec![Decision::BuildCommit {
             actions: Vec::new(),
         }]
@@ -619,6 +640,7 @@ fn facts(sender: &str, actions: Vec<Action>) -> StagedFacts {
 /// carries none.
 #[test]
 fn a_merge_reports_the_carried_updates_and_drops_them() {
+    let mut publisher = InMemoryPublisher::default();
     let mut e = engine(&["alice", "bob", "carol"]);
     e.queues.insert_approved_proposal(7, update("bob"));
     e.queues.insert_approved_proposal(8, update("carol"));
@@ -637,7 +659,13 @@ fn a_merge_reports_the_carried_updates_and_drops_them() {
         ),
     });
     let out = e
-        .commit_applied(at(0), hash, 1, &[id("alice"), id("bob"), id("carol")])
+        .commit_applied(
+            at(0),
+            hash,
+            1,
+            &[id("alice"), id("bob"), id("carol")],
+            &mut publisher,
+        )
         .unwrap();
 
     let reported: Vec<&Event> = out
@@ -674,7 +702,7 @@ fn a_merge_reports_the_carried_updates_and_drops_them() {
         ),
     });
     let out = e
-        .commit_applied(at(0), hash, 1, &[id("alice"), id("bob")])
+        .commit_applied(at(0), hash, 1, &[id("alice"), id("bob")], &mut publisher)
         .unwrap();
     assert!(
         !out.events

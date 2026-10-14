@@ -10,6 +10,7 @@ use crate::{
         handle::Engine,
         types::{Event, Output, Phase, Timestamp},
     },
+    traits::Publish,
 };
 
 impl<St: EngineStore> Engine<St> {
@@ -20,7 +21,11 @@ impl<St: EngineStore> Engine<St> {
     /// Every step runs even when an earlier one failed, so there is no single
     /// error to return; each failure arrives as [`Event::Error`] naming its
     /// step.
-    pub fn tick(&mut self, now: Timestamp) -> Result<Output, ConversationError> {
+    pub fn tick(
+        &mut self,
+        now: Timestamp,
+        publisher: &mut impl Publish,
+    ) -> Result<Output, ConversationError> {
         self.begin(now);
         self.tick_deadlines();
 
@@ -32,7 +37,7 @@ impl<St: EngineStore> Engine<St> {
         let result = self.start_freeze_on_inactivity();
         self.report_step("start_freeze_on_inactivity", result);
 
-        self.finish()
+        self.finish(publisher)
     }
 
     /// Report a failed step and carry on.
@@ -95,6 +100,7 @@ impl<St: EngineStore> Engine<St> {
 
 #[cfg(test)]
 mod tests {
+    use crate::traits::InMemoryPublisher;
     use std::time::Duration;
 
     use super::*;
@@ -120,6 +126,7 @@ mod tests {
     /// A one-member conversation: the sole member is the epoch steward at
     /// every epoch.
     fn engine() -> Engine<InMemoryStore> {
+        let mut publisher = InMemoryPublisher::default();
         Engine::<InMemoryStore>::create(
             at(0),
             "conv",
@@ -128,6 +135,7 @@ mod tests {
             &[id("alice")],
             EngineConfig::default(),
             InMemoryStore::default(),
+            &mut publisher,
         )
         .expect("create")
         .0
@@ -144,6 +152,7 @@ mod tests {
     /// window elapses; it merges only then, not the instant it arrives.
     #[test]
     fn the_epoch_steward_candidate_merges_only_after_the_freeze_window() {
+        let mut publisher = InMemoryPublisher::default();
         let mut e = engine();
         e.queues.insert_approved_proposal(7, invite("bob"));
 
@@ -165,10 +174,11 @@ mod tests {
                 proposal_count: 1,
                 self_removed: false,
             },
+            &mut publisher,
         )
         .unwrap();
 
-        let before_window = e.tick(at(0)).unwrap();
+        let before_window = e.tick(at(0), &mut publisher).unwrap();
         assert!(
             !before_window
                 .decisions
@@ -179,7 +189,7 @@ mod tests {
         assert_eq!(e.phase(), Phase::Freezing);
 
         let window = e.config.freeze_duration;
-        let after_window = e.tick(at(0) + window).unwrap();
+        let after_window = e.tick(at(0) + window, &mut publisher).unwrap();
         assert!(
             after_window
                 .decisions
@@ -194,6 +204,7 @@ mod tests {
     /// emergency resolves.
     #[test]
     fn the_inactivity_freeze_waits_while_an_emergency_is_voting() {
+        let mut publisher = InMemoryPublisher::default();
         let mut e = engine();
         e.queues.insert_approved_proposal(7, invite("bob"));
         let emergency = ViolationEvidence::deadlock(0)
@@ -203,12 +214,12 @@ mod tests {
         e.queues.track_voting_proposal(9, &emergency, 0);
 
         let window = e.config.commit_batch_window;
-        e.tick(at(0)).unwrap();
-        e.tick(at(0) + window * 2).unwrap();
+        e.tick(at(0), &mut publisher).unwrap();
+        e.tick(at(0) + window * 2, &mut publisher).unwrap();
         assert_eq!(e.phase(), Phase::Working, "held while the emergency votes");
 
         e.queues.remove_voting_proposal(9);
-        e.tick(at(0) + window * 2).unwrap();
+        e.tick(at(0) + window * 2, &mut publisher).unwrap();
         assert_eq!(
             e.phase(),
             Phase::Freezing,

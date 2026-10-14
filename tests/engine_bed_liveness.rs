@@ -51,7 +51,7 @@ fn silent_epoch_steward_is_reported_then_skipped_by_a_recovery_vote() {
 
     let now = bed.now;
     bed.router_mut(p)
-        .act(now, |e| e.request_recovery(now))
+        .act(now, |e, p| e.request_recovery(now, p))
         .expect("request recovery");
 
     bed.process_until("dave seated", |b| b.is_live(dave));
@@ -143,7 +143,7 @@ fn removing_a_steward_elects_a_new_list() {
 
     let now = bed.now;
     bed.router_mut(0)
-        .act(now, |e| e.propose_remove(now, s_id))
+        .act(now, |e, p| e.propose_remove(now, s_id, p))
         .expect("propose remove the steward");
 
     bed.process_until("s left", |b| b.router(s).left);
@@ -220,7 +220,7 @@ fn a_substitute_commit_that_beats_the_verdict_is_reported_again_after_the_skip()
 
     let now = bed.now;
     bed.router_mut(p)
-        .act(now, |e| e.request_recovery(now))
+        .act(now, |e, p| e.request_recovery(now, p))
         .expect("request recovery");
 
     bed.process_until("q rejected the early candidate", |b| {
@@ -344,7 +344,7 @@ fn a_skipped_steward_that_comes_back_follows_the_substitute() {
 
     let now = bed.now;
     bed.router_mut(p)
-        .act(now, |e| e.request_recovery(now))
+        .act(now, |e, p| e.request_recovery(now, p))
         .expect("request recovery");
 
     bed.process_until("dave seated among the two remaining members", |b| {

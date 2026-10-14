@@ -5,7 +5,8 @@
 //! phase-timer bookkeeping in [`crate::engine::handle::lifecycle`].
 //!
 //! Every driving call sets `self.now`, does its work through the helpers
-//! here, and returns `finish()`. Sibling modules extend `Engine` with
+//! here, and returns `finish(publisher)`, which publishes the queued control
+//! messages. Sibling modules extend `Engine` with
 //! further `impl` blocks.
 
 use std::collections::HashMap;
@@ -26,11 +27,10 @@ use crate::{
         phase_timer::PhaseTimer,
         queues::EngineQueues,
         store::Dirty,
-        types::{
-            CommitHash, Decision, Event, MemberId, Outbound, Output, Phase, StagedFacts, Timestamp,
-        },
+        types::{CommitHash, Decision, Event, MemberId, Output, Phase, StagedFacts, Timestamp},
     },
     peer_scoring::PeerScoringService,
+    traits::Publish,
 };
 
 /// The consensus service the engine runs: in-memory sessions, the engine's
@@ -83,7 +83,8 @@ pub(crate) struct PendingMerge {
 }
 
 /// One conversation's protocol state, with no group, provider, signer or
-/// clock inside. The router drives it and executes what it returns.
+/// clock inside. The router drives it and executes what it returns; control
+/// messages go out through the `Publish` handed to each driving call.
 pub struct Engine<St: EngineStore> {
     pub(crate) conversation_id: String,
     /// This member's id (its signature key).
@@ -108,6 +109,9 @@ pub struct Engine<St: EngineStore> {
     pub(crate) now: Timestamp,
     /// What the current driving call has produced so far.
     pub(crate) out: Output,
+    /// Control messages queued by the current driving call, published by
+    /// `finish` after the store writes.
+    pub(crate) pending_control: Vec<Vec<u8>>,
     pub(crate) pending_merge: Option<PendingMerge>,
     /// The one candidate collected for the epoch's commit round — the epoch
     /// steward's, once [`Engine::handle_candidate`] accepts it. Ephemeral: a
@@ -167,6 +171,7 @@ impl<St: EngineStore> Engine<St> {
             dirty: Dirty::default(),
             now: Timestamp::ZERO,
             out: Output::default(),
+            pending_control: Vec::new(),
             pending_merge: None,
             round_candidate: None,
             replay_until: None,
@@ -262,13 +267,30 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// End a driving call: drain pending consensus outcomes, compute the
-    /// next wakeup, write the keys this call changed before the output is
-    /// returned (the store is durable before anything is sent), and hand
-    /// back everything the call produced.
-    pub(crate) fn finish(&mut self) -> Result<Output, ConversationError> {
+    /// next wakeup, write the keys this call changed, then publish the
+    /// queued control messages through `publisher` (writes first, so the
+    /// store is durable before anything is sent), and hand back everything
+    /// else the call produced. A publish error becomes [`Event::Error`] and
+    /// the call succeeds. While replaying, the queued messages are dropped:
+    /// the group decided them while this member was away.
+    pub(crate) fn finish(
+        &mut self,
+        publisher: &mut impl Publish,
+    ) -> Result<Output, ConversationError> {
         self.drain_consensus_outcomes();
         self.anchor_inactivity_timer();
         self.flush()?;
+        let pending = std::mem::take(&mut self.pending_control);
+        if !self.is_replaying() {
+            for bytes in pending {
+                if let Err(e) = publisher.publish(&bytes) {
+                    self.emit(Event::Error {
+                        operation: "publish".to_owned(),
+                        message: e.to_string(),
+                    });
+                }
+            }
+        }
         let mut out = std::mem::take(&mut self.out);
         out.wakeup = self.next_wakeup_in();
         Ok(out)
@@ -299,9 +321,9 @@ impl<St: EngineStore> Engine<St> {
         }
     }
 
-    /// Queue a control message for the router to seal and broadcast.
+    /// Queue a control message for `finish` to publish.
     pub(crate) fn send_control(&mut self, bytes: Vec<u8>) {
-        self.out.outbound.push(Outbound::Control(bytes));
+        self.pending_control.push(bytes);
     }
 
     /// Ask the router to do something against the group.

@@ -18,7 +18,7 @@ fn removal_is_voted_and_the_removed_member_leaves() {
 
     let now = bed.now;
     bed.router_mut(0)
-        .act(now, |e| e.propose_remove(now, bob_id.clone()))
+        .act(now, |e, p| e.propose_remove(now, bob_id.clone(), p))
         .expect("propose remove bob");
 
     bed.process_until("bob left and node0/carol converge", |b| {
@@ -42,7 +42,7 @@ fn self_leave_lands_in_the_next_commit() {
 
     let now = bed.now;
     bed.router_mut(bob)
-        .act(now, |e| e.leave(now))
+        .act(now, |e, p| e.leave(now, p))
         .expect("bob leaves");
 
     bed.process_until("bob left and node0/carol converge", |b| {
@@ -110,7 +110,7 @@ fn sole_steward_self_leave_is_committed_by_a_fresh_steward() {
     sole_steward_removal_is_committed_by_a_fresh_steward(|bed, steward| {
         let now = bed.now;
         bed.router_mut(steward)
-            .act(now, |e| e.leave(now))
+            .act(now, |e, p| e.leave(now, p))
             .expect("the steward leaves");
     });
 }
@@ -122,7 +122,7 @@ fn sole_steward_voted_removal_is_committed_by_a_fresh_steward() {
         let target = bed.nodes[steward].own.clone();
         let now = bed.now;
         bed.router_mut(proposer)
-            .act(now, |e| e.propose_remove(now, target))
+            .act(now, |e, p| e.propose_remove(now, target, p))
             .expect("propose remove the steward");
     });
 }
@@ -157,11 +157,11 @@ fn rejected_invite_never_lands() {
 
     let now = bed.now;
     bed.router_mut(bob)
-        .act(now, |e| e.vote(now, proposal_id, false))
+        .act(now, |e, p| e.vote(now, proposal_id, false, p))
         .expect("bob votes no");
     let now = bed.now;
     bed.router_mut(carol)
-        .act(now, |e| e.vote(now, proposal_id, false))
+        .act(now, |e, p| e.vote(now, proposal_id, false, p))
         .expect("carol votes no");
 
     bed.process_until("consensus reached", |b| {

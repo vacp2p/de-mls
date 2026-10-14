@@ -1,3 +1,4 @@
+use crate::traits::InMemoryPublisher;
 use std::time::Duration;
 
 use prost::Message;
@@ -10,7 +11,7 @@ use crate::{
     StewardListConfig,
     engine::{
         test_support::{creator, founder, id, joiner, member},
-        types::{ActionKind, CommitHash, Outbound, Phase, StagedFacts, Timestamp},
+        types::{ActionKind, CommitHash, Phase, StagedFacts, Timestamp},
     },
     protos::de_mls::messages::v1::{
         ControlMessage, ConversationSync, ConversationUpdateRequest, JoinEpoch, MemberInvite,
@@ -211,7 +212,7 @@ fn an_unsynced_node_ignores_sync_request_and_arms_nothing() {
     let mut engine = joiner();
     engine.begin(Timestamp::ZERO);
     engine.on_conversation_sync_request(b"joiner");
-    assert!(engine.out.outbound.is_empty());
+    assert!(engine.pending_control.is_empty());
     assert!(engine.timing.sync_takeover_anchor.is_none());
 }
 
@@ -219,6 +220,7 @@ fn an_unsynced_node_ignores_sync_request_and_arms_nothing() {
 /// one sync on the wire per request.
 #[test]
 fn a_synced_non_steward_ignores_sync_request_and_arms_nothing() {
+    let mut publisher = InMemoryPublisher::default();
     let mut engine = Engine::create(
         Timestamp::ZERO,
         "conv",
@@ -227,6 +229,7 @@ fn a_synced_non_steward_ignores_sync_request_and_arms_nothing() {
         &[id("alice"), id("bob")],
         EngineConfig::default(),
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("create")
     .0;
@@ -238,7 +241,7 @@ fn a_synced_non_steward_ignores_sync_request_and_arms_nothing() {
     assert!(engine.is_synced() && !engine.is_steward());
 
     engine.on_conversation_sync_request(b"joiner");
-    assert!(engine.out.outbound.is_empty());
+    assert!(engine.pending_control.is_empty());
     assert!(engine.timing.sync_takeover_anchor.is_none());
 }
 
@@ -252,10 +255,7 @@ fn epoch_steward_request_clears_takeover_anchor() {
     engine.timing.sync_takeover_anchor = Some(Timestamp::ZERO);
     engine.on_conversation_sync_request(b"joiner");
     assert!(engine.timing.sync_takeover_anchor.is_none());
-    assert!(matches!(
-        engine.out.outbound.as_slice(),
-        [Outbound::Control(_)]
-    ));
+    assert!(matches!(engine.pending_control.as_slice(), [_]));
 }
 
 /// Sharing is a no-op with no steward list to send yet.
@@ -264,15 +264,18 @@ fn share_conversation_sync_is_noop_without_list() {
     let mut engine = joiner();
     engine.begin(Timestamp::ZERO);
     engine.share_conversation_sync();
-    assert!(engine.out.outbound.is_empty());
+    assert!(engine.pending_control.is_empty());
 }
 
 /// The router's ask goes out as one request, in any phase.
 #[test]
 fn the_routers_ask_is_one_request() {
+    let mut publisher = InMemoryPublisher::default();
     let mut engine = joiner();
-    let out = engine.request_sync(Timestamp::ZERO).expect("request sync");
-    assert_eq!(out.outbound.len(), 1);
+    let out = engine
+        .request_sync(Timestamp::ZERO, &mut publisher)
+        .expect("request sync");
+    assert_eq!(publisher.messages.len(), 1);
     assert_eq!(out.wakeup, None);
 }
 
@@ -281,6 +284,7 @@ fn the_routers_ask_is_one_request() {
 /// for `Working`.
 #[test]
 fn conversation_sync_round_trips_into_a_joiner() {
+    let mut publisher = InMemoryPublisher::default();
     let mut steward = founder();
     steward.begin(Timestamp::ZERO);
     let bytes = steward
@@ -291,7 +295,7 @@ fn conversation_sync_round_trips_into_a_joiner() {
     let mut engine = joiner();
     assert_eq!(engine.phase(), Phase::Syncing);
     let out = engine
-        .handle_control(Timestamp::ZERO, id("alice"), 1, &bytes)
+        .handle_control(Timestamp::ZERO, id("alice"), 1, &bytes, &mut publisher)
         .expect("handle control");
     assert!(engine.is_synced());
     assert_eq!(engine.phase(), Phase::Working);
@@ -304,6 +308,7 @@ fn conversation_sync_round_trips_into_a_joiner() {
 /// auto-vote still fires before the session closes.
 #[test]
 fn adopting_a_sync_clamps_voting_delay_below_its_timeout() {
+    let mut publisher = InMemoryPublisher::default();
     let founder_config = EngineConfig {
         consensus_timeout: Duration::from_secs(5),
         voting_delay: Duration::from_secs(1),
@@ -317,6 +322,7 @@ fn adopting_a_sync_clamps_voting_delay_below_its_timeout() {
         &[id("alice"), id("bob")],
         founder_config,
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("create")
     .0;
@@ -338,11 +344,12 @@ fn adopting_a_sync_clamps_voting_delay_below_its_timeout() {
         &[id("alice"), id("bob")],
         joiner_config,
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("join")
     .0;
     engine
-        .handle_control(Timestamp::ZERO, id("alice"), 1, &bytes)
+        .handle_control(Timestamp::ZERO, id("alice"), 1, &bytes, &mut publisher)
         .expect("handle control");
 
     assert_eq!(engine.config.voting_delay, Duration::from_millis(2_500));
@@ -353,6 +360,7 @@ fn adopting_a_sync_clamps_voting_delay_below_its_timeout() {
 /// pull is not limited to `Syncing`.
 #[test]
 fn a_working_node_adopts_a_newer_election() {
+    let mut publisher = InMemoryPublisher::default();
     let members = [id("alice"), id("bob"), id("carol")];
     // B's list, elected at 0, has two stewards (default sn_max) and so
     // covers epochs 0-1: setting its epoch to 1 leaves it `Working`.
@@ -364,6 +372,7 @@ fn a_working_node_adopts_a_newer_election() {
         &members,
         EngineConfig::default(),
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("create")
     .0;
@@ -378,6 +387,7 @@ fn a_working_node_adopts_a_newer_election() {
         &members,
         EngineConfig::default(),
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("create")
     .0;
@@ -400,6 +410,7 @@ fn a_working_node_adopts_a_newer_election() {
 /// the answer's timing replaces its own and `SyncApplied` is reported.
 #[test]
 fn a_working_node_adopts_an_answer_from_the_same_election() {
+    let mut publisher = InMemoryPublisher::default();
     let members = [id("alice"), id("bob")];
     let steward_config = EngineConfig {
         consensus_timeout: Duration::from_secs(5),
@@ -414,6 +425,7 @@ fn a_working_node_adopts_an_answer_from_the_same_election() {
         &members,
         steward_config,
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("create")
     .0;
@@ -433,6 +445,7 @@ fn a_working_node_adopts_an_answer_from_the_same_election() {
         &members,
         EngineConfig::default(),
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("create")
     .0;
@@ -451,6 +464,7 @@ fn a_working_node_adopts_an_answer_from_the_same_election() {
 /// no `SyncApplied`, timing untouched.
 #[test]
 fn an_answer_from_an_older_election_is_ignored() {
+    let mut publisher = InMemoryPublisher::default();
     let members = [id("alice"), id("bob")];
     let steward_config = EngineConfig {
         consensus_timeout: Duration::from_secs(5),
@@ -465,6 +479,7 @@ fn an_answer_from_an_older_election_is_ignored() {
         &members,
         steward_config,
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("create")
     .0;
@@ -484,6 +499,7 @@ fn an_answer_from_an_older_election_is_ignored() {
         &members,
         EngineConfig::default(),
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("create")
     .0;
@@ -504,6 +520,7 @@ fn an_answer_from_an_older_election_is_ignored() {
 /// the sender is chosen to be someone else.
 #[test]
 fn adopting_a_newer_list_drops_a_candidate_from_the_old_steward() {
+    let mut publisher = InMemoryPublisher::default();
     let members = [id("alice"), id("bob"), id("carol")];
     let mut b = Engine::create(
         at(0),
@@ -513,6 +530,7 @@ fn adopting_a_newer_list_drops_a_candidate_from_the_old_steward() {
         &members,
         EngineConfig::default(),
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("create")
     .0;
@@ -526,6 +544,7 @@ fn adopting_a_newer_list_drops_a_candidate_from_the_old_steward() {
         &members,
         EngineConfig::default(),
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("create")
     .0;
@@ -579,13 +598,14 @@ fn invite_request(member_id: &[u8]) -> ConversationUpdateRequest {
 /// A steward holding an approved invite and a voting session for another,
 /// filed off the whole second so a deadline carried in seconds would differ.
 fn steward_with_pending_work() -> (Engine<InMemoryStore>, Vec<u8>) {
+    let mut publisher = InMemoryPublisher::default();
     let filed = Timestamp::from_duration_since_epoch(Duration::from_millis(250));
     let mut steward = founder();
     steward
         .queues
         .insert_approved_proposal(7, invite_request(b"dave"));
     steward
-        .propose_add(filed, id("carol"), b"kp".to_vec())
+        .propose_add(filed, id("carol"), b"kp".to_vec(), &mut publisher)
         .expect("propose add");
     steward.begin(filed);
     let bytes = steward
@@ -628,6 +648,7 @@ fn the_sync_lists_approved_proposals_and_voting_sessions() {
 /// package check is asked for.
 #[test]
 fn a_joiner_votes_on_a_relayed_session_filed_since_its_seating() {
+    let mut publisher = InMemoryPublisher::default();
     let (steward, bytes) = steward_with_pending_work();
     let session_id = decode_sync(&bytes).voting_sessions[0]
         .proposal
@@ -637,7 +658,7 @@ fn a_joiner_votes_on_a_relayed_session_filed_since_its_seating() {
 
     let mut engine = joiner();
     let out = engine
-        .handle_control(at(3), id("alice"), 1, &bytes)
+        .handle_control(at(3), id("alice"), 1, &bytes, &mut publisher)
         .expect("handle control");
 
     assert!(engine.queues.approved_proposals().contains_key(&7));
@@ -658,6 +679,7 @@ fn a_joiner_votes_on_a_relayed_session_filed_since_its_seating() {
 /// vote.
 #[test]
 fn a_joiner_seated_after_a_relayed_session_was_filed_does_not_vote() {
+    let mut publisher = InMemoryPublisher::default();
     let (steward, bytes) = steward_with_pending_work();
     let session_id = decode_sync(&bytes).voting_sessions[0]
         .proposal
@@ -673,11 +695,12 @@ fn a_joiner_seated_after_a_relayed_session_was_filed_does_not_vote() {
         &[id("alice"), id("bob")],
         EngineConfig::default(),
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("join")
     .0;
     let out = engine
-        .handle_control(at(3), id("alice"), 2, &bytes)
+        .handle_control(at(3), id("alice"), 2, &bytes, &mut publisher)
         .expect("handle control");
 
     assert!(engine.queues.is_voting(session_id));
@@ -702,6 +725,7 @@ fn a_joiner_seated_after_a_relayed_session_was_filed_does_not_vote() {
 /// too: neither the proposal nor the session is taken.
 #[test]
 fn a_node_with_a_newer_list_ignores_the_pending_work() {
+    let mut publisher = InMemoryPublisher::default();
     let (_, bytes) = steward_with_pending_work();
     let session_id = decode_sync(&bytes).voting_sessions[0]
         .proposal
@@ -716,11 +740,12 @@ fn a_node_with_a_newer_list_ignores_the_pending_work() {
         &[id("alice"), id("bob")],
         EngineConfig::default(),
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("create")
     .0;
     engine
-        .handle_control(Timestamp::ZERO, id("bob"), 2, &bytes)
+        .handle_control(Timestamp::ZERO, id("bob"), 2, &bytes, &mut publisher)
         .expect("handle control");
 
     assert_eq!(engine.queues.approved_proposals_count(), 0);
@@ -732,6 +757,7 @@ fn a_node_with_a_newer_list_ignores_the_pending_work() {
 /// update.
 #[test]
 fn a_pending_change_is_admitted_as_a_vote_would_be() {
+    let mut publisher = InMemoryPublisher::default();
     let mut steward = founder();
     steward
         .queues
@@ -751,7 +777,7 @@ fn a_pending_change_is_admitted_as_a_vote_would_be() {
         ConversationUpdateRequest::leaf_update(member("bob"), b"update".to_vec()),
     );
     engine
-        .handle_control(Timestamp::ZERO, id("alice"), 1, &bytes)
+        .handle_control(Timestamp::ZERO, id("alice"), 1, &bytes, &mut publisher)
         .expect("handle control");
 
     assert_eq!(engine.queues.approved_proposals_count(), 1);
@@ -771,6 +797,7 @@ fn a_pending_change_is_admitted_as_a_vote_would_be() {
 /// not installed a second time.
 #[test]
 fn a_pending_change_already_held_under_another_id_is_not_installed() {
+    let mut publisher = InMemoryPublisher::default();
     let (_, bytes) = steward_with_pending_work();
 
     let mut engine = joiner();
@@ -778,7 +805,7 @@ fn a_pending_change_already_held_under_another_id_is_not_installed() {
         .queues
         .insert_approved_proposal(9, invite_request(b"dave"));
     engine
-        .handle_control(Timestamp::ZERO, id("alice"), 1, &bytes)
+        .handle_control(Timestamp::ZERO, id("alice"), 1, &bytes, &mut publisher)
         .expect("handle control");
 
     assert_eq!(engine.queues.approved_proposals_count(), 1);

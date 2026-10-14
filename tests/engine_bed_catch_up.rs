@@ -269,7 +269,7 @@ fn a_failed_recovery_vote_stays_failed_on_replay() {
     });
     let now = bed.now;
     bed.router_mut(other)
-        .act(now, |e| e.request_recovery(now))
+        .act(now, |e, p| e.request_recovery(now, p))
         .expect("recovery filed");
     bed.process_until("the recovery vote failed", |b| {
         b.router(other).events.iter().any(|e| {

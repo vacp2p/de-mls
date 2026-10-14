@@ -31,7 +31,7 @@ fn creator_adds_one_then_a_member_adds_another() {
 
     let now = bed.now;
     bed.router_mut(0)
-        .act(now, |e| e.propose_add(now, bob_id.clone(), kp_bob))
+        .act(now, |e, p| e.propose_add(now, bob_id.clone(), kp_bob, p))
         .expect("propose bob");
 
     bed.process_until("bob seated", |b| b.is_live(bob) && b.epochs_agree());
@@ -52,7 +52,9 @@ fn creator_adds_one_then_a_member_adds_another() {
     let carol_id = bed.nodes[carol].own.clone();
     let now = bed.now;
     bed.router_mut(bob)
-        .act(now, |e| e.propose_add(now, carol_id.clone(), kp_carol))
+        .act(now, |e, p| {
+            e.propose_add(now, carol_id.clone(), kp_carol, p)
+        })
         .expect("propose carol");
 
     bed.process_until("carol seated", |b| b.is_live(carol) && b.epochs_agree());

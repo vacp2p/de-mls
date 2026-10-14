@@ -64,8 +64,11 @@ MUST.
    clock, and a deadline armed at construction is measured against it.
    `tick(now)` is called no later than the `wakeup` of the last `Output`.
 3. Every `Output` is executed completely before the next driving call,
-   in this order: seal and send `outbound` (at the current epoch), then
-   execute `decisions` in the order given, then handle `events`. A report
+   in this order: execute `decisions` in the order given, then handle
+   `events`. Control messages do not wait for the `Output`: the engine
+   hands each one to the `Publish` the call received, before the call
+   returns; the implementation seals it at the current epoch and sends
+   it to the group. A report
    call made while executing a decision returns its own `Output`, which
    is executed the same way; the router loops until an `Output` is empty.
 4. A decision the router could not execute (an MLS error on merge, a
@@ -170,13 +173,13 @@ MUST.
 
 **Storage and restart**
 
-17. The `EngineStore` write of a driving call is durable before the
-    `outbound` of the same `Output` is sent. A node must not send a vote
-    it can forget.
+17. A `put` on the `EngineStore` is durable when it returns. The engine
+    writes a call's state before it publishes that call's messages, so a
+    node never sends a vote it can forget.
 18. On restart the router loads the group first, then
-    `Engine::restore(now, conversation_id, own, epoch, members, store)`;
-    on join it opens the welcome first, then `Engine::join(now,
-    conversation_id, own, epoch, members, config, store)`. Either way it
+    `Engine::restore(now, conversation_id, own, epoch, members, store,
+    publisher)`; on join it opens the welcome first, then `Engine::join(now,
+    conversation_id, own, epoch, members, config, store, publisher)`. Either way it
     executes the returned `Output`. A joiner, a store the engine never
     wrote, and a store from another epoch all start in `Syncing`: that
     `Output` carries the sync request and reports the end of the answer
@@ -189,8 +192,8 @@ MUST.
     ordinary calls with each frame's time as `now`, running every wakeup
     due before a frame before the frame itself, then the wakeups due up to
     the present. Before the present the engine casts no vote and asks for
-    none, every `outbound` is dropped and `Decision::BuildCommit` is not
-    executed: the group decided those while this member was away. A commit merges only through
+    none, publishes nothing, and the router does not execute
+    `Decision::BuildCommit`: the group decided those while this member was away. A commit merges only through
     `Decision::Merge`, exactly as live; nothing is adopted without its
     vote, and a member removed while away gets `Decision::Leave` at that
     epoch. A payload the router holds (rule 6) is not consumed: the cursor
@@ -256,6 +259,7 @@ Error handling and the store are elided.
 struct Router {
     mls: MlsService,                       // application-owned group
     engine: Engine<KvStore>,
+    publisher: Sender,                     // implements `Publish`: seals at the current epoch, sends
     staged: HashMap<CommitHash, StagedCommit>,
     held: Vec<Held>,                       // refused inputs, fed again
     update: Option<LeafParams>,            // own leaf change filed, not yet seen landing
@@ -274,7 +278,7 @@ impl Router {
                 match opened.kind {
                     Kind::Chat    => { self.app.show(opened); return }
                     Kind::Control => match self.engine
-                        .handle_control(now, opened.sender.clone(), opened.epoch, &opened.plaintext)
+                        .handle_control(now, opened.sender.clone(), opened.epoch, &opened.plaintext, &mut self.publisher)
                     {
                         Err(ConversationError::Refused(_)) => {
                             self.held.push(Held::Control {
@@ -292,7 +296,7 @@ impl Router {
                 if self.staged.contains_key(&hash) { return }             // staged once
                 let Ok(facts) = self.mls.stage(&bytes) else { return };   // authenticates
                 self.staged.insert(hash, facts.staged);
-                match self.engine.handle_candidate(now, hash, facts.clone()) {
+                match self.engine.handle_candidate(now, hash, facts.clone(), &mut self.publisher) {
                     Err(ConversationError::Refused(_)) => {
                         self.held.push(Held::Candidate { hash, facts });
                         return
@@ -305,7 +309,7 @@ impl Router {
     }
 
     fn on_wakeup(&mut self, now: Timestamp) {
-        let out = self.engine.tick(now);
+        let out = self.engine.tick(now, &mut self.publisher);
         self.drive(now, out);
     }
 
@@ -315,7 +319,7 @@ impl Router {
         if self.mls.validate_key_package(&key_package).is_err() { return }
         let Ok(member) = MlsService::key_package_identity(&key_package) else { return };
         if !self.app.wants(&member) { return }
-        match self.engine.propose_add(now, member, key_package) {
+        match self.engine.propose_add(now, member, key_package, &mut self.publisher) {
             Ok(out) => self.drive(now, out),
             Err(e) => self.app.report(e),                            // the app's to re-file
         }
@@ -330,10 +334,10 @@ impl Router {
         for item in std::mem::take(&mut self.held) {
             let result = match &item {
                 Held::Candidate { hash, facts } =>
-                    self.engine.handle_candidate(now, *hash, facts.clone()),
+                    self.engine.handle_candidate(now, *hash, facts.clone(), &mut self.publisher),
                 Held::Control { arrived, .. } if now - *arrived >= ttl => continue,
                 Held::Control { sender, epoch, bytes, .. } =>
-                    self.engine.handle_control(now, sender.clone(), *epoch, bytes),
+                    self.engine.handle_control(now, sender.clone(), *epoch, bytes, &mut self.publisher),
             };
             match result {
                 Ok(o) => out.merge(o),
@@ -349,7 +353,7 @@ impl Router {
     fn propose_update(&mut self, now: Timestamp) -> Output {
         let Some(params) = self.update.clone() else { return Output::default() };
         let Ok(bytes) = self.mls.propose_update(params) else { return Output::default() };
-        match self.engine.propose_update(now, bytes) {
+        match self.engine.propose_update(now, bytes, &mut self.publisher) {
             Ok(out) => out,
             Err(_) => Output::default(),                             // blocked: next `Working`
         }
@@ -357,7 +361,6 @@ impl Router {
 
     fn drive(&mut self, now: Timestamp, mut out: Output) {
         loop {
-            for o in out.outbound.drain(..) { self.send(o); }       // sealed at current epoch
             let mut next = Output::default();
             for d in out.decisions.drain(..) {
                 next.merge(self.execute(now, d));                    // report calls return Output
@@ -392,7 +395,7 @@ impl Router {
             Decision::BuildCommit { actions } => {
                 let built = self.mls.build_commit(&actions);          // stays pending
                 self.broadcast_commit(&built.commit);
-                self.engine.handle_candidate(now, built.hash, built.facts)
+                self.engine.handle_candidate(now, built.hash, built.facts, &mut self.publisher)
             }
             Decision::Merge { hash } => {
                 let applied = if self.mls.pending_hash() == Some(hash) {
@@ -404,7 +407,7 @@ impl Router {
                 };
                 self.staged.clear();                                 // the rest are stale
                 if let Some(w) = self.mls.take_welcome(hash) { self.inbox.deliver(w); }
-                self.engine.commit_applied(now, hash, applied.epoch, applied.members)
+                self.engine.commit_applied(now, hash, applied.epoch, applied.members, &mut self.publisher)
             }
             Decision::Discard { hashes } => {
                 for h in hashes { self.staged.remove(&h); }
@@ -413,11 +416,11 @@ impl Router {
             Decision::ValidateKeyPackage { proposal_id, member, key_package } => {
                 let ok = self.mls.validate_key_package(&key_package).is_ok()
                     && MlsService::key_package_identity(&key_package) == Ok(member);
-                self.engine.key_package_checked(now, proposal_id, ok)
+                self.engine.key_package_checked(now, proposal_id, ok, &mut self.publisher)
             }
             Decision::ValidateUpdate { proposal_id, member, update } => {
                 let ok = self.mls.validate_update(&update) == Ok(member);
-                self.engine.update_checked(now, proposal_id, ok)
+                self.engine.update_checked(now, proposal_id, ok, &mut self.publisher)
             }
             Decision::Leave => { self.mls.delete(); Output::default() }
         }

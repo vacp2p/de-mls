@@ -18,6 +18,7 @@ use crate::{
         types::{MemberId, Output, Timestamp},
     },
     protos::de_mls::messages::v1::{ControlMessage, control_message},
+    traits::Publish,
 };
 
 impl<St: EngineStore> Engine<St> {
@@ -29,13 +30,14 @@ impl<St: EngineStore> Engine<St> {
         sender: MemberId,
         epoch: u64,
         payload: &[u8],
+        publisher: &mut impl Publish,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
         let message = match ControlMessage::decode(payload) {
             Ok(message) => message,
             Err(e) => {
                 self.report_failure("control_decode", &e.into());
-                return self.finish();
+                return self.finish(publisher);
             }
         };
         let sender = sender.as_bytes().to_vec();
@@ -61,7 +63,7 @@ impl<St: EngineStore> Engine<St> {
                     sealed_at_epoch = epoch,
                     "control message carried no payload"
                 );
-                return self.finish();
+                return self.finish(publisher);
             }
         };
         match outcome {
@@ -70,9 +72,9 @@ impl<St: EngineStore> Engine<St> {
             }
             (operation, Err(e)) => {
                 self.report_failure(operation, &e);
-                self.finish()
+                self.finish(publisher)
             }
-            (_, Ok(())) => self.finish(),
+            (_, Ok(())) => self.finish(publisher),
         }
     }
 }
@@ -80,6 +82,7 @@ impl<St: EngineStore> Engine<St> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::InMemoryPublisher;
     use crate::{
         Refusal,
         engine::{
@@ -125,6 +128,7 @@ mod tests {
     /// is untouched.
     #[test]
     fn a_vote_for_an_unknown_session_is_refused_without_trace() {
+        let mut publisher = InMemoryPublisher::default();
         let mut engine = founder();
         let before = store_contents(&engine);
         let result = engine.handle_control(
@@ -132,6 +136,7 @@ mod tests {
             id("bob"),
             1,
             &vote_bytes(99, member("bob")),
+            &mut publisher,
         );
         assert!(matches!(
             result,
@@ -146,6 +151,7 @@ mod tests {
     /// is dropped and neither call reports an error.
     #[test]
     fn a_duplicate_vote_is_dropped_without_an_error() {
+        let mut publisher = InMemoryPublisher::default();
         let mut engine = founder();
         let proposal = Proposal {
             proposal_id: 7,
@@ -160,12 +166,12 @@ mod tests {
         let vote = build_vote(&proposal, true, &MemberSigner::new(member("bob")), 0).unwrap();
         let bytes = control_bytes(control_message::Payload::Proposal(proposal));
         engine
-            .handle_control(Timestamp::ZERO, id("bob"), 1, &bytes)
+            .handle_control(Timestamp::ZERO, id("bob"), 1, &bytes, &mut publisher)
             .expect("proposal");
         let vote = control_bytes(control_message::Payload::Vote(vote));
         for _ in 0..2 {
             let out = engine
-                .handle_control(Timestamp::ZERO, id("bob"), 1, &vote)
+                .handle_control(Timestamp::ZERO, id("bob"), 1, &vote, &mut publisher)
                 .expect("an Ok both times");
             assert!(
                 !out.events.iter().any(|e| matches!(e, Event::Error { .. })),
@@ -179,9 +185,10 @@ mod tests {
     /// an `Output`.
     #[test]
     fn undecodable_control_is_reported() {
+        let mut publisher = InMemoryPublisher::default();
         let mut engine = joiner();
         let out = engine
-            .handle_control(Timestamp::ZERO, id("alice"), 1, &[0xff; 8])
+            .handle_control(Timestamp::ZERO, id("alice"), 1, &[0xff; 8], &mut publisher)
             .expect("handle control");
         assert!(matches!(out.events.as_slice(), [Event::Error { .. }]));
     }
@@ -190,6 +197,7 @@ mod tests {
     /// installing a list.
     #[test]
     fn an_invalid_sync_is_refused_quietly() {
+        let mut publisher = InMemoryPublisher::default();
         let mut engine = joiner();
         let sync = ConversationSync {
             steward_members: vec![member("ghost")],
@@ -207,7 +215,7 @@ mod tests {
         };
         let payload = control_bytes(control_message::Payload::ConversationSync(sync));
         let out = engine
-            .handle_control(Timestamp::ZERO, id("alice"), 1, &payload)
+            .handle_control(Timestamp::ZERO, id("alice"), 1, &payload, &mut publisher)
             .expect("handle control");
         assert!(out.events.is_empty());
         assert!(!engine.is_synced());

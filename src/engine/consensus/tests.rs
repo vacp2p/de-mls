@@ -1,3 +1,4 @@
+use crate::traits::InMemoryPublisher;
 use std::time::Duration;
 
 use hashgraph_like_consensus::{
@@ -16,8 +17,7 @@ use crate::{
         handle::Engine,
         test_support::founder,
         types::{
-            ActionKind, Decision, DecisionFailure, Event, MemberId, Outbound, Output, Timestamp,
-            Verdict,
+            ActionKind, Decision, DecisionFailure, Event, MemberId, Output, Timestamp, Verdict,
         },
         util::single_voter_proposal_id,
     },
@@ -33,6 +33,7 @@ fn member(id: u8) -> Vec<u8> {
 /// A four-member engine at epoch 1, owned by member 1, ready to be
 /// driven at `Timestamp::ZERO`.
 fn engine() -> Engine<InMemoryStore> {
+    let mut publisher = InMemoryPublisher::default();
     let members: Vec<MemberId> = (1..=4).map(|i| MemberId::from(member(i))).collect();
     let (mut engine, _) = Engine::create(
         Timestamp::ZERO,
@@ -42,6 +43,7 @@ fn engine() -> Engine<InMemoryStore> {
         &members,
         EngineConfig::default(),
         InMemoryStore::default(),
+        &mut publisher,
     )
     .expect("engine");
     engine.begin(Timestamp::ZERO);
@@ -203,6 +205,7 @@ fn a_copy_arriving_after_its_outcome_opens_no_session() {
 /// router and the auto-vote timer arms.
 #[test]
 fn key_package_pass_releases_the_vote() {
+    let mut publisher = InMemoryPublisher::default();
     let mut engine = engine();
     let request = invite_request(&member(9));
     let proposal = peer_proposal(&member(2), 12, &request, 4);
@@ -212,7 +215,7 @@ fn key_package_pass_releases_the_vote() {
     engine.out = Output::default();
 
     let out = engine
-        .key_package_checked(Timestamp::ZERO, 12, true)
+        .key_package_checked(Timestamp::ZERO, 12, true, &mut publisher)
         .unwrap();
 
     assert!(
@@ -227,6 +230,7 @@ fn key_package_pass_releases_the_vote() {
 /// session out.
 #[test]
 fn key_package_failure_votes_no() {
+    let mut publisher = InMemoryPublisher::default();
     let mut engine = engine();
     let request = invite_request(&member(9));
     let proposal = peer_proposal(&member(2), 13, &request, 4);
@@ -235,11 +239,11 @@ fn key_package_failure_votes_no() {
         .unwrap();
     engine.out = Output::default();
 
-    let out = engine
-        .key_package_checked(Timestamp::ZERO, 13, false)
+    engine
+        .key_package_checked(Timestamp::ZERO, 13, false, &mut publisher)
         .unwrap();
 
-    assert!(matches!(out.outbound.as_slice(), [Outbound::Control(_)]));
+    assert!(matches!(publisher.messages.as_slice(), [_]));
     assert!(!engine.timing.pending_auto_votes.contains_key(&13));
 }
 
@@ -361,10 +365,7 @@ fn auto_vote_fires_at_its_deadline() {
     engine.begin(fire_at);
     engine.tick_deadlines();
 
-    assert!(matches!(
-        engine.out.outbound.as_slice(),
-        [Outbound::Control(_)]
-    ));
+    assert!(matches!(engine.pending_control.as_slice(), [_]));
     assert!(engine.timing.pending_auto_votes.is_empty());
 }
 
@@ -373,6 +374,7 @@ fn auto_vote_fires_at_its_deadline() {
 /// verdict.
 #[test]
 fn a_replayed_proposal_arms_only_its_timeout() {
+    let mut publisher = InMemoryPublisher::default();
     let mut engine = engine();
     let horizon = Timestamp::ZERO + Duration::from_secs(1000);
     engine.replay_until(horizon);
@@ -403,7 +405,7 @@ fn a_replayed_proposal_arms_only_its_timeout() {
     assert!(engine.timing.pending_consensus_timeouts.contains_key(&20));
 
     let fire_at = engine.timing.pending_consensus_timeouts[&20];
-    let out = engine.tick(fire_at).unwrap();
+    let out = engine.tick(fire_at, &mut publisher).unwrap();
     assert!(
         out.events.iter().any(|e| matches!(
             e,
@@ -446,6 +448,7 @@ fn past_the_horizon_the_engine_votes_again() {
 /// next eligible steward.
 #[test]
 fn skipping_the_epoch_steward_moves_the_role_to_the_next() {
+    let mut publisher = InMemoryPublisher::default();
     let mut e = founder();
     e.begin(Timestamp::ZERO);
     let eligible = e.queues.steward_eligibility(&e.members);
@@ -457,7 +460,7 @@ fn skipping_the_epoch_steward_moves_the_role_to_the_next() {
     drop(eligible);
 
     e.skip_silent_epoch_steward();
-    let out = e.finish().unwrap();
+    let out = e.finish(&mut publisher).unwrap();
 
     assert!(out.events.iter().any(|ev| matches!(
         ev,
@@ -914,6 +917,7 @@ fn fast_path_admits_a_leaf_update_of_the_sender_only() {
 /// A peer's update is approved on arrival and asks the router for a check.
 #[test]
 fn incoming_update_is_approved_and_asks_for_a_check() {
+    let mut publisher = InMemoryPublisher::default();
     let mut engine = engine();
     let proposal = update_proposal(&member(2), &member(2), b"upd");
     let id = proposal.proposal_id;
@@ -921,7 +925,7 @@ fn incoming_update_is_approved_and_asks_for_a_check() {
     engine
         .on_incoming_proposal(&member(2), proposal, engine.epoch())
         .unwrap();
-    let out = engine.finish().unwrap();
+    let out = engine.finish(&mut publisher).unwrap();
 
     assert!(matches!(
         out.decisions.as_slice(),
@@ -941,15 +945,18 @@ fn incoming_update_is_approved_and_asks_for_a_check() {
 
 #[test]
 fn a_passed_update_check_leaves_the_update_approved() {
+    let mut publisher = InMemoryPublisher::default();
     let mut engine = engine();
     let proposal = update_proposal(&member(2), &member(2), b"upd");
     let id = proposal.proposal_id;
     engine
         .on_incoming_proposal(&member(2), proposal, engine.epoch())
         .unwrap();
-    engine.finish().unwrap();
+    engine.finish(&mut publisher).unwrap();
 
-    let out = engine.update_checked(Timestamp::ZERO, id, true).unwrap();
+    let out = engine
+        .update_checked(Timestamp::ZERO, id, true, &mut publisher)
+        .unwrap();
 
     assert!(
         engine
@@ -961,15 +968,18 @@ fn a_passed_update_check_leaves_the_update_approved() {
 
 #[test]
 fn a_failed_update_check_takes_the_update_out() {
+    let mut publisher = InMemoryPublisher::default();
     let mut engine = engine();
     let proposal = update_proposal(&member(2), &member(2), b"upd");
     let id = proposal.proposal_id;
     engine
         .on_incoming_proposal(&member(2), proposal, engine.epoch())
         .unwrap();
-    engine.finish().unwrap();
+    engine.finish(&mut publisher).unwrap();
 
-    let out = engine.update_checked(Timestamp::ZERO, id, false).unwrap();
+    let out = engine
+        .update_checked(Timestamp::ZERO, id, false, &mut publisher)
+        .unwrap();
 
     assert!(
         !engine
@@ -981,18 +991,19 @@ fn a_failed_update_check_takes_the_update_out() {
 
 #[test]
 fn a_second_update_from_the_same_member_is_dropped() {
+    let mut publisher = InMemoryPublisher::default();
     let mut engine = engine();
     let first = update_proposal(&member(2), &member(2), b"first");
     engine
         .on_incoming_proposal(&member(2), first, engine.epoch())
         .unwrap();
-    engine.finish().unwrap();
+    engine.finish(&mut publisher).unwrap();
 
     let second = update_proposal(&member(2), &member(2), b"second");
     engine
         .on_incoming_proposal(&member(2), second, engine.epoch())
         .unwrap();
-    let out = engine.finish().unwrap();
+    let out = engine.finish(&mut publisher).unwrap();
 
     assert!(out.decisions.is_empty());
     assert_eq!(engine.queues.approved_proposals_count(), 1);
@@ -1007,12 +1018,13 @@ fn a_second_update_from_the_same_member_is_dropped() {
 /// file again this epoch.
 #[test]
 fn a_failed_update_decision_lets_the_member_file_again() {
+    let mut publisher = InMemoryPublisher::default();
     let mut engine = engine();
     let first = update_proposal(&member(2), &member(2), b"first");
     engine
         .on_incoming_proposal(&member(2), first, engine.epoch())
         .unwrap();
-    let out = engine.finish().unwrap();
+    let out = engine.finish(&mut publisher).unwrap();
     let decision = out.decisions[0].clone();
 
     engine
@@ -1022,6 +1034,7 @@ fn a_failed_update_decision_lets_the_member_file_again() {
                 decision,
                 reason: "group unavailable".to_owned(),
             },
+            &mut publisher,
         )
         .unwrap();
     assert!(
@@ -1034,7 +1047,7 @@ fn a_failed_update_decision_lets_the_member_file_again() {
     engine
         .on_incoming_proposal(&member(2), second, engine.epoch())
         .unwrap();
-    let out = engine.finish().unwrap();
+    let out = engine.finish(&mut publisher).unwrap();
     assert!(matches!(
         out.decisions.as_slice(),
         [Decision::ValidateUpdate { .. }]

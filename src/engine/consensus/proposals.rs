@@ -6,8 +6,8 @@
 //! consensus timeouts) wait as deadlines that `tick_deadlines` fires on a
 //! later tick — see [`crate::engine::consensus::deadlines`]. Wire-level
 //! construction (control-message encoding, session opening) lives in
-//! [`crate::engine::consensus::wire`]. Wire messages leave as
-//! `Outbound::Control` bytes the router seals; nothing here touches a group.
+//! [`crate::engine::consensus::wire`]. Wire messages are queued
+//! for publication through `Publish`; nothing here touches a group.
 
 use std::time::Duration;
 
@@ -33,6 +33,7 @@ use crate::{
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, VotingSession, conversation_update_request,
     },
+    traits::Publish,
 };
 
 /// Whether an arriving proposal opened a session here.
@@ -55,7 +56,7 @@ impl<St: EngineStore> Engine<St> {
     /// Errors under the partial freeze of an active emergency. No-ops when a
     /// change for
     /// the request's target member is already in flight locally. On success
-    /// the proposal is queued as `Outbound::Control` and a consensus-timeout
+    /// the proposal is queued for publication and a consensus-timeout
     /// deadline is armed for [`Self::tick_deadlines`] to fire.
     ///
     /// An invite the engine opens itself carries no key-package decision: the
@@ -393,12 +394,13 @@ impl<St: EngineStore> Engine<St> {
         now: Timestamp,
         proposal_id: u32,
         valid: bool,
+        publisher: &mut impl Publish,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
         if !valid {
             self.drop_unchecked_update(proposal_id);
         }
-        self.finish()
+        self.finish(publisher)
     }
 
     /// Take the approved leaf update `proposal_id` out of the queue: the
@@ -549,6 +551,7 @@ impl<St: EngineStore> Engine<St> {
         now: Timestamp,
         proposal_id: u32,
         valid: bool,
+        publisher: &mut impl Publish,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
         if !valid {
@@ -559,7 +562,7 @@ impl<St: EngineStore> Engine<St> {
             if let Err(e) = self.cast_local_vote(proposal_id, false) {
                 self.report_failure("key_package_checked", &e);
             }
-            return self.finish();
+            return self.finish(publisher);
         }
 
         let scope = self.conversation_id.clone();
@@ -575,7 +578,7 @@ impl<St: EngineStore> Engine<St> {
                 proposal_id,
                 "key-package verdict dropped: the session is no longer active"
             );
-            return self.finish();
+            return self.finish(publisher);
         };
         let request = ConversationUpdateRequest::decode(stored.payload.as_slice())?;
         self.emit(Event::VoteRequested {
@@ -585,7 +588,7 @@ impl<St: EngineStore> Engine<St> {
         let delay = self.config.voting_delay;
         let vote = self.config.liveness_criteria_yes;
         self.register_auto_vote(proposal_id, delay, vote);
-        self.finish()
+        self.finish(publisher)
     }
 
     // ── private ──────────────────────────────────────────────────────

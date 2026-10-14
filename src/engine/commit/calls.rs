@@ -21,6 +21,7 @@ use crate::{
         },
     },
     scoring_member_diff,
+    traits::Publish,
 };
 
 impl<St: EngineStore> Engine<St> {
@@ -33,6 +34,7 @@ impl<St: EngineStore> Engine<St> {
         now: Timestamp,
         hash: CommitHash,
         facts: StagedFacts,
+        publisher: &mut impl Publish,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
         if facts.epoch != self.epoch {
@@ -43,7 +45,7 @@ impl<St: EngineStore> Engine<St> {
                 "candidate discarded: stale epoch"
             );
             self.decide(Decision::Discard { hashes: vec![hash] });
-            return self.finish();
+            return self.finish(publisher);
         }
 
         // Without a list this node cannot validate the candidate. The router
@@ -67,7 +69,7 @@ impl<St: EngineStore> Engine<St> {
                 sender: facts.sender.clone(),
                 reason: CandidateRejection::NotEpochSteward,
             });
-            return self.finish();
+            return self.finish(publisher);
         }
 
         // The epoch steward's commit opens the round for everyone; a
@@ -85,7 +87,7 @@ impl<St: EngineStore> Engine<St> {
                 "candidate discarded: the epoch steward already sent one this round"
             );
             self.decide(Decision::Discard { hashes: vec![hash] });
-            return self.finish();
+            return self.finish(publisher);
         }
 
         self.round_candidate = Some((hash, facts));
@@ -93,7 +95,7 @@ impl<St: EngineStore> Engine<St> {
             received: 1,
             expected: 1,
         });
-        self.finish()
+        self.finish(publisher)
     }
 
     /// The router merged `hash`; the group is now at `epoch` with `members`.
@@ -108,6 +110,7 @@ impl<St: EngineStore> Engine<St> {
         hash: CommitHash,
         epoch: u64,
         members: &[MemberId],
+        publisher: &mut impl Publish,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
         let mut adopted: Vec<Vec<u8>> = members.iter().map(|m| m.as_bytes().to_vec()).collect();
@@ -154,7 +157,7 @@ impl<St: EngineStore> Engine<St> {
             self.cancel_all_auto_votes();
             self.round_candidate = None;
             self.decide(Decision::Leave);
-            return self.finish();
+            return self.finish(publisher);
         }
 
         self.sync_scoring_members();
@@ -174,7 +177,7 @@ impl<St: EngineStore> Engine<St> {
             self.broadcast_sync_request();
         }
 
-        self.finish()
+        self.finish(publisher)
     }
 
     /// Post-commit queue bookkeeping: stamp join epochs and clear the entries
@@ -253,6 +256,7 @@ impl<St: EngineStore> Engine<St> {
         &mut self,
         now: Timestamp,
         failure: DecisionFailure,
+        publisher: &mut impl Publish,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
         let operation = match &failure.decision {
@@ -279,7 +283,7 @@ impl<St: EngineStore> Engine<St> {
         if matches!(failure.decision, Decision::Merge { .. }) {
             self.close_round_without_commit()?;
         }
-        self.finish()
+        self.finish(publisher)
     }
 }
 

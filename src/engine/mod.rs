@@ -36,5 +36,5 @@ pub use store::keys;
 pub use timestamp::Timestamp;
 pub use types::{
     Action, CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId,
-    MembershipDelta, Outbound, Output, Phase, StagedFacts, Verdict,
+    MembershipDelta, Output, Phase, StagedFacts, Verdict,
 };
