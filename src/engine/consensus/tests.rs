@@ -15,7 +15,7 @@ use crate::{
         config::EngineConfig,
         consensus::{MemberSigner, wire::authorize_fast_path_proposal},
         handle::Engine,
-        test_support::founder,
+        test_support::{founder, view},
         types::{
             ActionKind, Decision, DecisionFailure, Event, MemberId, Output, Timestamp, Verdict,
         },
@@ -37,10 +37,7 @@ fn engine() -> Engine<InMemoryStore> {
     let members: Vec<MemberId> = (1..=4).map(|i| MemberId::from(member(i))).collect();
     let (mut engine, _) = Engine::create(
         Timestamp::ZERO,
-        "conv",
-        MemberId::from(member(1)),
-        1,
-        &members,
+        &view(MemberId::from(member(1)), 1, &members),
         EngineConfig::default(),
         InMemoryStore::default(),
         &mut publisher,

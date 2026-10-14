@@ -18,7 +18,7 @@ fn backup_steward_answers_when_the_epoch_steward_is_silent() {
 
     bed.mute(bed.epoch_steward());
 
-    // An empty store: the engine restarts as `join`, unsynced.
+    // An empty store: the engine opens as an added member, unsynced.
     bed.restart_with(dave, InMemoryStore::default());
     assert!(!bed.router(dave).engine.is_synced());
 

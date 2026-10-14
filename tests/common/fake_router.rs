@@ -116,10 +116,7 @@ impl FakeRouter {
         let mut outbox = Vec::new();
         let (engine, out) = Engine::create(
             now,
-            conversation_id,
-            own,
-            mls.epoch(),
-            &mls.members(),
+            &mls,
             config,
             InMemoryStore::default(),
             &mut Sealer::over(&mls, &mut outbox),
@@ -135,12 +132,9 @@ impl FakeRouter {
     pub fn join(now: Timestamp, own: MemberId, welcome: &Welcome, config: EngineConfig) -> Self {
         let mls = FakeMls::from_welcome(own.clone(), &welcome.snapshot);
         let mut outbox = Vec::new();
-        let (engine, out) = Engine::join(
+        let (engine, out) = Engine::open(
             now,
-            mls.conversation_id(),
-            own,
-            mls.epoch(),
-            &mls.members(),
+            &mls,
             config,
             InMemoryStore::default(),
             &mut Sealer::over(&mls, &mut outbox),
@@ -366,15 +360,13 @@ impl FakeRouter {
     }
 
     /// Restart with `store` in place of this router's own — a deliberately
-    /// stale or empty snapshot, for exercising `Engine::restore`'s recovery
-    /// path. Replaces the engine and drives what `Engine::restore` returns.
+    /// stale or empty snapshot, for exercising `Engine::open`'s recovery
+    /// path. Replaces the engine and drives what `Engine::open` returns.
     pub fn restart_with(&mut self, now: Timestamp, store: InMemoryStore) {
-        let (engine, out) = Engine::restore(
+        let (engine, out) = Engine::open(
             now,
-            self.mls.conversation_id(),
-            self.own_id().clone(),
-            self.mls.epoch(),
-            &self.mls.members(),
+            &self.mls,
+            EngineConfig::default(),
             store,
             &mut Sealer::over(&self.mls, &mut self.outbox),
         )
@@ -653,14 +645,13 @@ impl FakeRouter {
                 }
             }
             Decision::Merge { hash } => match self.merge(hash) {
-                Ok(applied) => {
+                Ok(()) => {
                     self.rejected_commits.clear();
                     self.staged_hashes.clear();
                     let out = self.engine.commit_applied(
                         now,
                         hash,
-                        applied.epoch,
-                        &applied.members,
+                        &self.mls,
                         &mut Sealer::over(&self.mls, &mut self.outbox),
                     );
                     if out.is_ok() {
@@ -703,21 +694,17 @@ impl FakeRouter {
     pub fn adopt_commit(&mut self, now: Timestamp, bytes: Vec<u8>) {
         self.mls.stage(&bytes).expect("stage the adopted commit");
         let hash = CommitHash::of(&bytes);
-        let applied = self.merge(hash).expect("merge the adopted commit");
+        self.merge(hash).expect("merge the adopted commit");
         let out = self.engine.commit_applied(
             now,
             hash,
-            applied.epoch,
-            &applied.members,
+            &self.mls,
             &mut Sealer::over(&self.mls, &mut self.outbox),
         );
         self.finish(now, out);
     }
 
-    fn merge(
-        &mut self,
-        hash: CommitHash,
-    ) -> Result<crate::common::fake_mls::Applied, de_mls::ConversationError> {
+    fn merge(&mut self, hash: CommitHash) -> Result<(), de_mls::ConversationError> {
         if self.mls.pending_hash() != Some(hash) {
             self.mls.clear_pending();
         }
@@ -877,14 +864,13 @@ impl Bed {
         if let Some(draft) = built.welcome {
             creator.welcomes.insert(hash, draft);
         }
-        let applied = creator.mls.merge(hash).expect("seed merge");
+        creator.mls.merge(hash).expect("seed merge");
         let out = creator
             .engine
             .commit_applied(
                 now,
                 hash,
-                applied.epoch,
-                &applied.members,
+                &creator.mls,
                 &mut Sealer::over(&creator.mls, &mut creator.outbox),
             )
             .expect("seed commit_applied");

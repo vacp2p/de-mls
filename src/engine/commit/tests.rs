@@ -10,7 +10,7 @@ use crate::{
         config::EngineConfig,
         handle::{Engine, PendingMerge},
         store::keys,
-        test_support::{id, joiner, member},
+        test_support::{group, id, joiner, member, view},
         types::{
             ActionKind, CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId,
             Phase, StagedFacts, Timestamp,
@@ -36,10 +36,7 @@ fn engine(members: &[&str]) -> Engine<InMemoryStore> {
     let ids: Vec<MemberId> = members.iter().map(|m| id(m)).collect();
     let (engine, _) = Engine::<InMemoryStore>::create(
         at(0),
-        "conv",
-        ids[0].clone(),
-        0,
-        &ids,
+        &view(ids[0].clone(), 0, &ids),
         EngineConfig::default(),
         InMemoryStore::default(),
         &mut publisher,
@@ -253,7 +250,12 @@ fn the_own_commit_reported_through_handle_candidate_merges() {
     ));
 
     let out = e
-        .commit_applied(at(0), hash, 1, &[id("alice"), id("bob")], &mut publisher)
+        .commit_applied(
+            at(0),
+            hash,
+            &group("alice", 1, &["alice", "bob"]),
+            &mut publisher,
+        )
         .unwrap();
     assert_eq!(e.epoch(), 1);
     assert!(e.members().contains(&id("bob")));
@@ -302,7 +304,12 @@ fn an_unexpected_merge_is_adopted_in_full() {
     e.queues.set_urgent_commit_target(member("carol"));
     let hash = CommitHash::of(b"surprise");
     let out = e
-        .commit_applied(at(0), hash, 4, &[id("alice"), id("carol")], &mut publisher)
+        .commit_applied(
+            at(0),
+            hash,
+            &group("alice", 4, &["alice", "carol"]),
+            &mut publisher,
+        )
         .unwrap();
     assert_eq!(e.epoch(), 4);
     assert_eq!(e.members(), vec![id("alice"), id("carol")]);
@@ -365,8 +372,7 @@ fn an_adoption_while_syncing_keeps_the_phase_and_asks() {
         .commit_applied(
             at(1),
             hash,
-            e.epoch() + 1,
-            &[id("alice"), id("bob"), id("carol")],
+            &group("bob", e.epoch() + 1, &["alice", "bob", "carol"]),
             &mut publisher,
         )
         .unwrap();
@@ -406,7 +412,7 @@ fn a_commit_that_removes_us_asks_the_router_to_leave() {
         },
     });
     let out = e
-        .commit_applied(at(0), hash, 1, &[id("bob")], &mut publisher)
+        .commit_applied(at(0), hash, &group("alice", 1, &["bob"]), &mut publisher)
         .unwrap();
     assert_eq!(out.decisions, vec![Decision::Leave]);
 }
@@ -662,8 +668,7 @@ fn a_merge_reports_the_carried_updates_and_drops_them() {
         .commit_applied(
             at(0),
             hash,
-            1,
-            &[id("alice"), id("bob"), id("carol")],
+            &group("alice", 1, &["alice", "bob", "carol"]),
             &mut publisher,
         )
         .unwrap();
@@ -702,7 +707,12 @@ fn a_merge_reports_the_carried_updates_and_drops_them() {
         ),
     });
     let out = e
-        .commit_applied(at(0), hash, 1, &[id("alice"), id("bob")], &mut publisher)
+        .commit_applied(
+            at(0),
+            hash,
+            &group("alice", 1, &["alice", "bob"]),
+            &mut publisher,
+        )
         .unwrap();
     assert!(
         !out.events
