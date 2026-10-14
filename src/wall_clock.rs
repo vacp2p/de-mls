@@ -117,7 +117,7 @@ impl MockClock {
         let add = duration_nanos(d);
         let _ = self
             .now_nanos
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_add(add))
             });
     }
