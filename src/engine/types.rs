@@ -314,6 +314,11 @@ pub enum Event {
     /// before that commit can be built or staged. The engine never parses
     /// the bytes.
     UpdateProposed { member: MemberId, update: Vec<u8> },
+    /// The group refused these approved actions at the build (a key package
+    /// that expired, an update it would not hold); the epoch steward dropped
+    /// them and every member follows. They land in no commit: whoever still
+    /// wants one files it again with fresh material.
+    ActionsDropped { actions: Vec<Action> },
     /// The router merged a commit the engine did not decide: the group's
     /// facts were adopted without the vote's judgment, and the same
     /// `Output` asks the stewards for a sync.
@@ -359,6 +364,11 @@ pub struct DecisionFailure {
     pub decision: Decision,
     /// The group's error, for the log.
     pub reason: String,
+    /// For a failed `BuildCommit`, the members whose key package or update
+    /// the group refused; the engine drops their approved work and builds
+    /// again with the rest. Empty for every other failure, and for a build
+    /// that failed for another reason: nothing is dropped.
+    pub rejected: Vec<MemberId>,
 }
 
 #[cfg(test)]

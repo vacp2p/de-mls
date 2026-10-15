@@ -251,7 +251,9 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// The router could not execute a decision. A failed merge closes the
-    /// round with no commit; anything else is reported and dropped.
+    /// round with no commit. A failed build that names rejected members
+    /// drops their approved work, withdraws it from every member, and builds
+    /// again with the rest. Anything else is reported and dropped.
     pub fn decision_failed(
         &mut self,
         now: Timestamp,
@@ -274,6 +276,11 @@ impl<St: EngineStore> Engine<St> {
             message: failure.reason,
         });
 
+        if let Decision::BuildCommit { .. } = &failure.decision
+            && !failure.rejected.is_empty()
+        {
+            self.withdraw_rejected(&failure.rejected);
+        }
         if matches!(failure.decision, Decision::Merge { .. }) {
             self.close_round_without_commit()?;
         }

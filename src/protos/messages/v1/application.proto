@@ -14,6 +14,7 @@ message ControlMessage {
     consensus.v1.Vote vote = 2;
     ConversationSync conversation_sync = 3;
     ConversationSyncRequest conversation_sync_request = 4;
+    ProposalsDropped proposals_dropped = 5;
   }
 }
 
@@ -129,6 +130,12 @@ message VotingSession {
 // ConversationSync. Carries no fields: MLS decryption scopes it to this
 // conversation and the authenticated sender identifies the requester.
 message ConversationSyncRequest {}
+
+// The epoch steward's notice that the group refused these members' approved
+// add or update at the build; receivers drop the same approved work.
+message ProposalsDropped {
+  repeated bytes member_ids = 1;
+}
 
 message PeerScore {
   bytes member_id = 1;

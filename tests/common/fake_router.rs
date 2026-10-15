@@ -596,12 +596,16 @@ impl FakeRouter {
                 } else {
                     let built = match self.mls.build_commit(&actions) {
                         Ok(built) => built,
-                        Err(reason) => {
+                        Err(refused) => {
                             return self
                                 .engine
                                 .decision_failed(
                                     now,
-                                    DecisionFailure { decision, reason },
+                                    DecisionFailure {
+                                        decision,
+                                        reason: refused.reason,
+                                        rejected: refused.rejected,
+                                    },
                                     &mut Sealer::over(&self.mls, &mut self.outbox),
                                 )
                                 .unwrap_or_default();
@@ -663,6 +667,7 @@ impl FakeRouter {
                     DecisionFailure {
                         decision,
                         reason: reason.to_string(),
+                        rejected: Vec::new(),
                     },
                     &mut Sealer::over(&self.mls, &mut self.outbox),
                 )

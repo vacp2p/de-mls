@@ -104,6 +104,27 @@ fn has_approved_change_matches_kind_and_member() {
     assert!(!queues.has_approved_change(ActionKind::Remove, &member(2)));
 }
 
+/// Dropping a member's approved work takes its add and update, in queue
+/// order, and leaves every removal and every other member's work.
+#[test]
+fn drop_approved_for_takes_adds_and_updates_but_never_removals() {
+    let mut queues = EngineQueues::new();
+    queues.insert_approved_proposal(1, invite_request(2));
+    queues.insert_approved_proposal(2, invite_request(3));
+    queues.insert_approved_proposal(3, update_request(&member(2)));
+    insert_remove_member(&mut queues, &member(2), 4);
+    insert_remove_member(&mut queues, &member(3), 5);
+
+    let dropped = queues.drop_approved_for(&member(2));
+
+    assert_eq!(dropped, vec![invite_request(2), update_request(&member(2))]);
+    assert!(queues.has_approved_change(ActionKind::Add, &member(3)));
+    assert!(queues.has_approved_change(ActionKind::Remove, &member(2)));
+    assert!(queues.has_approved_change(ActionKind::Remove, &member(3)));
+    assert!(!queues.has_approved_change(ActionKind::Add, &member(2)));
+    assert_eq!(queues.approved_proposals_count(), 3);
+}
+
 /// A landed invite and removal and every update are dropped; an invite whose
 /// member did not land stays.
 #[test]

@@ -8,6 +8,7 @@ use crate::{
     engine::{
         EngineStore, InMemoryStore,
         config::EngineConfig,
+        consensus::wire::control_bytes,
         handle::{Engine, PendingMerge},
         store::keys,
         test_support::{group, id, joiner, member, view},
@@ -19,8 +20,8 @@ use crate::{
     protos::de_mls::{
         engine::v1::{MetaState, ProposalsState},
         messages::v1::{
-            ConversationUpdateRequest, MemberInvite, RemoveMember,
-            conversation_update_request::Payload,
+            ControlMessage, ConversationUpdateRequest, MemberInvite, ProposalsDropped,
+            RemoveMember, control_message, conversation_update_request::Payload,
         },
     },
 };
@@ -548,6 +549,7 @@ fn a_failed_merge_closes_the_round_without_a_commit() {
             DecisionFailure {
                 decision: Decision::Merge { hash },
                 reason: "no such staged commit".to_owned(),
+                rejected: Vec::new(),
             },
             &mut publisher,
         )
@@ -569,6 +571,224 @@ fn a_failed_merge_closes_the_round_without_a_commit() {
         1,
         "the approved batch stays queued for the next round"
     );
+}
+
+// ── a refused build ─────────────────────────────────────────────────
+
+fn build_failure(actions: Vec<Action>, rejected: Vec<MemberId>) -> DecisionFailure {
+    DecisionFailure {
+        decision: Decision::BuildCommit { actions },
+        reason: "key package expired".to_owned(),
+        rejected,
+    }
+}
+
+fn add_of(joiner: &str) -> Action {
+    Action::Add {
+        member: id(joiner),
+        key_package: format!("kp:{joiner}").into_bytes(),
+    }
+}
+
+/// The notices a publisher holds, decoded.
+fn dropped_notices(publisher: &InMemoryPublisher) -> Vec<ProposalsDropped> {
+    publisher
+        .messages
+        .iter()
+        .filter_map(
+            |bytes| match ControlMessage::decode(bytes.as_slice()).unwrap().payload {
+                Some(control_message::Payload::ProposalsDropped(notice)) => Some(notice),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+/// A build the group refuses for one member drops that member's approved
+/// add, tells the group once, and asks for a new build over the rest.
+#[test]
+fn a_refused_key_package_is_dropped_and_the_rest_is_built_again() {
+    let mut publisher = InMemoryPublisher::default();
+    let mut e = engine(&["alice"]);
+    e.queues.insert_approved_proposal(7, invite("dave"));
+    e.queues.insert_approved_proposal(8, invite("erin"));
+    e.begin(at(0));
+    let event = e.start_freezing().expect("enters freezing");
+    e.on_freeze_entered(event).unwrap();
+    let first = e.finish(&mut publisher).unwrap();
+    assert_eq!(
+        first.decisions,
+        vec![Decision::BuildCommit {
+            actions: vec![add_of("dave"), add_of("erin")],
+        }]
+    );
+    publisher.drain();
+
+    let out = e
+        .decision_failed(
+            at(0),
+            build_failure(vec![add_of("dave"), add_of("erin")], vec![id("dave")]),
+            &mut publisher,
+        )
+        .unwrap();
+
+    assert!(
+        out.events
+            .iter()
+            .any(|ev| matches!(ev, Event::Error { .. }))
+    );
+    assert!(out.events.contains(&Event::ActionsDropped {
+        actions: vec![add_of("dave")],
+    }));
+    assert_eq!(
+        out.decisions,
+        vec![Decision::BuildCommit {
+            actions: vec![add_of("erin")],
+        }]
+    );
+    assert_eq!(
+        dropped_notices(&publisher),
+        vec![ProposalsDropped {
+            member_ids: vec![member("dave")],
+        }]
+    );
+    assert_eq!(e.queues.approved_proposals_count(), 1);
+    assert_eq!(e.phase(), Phase::Freezing);
+}
+
+/// With nothing left to build the round returns to `Working` and nothing is
+/// reported missing.
+#[test]
+fn a_refused_only_action_returns_the_round_to_working() {
+    let mut publisher = InMemoryPublisher::default();
+    let mut e = engine(&["alice"]);
+    e.queues.insert_approved_proposal(7, invite("dave"));
+    e.begin(at(0));
+    let event = e.start_freezing().expect("enters freezing");
+    e.on_freeze_entered(event).unwrap();
+    e.finish(&mut publisher).unwrap();
+    publisher.drain();
+
+    let out = e
+        .decision_failed(
+            at(0),
+            build_failure(vec![add_of("dave")], vec![id("dave")]),
+            &mut publisher,
+        )
+        .unwrap();
+
+    assert!(out.events.contains(&Event::ActionsDropped {
+        actions: vec![add_of("dave")],
+    }));
+    assert!(out.events.contains(&Event::PhaseChange(Phase::Working)));
+    assert!(
+        !out.events
+            .iter()
+            .any(|ev| matches!(ev, Event::CommitMissing { .. }))
+    );
+    assert!(out.decisions.is_empty());
+    assert_eq!(e.queues.approved_proposals_count(), 0);
+    assert_eq!(dropped_notices(&publisher).len(), 1);
+    assert_eq!(e.phase(), Phase::Working);
+}
+
+/// A failed build that names nobody is reported and nothing else changes.
+#[test]
+fn a_build_failure_naming_nobody_keeps_the_batch() {
+    let mut publisher = InMemoryPublisher::default();
+    let mut e = engine(&["alice"]);
+    e.queues.insert_approved_proposal(7, invite("dave"));
+    e.begin(at(0));
+    let event = e.start_freezing().expect("enters freezing");
+    e.on_freeze_entered(event).unwrap();
+    e.finish(&mut publisher).unwrap();
+    publisher.drain();
+
+    let out = e
+        .decision_failed(
+            at(0),
+            build_failure(vec![add_of("dave")], Vec::new()),
+            &mut publisher,
+        )
+        .unwrap();
+
+    assert!(matches!(out.events.as_slice(), [Event::Error { .. }]));
+    assert!(out.decisions.is_empty());
+    assert_eq!(e.queues.approved_proposals_count(), 1);
+    assert!(publisher.messages.is_empty());
+}
+
+/// A member that is not the epoch steward.
+fn follower_engine() -> Engine<InMemoryStore> {
+    let e = engine(&["alice", "bob"]);
+    if e.is_epoch_steward() {
+        return engine(&["bob", "alice"]);
+    }
+    e
+}
+
+fn dropped_notice_bytes(joiner: &str) -> Vec<u8> {
+    control_bytes(control_message::Payload::ProposalsDropped(
+        ProposalsDropped {
+            member_ids: vec![member(joiner)],
+        },
+    ))
+}
+
+/// The epoch steward's notice drops the same approved add on a member and
+/// publishes nothing.
+#[test]
+fn a_dropped_notice_from_the_epoch_steward_is_followed() {
+    let mut publisher = InMemoryPublisher::default();
+    let mut e = follower_engine();
+    e.queues.insert_approved_proposal(7, invite("dave"));
+    let steward = MemberId::from(e.expected_steward().unwrap().as_slice());
+
+    let out = e
+        .handle_control(
+            at(0),
+            steward,
+            0,
+            &dropped_notice_bytes("dave"),
+            &mut publisher,
+        )
+        .unwrap();
+
+    assert_eq!(
+        out.events,
+        vec![Event::ActionsDropped {
+            actions: vec![add_of("dave")],
+        }]
+    );
+    assert_eq!(e.queues.approved_proposals_count(), 0);
+    assert!(publisher.messages.is_empty());
+}
+
+/// A notice from a member that is not the epoch steward changes nothing.
+#[test]
+fn a_dropped_notice_from_anyone_else_is_ignored() {
+    let mut publisher = InMemoryPublisher::default();
+    let mut e = follower_engine();
+    e.queues.insert_approved_proposal(7, invite("dave"));
+    let steward = e.expected_steward().unwrap();
+    let other = ["alice", "bob"]
+        .into_iter()
+        .find(|m| member(m) != steward)
+        .unwrap();
+
+    let out = e
+        .handle_control(
+            at(0),
+            id(other),
+            0,
+            &dropped_notice_bytes("dave"),
+            &mut publisher,
+        )
+        .unwrap();
+
+    assert!(out.events.is_empty());
+    assert_eq!(e.queues.approved_proposals_count(), 1);
+    assert!(publisher.messages.is_empty());
 }
 
 // ── leaf updates ────────────────────────────────────────────────────

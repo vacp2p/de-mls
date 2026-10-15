@@ -6,9 +6,9 @@ use tracing::info;
 
 use crate::{
     engine::{
-        proposal_kind::change_of,
+        proposal_kind::{Change, change_of},
         queues::{Admission, EngineQueues},
-        types::{ActionKind, Verdict},
+        types::Verdict,
     },
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, ViolationEvidence, ViolationType,
@@ -216,7 +216,7 @@ fn pending_removal_target(
         return None;
     }
     match change_of(request) {
-        Some((ActionKind::Remove, id)) => Some(id.to_vec()),
+        Some(Change::Remove { member }) => Some(member.to_vec()),
         _ => None,
     }
 }
