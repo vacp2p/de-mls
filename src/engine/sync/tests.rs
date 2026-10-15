@@ -635,9 +635,9 @@ fn a_joiner_votes_on_a_relayed_session_filed_since_its_seating() {
         steward.timing.pending_consensus_timeouts[&session_id],
         "the session ends when it ends for the steward"
     );
-    assert!(out.decisions.iter().any(|d| matches!(
-        d,
-        Decision::ValidateKeyPackage { member, .. } if member == &id("carol")
+    assert!(out.events.iter().any(|e| matches!(
+        e,
+        Event::VoteRequested { proposal_id, .. } if *proposal_id == session_id
     )));
 }
 
@@ -677,11 +677,6 @@ fn a_joiner_seated_after_a_relayed_session_was_filed_does_not_vote() {
         !out.events
             .iter()
             .any(|e| matches!(e, Event::VoteRequested { .. }))
-    );
-    assert!(
-        !out.decisions
-            .iter()
-            .any(|d| matches!(d, Decision::ValidateKeyPackage { .. }))
     );
 }
 

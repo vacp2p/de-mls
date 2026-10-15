@@ -30,7 +30,7 @@
 //! reference implementation.
 //!
 //! Every driving call — `handle_control`, `handle_candidate`, the report
-//! calls (`commit_applied`, `decision_failed`, `key_package_checked`), the
+//! calls (`commit_applied`, `decision_failed`), the
 //! local actions, and `tick` — returns an [`Output`]: decisions to execute
 //! against the group, events to observe, and the next wakeup. Control
 //! messages leave during the call, through the [`Publish`] the call

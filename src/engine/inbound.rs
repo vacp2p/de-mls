@@ -56,6 +56,10 @@ impl<St: EngineStore> Engine<St> {
                 self.on_conversation_sync_request(&sender);
                 ("conversation_sync_request", Ok(()))
             }
+            Some(control_message::Payload::ProposalsDropped(notice)) => {
+                self.on_proposals_dropped(&sender, notice);
+                ("proposals_dropped", Ok(()))
+            }
             None => {
                 tracing::debug!(
                     conversation = %self.conversation_id,

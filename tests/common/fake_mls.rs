@@ -64,6 +64,14 @@ pub struct Built {
     pub welcome: Option<WelcomeDraft>,
 }
 
+/// Why `build_commit` refused, and which members' key package or update the
+/// group would not take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildRefused {
+    pub reason: String,
+    pub rejected: Vec<MemberId>,
+}
+
 /// Past-epoch window the contract pins (`max_past_epochs`).
 pub const PAST_WINDOW: u64 = 3;
 
@@ -199,6 +207,8 @@ pub struct FakeMls {
     held_updates: HashMap<MemberId, Vec<u8>>,
     /// Merged leaf updates per member.
     leaf_versions: HashMap<MemberId, u64>,
+    /// Key packages the group refuses at the build, as an expired one is.
+    expired_key_packages: BTreeSet<Vec<u8>>,
 }
 
 impl FakeMls {
@@ -212,10 +222,17 @@ impl FakeMls {
         format!("kp:{name}").into_bytes()
     }
 
-    /// Parse only, no validation: the joiner's future member id.
+    /// A later key package of the same member: `kp:<name>#<n>`.
+    pub fn key_package_v(name: &str, n: u32) -> Vec<u8> {
+        format!("kp:{name}#{n}").into_bytes()
+    }
+
+    /// Parse only, no validation: the joiner's future member id. A version
+    /// suffix (`#<n>`) is not part of the identity.
     pub fn key_package_identity(bytes: &[u8]) -> Option<MemberId> {
         let text = std::str::from_utf8(bytes).ok()?;
         let name = text.strip_prefix("kp:")?;
+        let name = name.split('#').next()?;
         Some(Self::member_id(name))
     }
 
@@ -236,6 +253,7 @@ impl FakeMls {
             own_update: None,
             held_updates: HashMap::new(),
             leaf_versions: HashMap::new(),
+            expired_key_packages: BTreeSet::new(),
         }
     }
 
@@ -256,6 +274,7 @@ impl FakeMls {
             own_update: None,
             held_updates: HashMap::new(),
             leaf_versions: HashMap::new(),
+            expired_key_packages: BTreeSet::new(),
         }
     }
 
@@ -357,16 +376,42 @@ impl FakeMls {
         })
     }
 
+    /// Make the group refuse `key_package` at the build, as an expired one
+    /// is.
+    pub fn expire_key_package(&mut self, key_package: &[u8]) {
+        self.expired_key_packages.insert(key_package.to_vec());
+    }
+
     /// Build a commit for the current epoch and keep it pending. Removes of
-    /// non-members are skipped, as the contract requires; an update whose
-    /// proposal is not held fails the build. The commit carries this member's
-    /// own held update itself.
-    pub fn build_commit(&mut self, actions: &[Action]) -> Result<Built, String> {
-        if let Some(missing) = actions.iter().find(|a| match a {
-            Action::Update { member } => !self.update_held(member),
-            _ => false,
-        }) {
-            return Err(format!("update of {:?} is not held", missing.member()));
+    /// non-members are skipped, as the contract requires; an add whose key
+    /// package expired, or an update whose proposal is not held, fails the
+    /// build. The contract requires the build to name the members whose key
+    /// package or update it refused, every one of them, not the first.
+    /// The commit carries this member's own held update itself.
+    pub fn build_commit(&mut self, actions: &[Action]) -> Result<Built, BuildRefused> {
+        let mut reasons = Vec::new();
+        let mut rejected = Vec::new();
+        for action in actions {
+            match action {
+                Action::Add {
+                    member,
+                    key_package,
+                } if self.expired_key_packages.contains(key_package) => {
+                    reasons.push(format!("key package of {member:?} expired"));
+                    rejected.push(member.clone());
+                }
+                Action::Update { member } if !self.update_held(member) => {
+                    reasons.push(format!("update of {member:?} is not held"));
+                    rejected.push(member.clone());
+                }
+                _ => {}
+            }
+        }
+        if !rejected.is_empty() {
+            return Err(BuildRefused {
+                reason: reasons.join("; "),
+                rejected,
+            });
         }
         let actions: Vec<Action> = actions
             .iter()

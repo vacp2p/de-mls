@@ -249,7 +249,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        Decision, Event, ScoreEvent, ScoreOp,
+        Event, ScoreEvent, ScoreOp,
         engine::{
             InMemoryStore,
             test_support::view,
@@ -426,12 +426,6 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::VoteRequested { .. })),
             "no vote requested for a session already voted on"
-        );
-        assert!(
-            !out.decisions
-                .iter()
-                .any(|d| matches!(d, Decision::ValidateKeyPackage { .. })),
-            "no key package check for a session already voted on"
         );
     }
 

@@ -16,9 +16,7 @@ use crate::{
         consensus::{MemberSigner, wire::authorize_fast_path_proposal},
         handle::Engine,
         test_support::{founder, view},
-        types::{
-            ActionKind, Decision, DecisionFailure, Event, MemberId, Output, Timestamp, Verdict,
-        },
+        types::{ActionKind, Event, MemberId, Output, Timestamp, Verdict},
         util::single_voter_proposal_id,
     },
     protos::de_mls::messages::v1::{
@@ -119,39 +117,8 @@ fn single_voter_proposal_is_only_allowed_for_self_removal() {
     assert!(engine.queues.is_voting(9));
 }
 
-/// An invite asks the router for a key-package verdict and arms nothing:
-/// no vote request, no auto-vote. Silence must not approve a joiner
-/// nobody validated.
-#[test]
-fn incoming_invite_asks_for_validation_before_voting() {
-    let mut engine = engine();
-    let request = invite_request(&member(9));
-    let proposal = peer_proposal(&member(2), 11, &request, 4);
-
-    engine
-        .on_incoming_proposal(&member(2), proposal, engine.epoch())
-        .unwrap();
-
-    assert!(matches!(
-        engine.out.decisions.as_slice(),
-        [Decision::ValidateKeyPackage {
-            proposal_id: 11,
-            ..
-        }]
-    ));
-    assert!(
-        !engine
-            .out
-            .events
-            .iter()
-            .any(|e| matches!(e, Event::VoteRequested { .. }))
-    );
-    assert!(!engine.timing.pending_auto_votes.contains_key(&11));
-    assert!(engine.timing.pending_consensus_timeouts.contains_key(&11));
-}
-
 /// A second sighting of a proposal in flight is a no-op: no error, no second
-/// key-package check, no second deadline.
+/// vote request, no second deadline.
 #[test]
 fn a_second_sighting_of_a_proposal_changes_nothing() {
     let mut engine = engine();
@@ -196,52 +163,6 @@ fn a_copy_arriving_after_its_outcome_opens_no_session() {
             .unwrap_or_default()
             .is_empty()
     );
-}
-
-/// A passing key package releases the vote: the request reaches the
-/// router and the auto-vote timer arms.
-#[test]
-fn key_package_pass_releases_the_vote() {
-    let mut publisher = InMemoryPublisher::default();
-    let mut engine = engine();
-    let request = invite_request(&member(9));
-    let proposal = peer_proposal(&member(2), 12, &request, 4);
-    engine
-        .on_incoming_proposal(&member(2), proposal, engine.epoch())
-        .unwrap();
-    engine.out = Output::default();
-
-    let out = engine
-        .key_package_checked(Timestamp::ZERO, 12, true, &mut publisher)
-        .unwrap();
-
-    assert!(
-        out.events
-            .iter()
-            .any(|e| matches!(e, Event::VoteRequested { proposal_id, .. } if *proposal_id == 12))
-    );
-    assert!(engine.timing.pending_auto_votes.contains_key(&12));
-}
-
-/// A failing key package votes NO right away rather than waiting the
-/// session out.
-#[test]
-fn key_package_failure_votes_no() {
-    let mut publisher = InMemoryPublisher::default();
-    let mut engine = engine();
-    let request = invite_request(&member(9));
-    let proposal = peer_proposal(&member(2), 13, &request, 4);
-    engine
-        .on_incoming_proposal(&member(2), proposal, engine.epoch())
-        .unwrap();
-    engine.out = Output::default();
-
-    engine
-        .key_package_checked(Timestamp::ZERO, 13, false, &mut publisher)
-        .unwrap();
-
-    assert!(matches!(publisher.messages.as_slice(), [_]));
-    assert!(!engine.timing.pending_auto_votes.contains_key(&13));
 }
 
 /// A vote whose owner is not the authenticated sender never reaches the
@@ -390,13 +311,6 @@ fn a_replayed_proposal_arms_only_its_timeout() {
             .iter()
             .any(|e| matches!(e, Event::VoteRequested { .. })),
         "a replay casts no vote and asks for none"
-    );
-    assert!(
-        !engine
-            .out
-            .decisions
-            .iter()
-            .any(|d| matches!(d, Decision::ValidateKeyPackage { .. }))
     );
     assert!(engine.timing.pending_auto_votes.is_empty());
     assert!(engine.timing.pending_consensus_timeouts.contains_key(&20));
@@ -911,9 +825,9 @@ fn fast_path_admits_a_leaf_update_of_the_sender_only() {
     assert!(!authorize_fast_path_proposal(&own, &member(3)));
 }
 
-/// A peer's update is approved on arrival and asks the router for a check.
+/// A peer's update is approved on arrival and handed over to be held.
 #[test]
-fn incoming_update_is_approved_and_asks_for_a_check() {
+fn incoming_update_is_approved_on_arrival() {
     let mut publisher = InMemoryPublisher::default();
     let mut engine = engine();
     let proposal = update_proposal(&member(2), &member(2), b"upd");
@@ -924,11 +838,6 @@ fn incoming_update_is_approved_and_asks_for_a_check() {
         .unwrap();
     let out = engine.finish(&mut publisher).unwrap();
 
-    assert!(matches!(
-        out.decisions.as_slice(),
-        [Decision::ValidateUpdate { proposal_id, member: who, update }]
-            if *proposal_id == id && *who == MemberId::from(member(2)) && update == b"upd"
-    ));
     assert!(
         engine
             .queues
@@ -936,54 +845,12 @@ fn incoming_update_is_approved_and_asks_for_a_check() {
     );
     assert!(out.events.iter().any(|e| matches!(
         e,
+        Event::UpdateProposed { member: who, update } if who.as_bytes() == member(2) && update == b"upd"
+    )));
+    assert!(out.events.iter().any(|e| matches!(
+        e,
         Event::ConsensusReached { proposal_id, verdict: Verdict::Approved, .. } if *proposal_id == id
     )));
-}
-
-#[test]
-fn a_passed_update_check_leaves_the_update_approved() {
-    let mut publisher = InMemoryPublisher::default();
-    let mut engine = engine();
-    let proposal = update_proposal(&member(2), &member(2), b"upd");
-    let id = proposal.proposal_id;
-    engine
-        .on_incoming_proposal(&member(2), proposal, engine.epoch())
-        .unwrap();
-    engine.finish(&mut publisher).unwrap();
-
-    let out = engine
-        .update_checked(Timestamp::ZERO, id, true, &mut publisher)
-        .unwrap();
-
-    assert!(
-        engine
-            .queues
-            .has_approved_change(ActionKind::Update, &member(2))
-    );
-    assert!(out.is_empty());
-}
-
-#[test]
-fn a_failed_update_check_takes_the_update_out() {
-    let mut publisher = InMemoryPublisher::default();
-    let mut engine = engine();
-    let proposal = update_proposal(&member(2), &member(2), b"upd");
-    let id = proposal.proposal_id;
-    engine
-        .on_incoming_proposal(&member(2), proposal, engine.epoch())
-        .unwrap();
-    engine.finish(&mut publisher).unwrap();
-
-    let out = engine
-        .update_checked(Timestamp::ZERO, id, false, &mut publisher)
-        .unwrap();
-
-    assert!(
-        !engine
-            .queues
-            .has_approved_change(ActionKind::Update, &member(2))
-    );
-    assert!(out.decisions.is_empty());
 }
 
 #[test]
@@ -1004,51 +871,6 @@ fn a_second_update_from_the_same_member_is_dropped() {
 
     assert!(out.decisions.is_empty());
     assert_eq!(engine.queues.approved_proposals_count(), 1);
-    assert!(
-        engine
-            .queues
-            .has_approved_change(ActionKind::Update, &member(2))
-    );
-}
-
-/// A check the router could not run takes the update out: its owner can
-/// file again this epoch.
-#[test]
-fn a_failed_update_decision_lets_the_member_file_again() {
-    let mut publisher = InMemoryPublisher::default();
-    let mut engine = engine();
-    let first = update_proposal(&member(2), &member(2), b"first");
-    engine
-        .on_incoming_proposal(&member(2), first, engine.epoch())
-        .unwrap();
-    let out = engine.finish(&mut publisher).unwrap();
-    let decision = out.decisions[0].clone();
-
-    engine
-        .decision_failed(
-            Timestamp::ZERO,
-            DecisionFailure {
-                decision,
-                reason: "group unavailable".to_owned(),
-            },
-            &mut publisher,
-        )
-        .unwrap();
-    assert!(
-        !engine
-            .queues
-            .has_approved_change(ActionKind::Update, &member(2))
-    );
-
-    let second = update_proposal(&member(2), &member(2), b"second");
-    engine
-        .on_incoming_proposal(&member(2), second, engine.epoch())
-        .unwrap();
-    let out = engine.finish(&mut publisher).unwrap();
-    assert!(matches!(
-        out.decisions.as_slice(),
-        [Decision::ValidateUpdate { .. }]
-    ));
     assert!(
         engine
             .queues

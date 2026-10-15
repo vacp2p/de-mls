@@ -172,22 +172,6 @@ pub struct StagedFacts {
 /// given.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
-    /// A peer proposed adding `member` with `key_package`. Validate the key
-    /// package and check that its identity is `member`, then report
-    /// [`super::Engine::key_package_checked`]. The vote waits for the answer.
-    ValidateKeyPackage {
-        proposal_id: u32,
-        member: MemberId,
-        key_package: Vec<u8>,
-    },
-    /// A peer proposed an update of its own leaf. Check that `update` is a
-    /// valid Update proposal from `member` for the current epoch, then report
-    /// [`super::Engine::update_checked`]; a failed check takes the update out.
-    ValidateUpdate {
-        proposal_id: u32,
-        member: MemberId,
-        update: Vec<u8>,
-    },
     /// This member is the epoch steward for the round: build a commit
     /// carrying exactly `actions`, keep it pending, broadcast the commit
     /// bytes, then report it through
@@ -273,7 +257,9 @@ pub enum Event {
     /// The conversation moved to a new phase.
     PhaseChange(Phase),
     /// A peer's proposal needs this member's vote. Silence votes
-    /// automatically once `voting_delay` passes.
+    /// automatically once `voting_delay` passes. For an invite the request
+    /// carries the joiner's key package bytes, which the engine never
+    /// parses; a caller that wants to check them does so before voting.
     VoteRequested {
         proposal_id: u32,
         request: ConversationUpdateRequest,
@@ -322,6 +308,17 @@ pub enum Event {
     },
     /// A merged commit replaced `member`'s leaf.
     MemberUpdated { member: MemberId },
+    /// A peer proposed `update` for its own leaf; it is approved on
+    /// arrival. Process the update on the group and hold it: a commit
+    /// carries a peer's update by reference, so every member must hold it
+    /// before that commit can be built or staged. The engine never parses
+    /// the bytes.
+    UpdateProposed { member: MemberId, update: Vec<u8> },
+    /// The group refused these approved actions at the build (a key package
+    /// that expired, an update it would not hold); the epoch steward dropped
+    /// them and every member follows. They land in no commit: whoever still
+    /// wants one files it again with fresh material.
+    ActionsDropped { actions: Vec<Action> },
     /// The router merged a commit the engine did not decide: the group's
     /// facts were adopted without the vote's judgment, and the same
     /// `Output` asks the stewards for a sync.
@@ -367,6 +364,11 @@ pub struct DecisionFailure {
     pub decision: Decision,
     /// The group's error, for the log.
     pub reason: String,
+    /// For a failed `BuildCommit`, the members whose key package or update
+    /// the group refused; the engine drops their approved work and builds
+    /// again with the rest. Empty for every other failure, and for a build
+    /// that failed for another reason: nothing is dropped.
+    pub rejected: Vec<MemberId>,
 }
 
 #[cfg(test)]
