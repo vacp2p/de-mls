@@ -9,7 +9,8 @@ use indexmap::IndexMap;
 use crate::{
     engine::{
         proposal_kind::{
-            ProposalKind, change_in_effect, change_of, in_flight_target, target_member_id_of,
+            Change, ProposalKind, change_in_effect, change_of, in_flight_target,
+            target_member_id_of,
         },
         queues::{EngineQueues, ProposalId, VotingMeta},
         types::{Action, ActionKind, MembershipDelta},
@@ -75,19 +76,9 @@ impl EngineQueues {
     /// self-leave ID. Used by live rotation to skip the leaver.
     pub fn is_pending_self_leave(&self, member_id: &[u8]) -> bool {
         let pid = single_voter_proposal_id(member_id);
-        self.approved_proposals
-            .get(&pid)
-            .is_some_and(|req| change_of(req) == Some((ActionKind::Remove, member_id)))
-    }
-
-    /// Remove the approved entry `proposal_id` when it is a `LeafUpdate`;
-    /// `true` when one was removed.
-    pub fn drop_approved_update(&mut self, proposal_id: ProposalId) -> bool {
-        let is_update = self
-            .approved_proposals
-            .get(&proposal_id)
-            .is_some_and(|req| matches!(change_of(req), Some((ActionKind::Update, _))));
-        is_update && self.approved_proposals.shift_remove(&proposal_id).is_some()
+        self.approved_proposals.get(&pid).is_some_and(
+            |req| matches!(change_of(req), Some(Change::Remove { member }) if member == member_id),
+        )
     }
 
     /// True iff `approved_proposals` already holds a change of `kind` for
@@ -98,13 +89,33 @@ impl EngineQueues {
     pub fn has_approved_change(&self, kind: ActionKind, member_id: &[u8]) -> bool {
         self.approved_proposals
             .values()
-            .any(|req| change_of(req) == Some((kind, member_id)))
+            .any(|req| change_of(req).is_some_and(|c| c.kind() == kind && c.member() == member_id))
     }
 
     /// Remove every approved `LeafUpdate` owned by `member_id`.
     pub fn drop_approved_update_for(&mut self, member_id: &[u8]) {
         self.approved_proposals
-            .retain(|_pid, req| change_of(req) != Some((ActionKind::Update, member_id)));
+            .retain(|_pid, req| {
+                !matches!(change_of(req), Some(Change::Update { member }) if member == member_id)
+            });
+    }
+
+    /// Remove every approved `Add` or `Update` of `member_id` and return the
+    /// removed requests in queue order. A `Remove` stays: the group skips a
+    /// non-member's removal, it never refuses it.
+    pub fn drop_approved_for(&mut self, member_id: &[u8]) -> Vec<ConversationUpdateRequest> {
+        let mut dropped = Vec::new();
+        self.approved_proposals.retain(|_pid, req| {
+            let refused = matches!(
+                change_of(req),
+                Some(Change::Add { member, .. } | Change::Update { member }) if member == member_id
+            );
+            if refused {
+                dropped.push(req.clone());
+            }
+            !refused
+        });
+        dropped
     }
 
     /// A commit from `sender` is valid when every action it carries is allowed
@@ -120,7 +131,7 @@ impl EngineQueues {
                 .approved_proposals()
                 .values()
                 .filter_map(change_of)
-                .map(|(kind, member)| (kind, member.to_vec()))
+                .map(|change| (change.kind(), change.member().to_vec()))
                 .filter(|(kind, member)| !(*kind == ActionKind::Update && member == sender))
                 .collect(),
         };
@@ -147,9 +158,10 @@ impl EngineQueues {
         proposal_id: ProposalId,
         request: ConversationUpdateRequest,
     ) -> Admission {
-        let Some((kind, member)) = change_of(&request) else {
+        let Some(change) = change_of(&request) else {
             return Admission::Stale;
         };
+        let (kind, member) = (change.kind(), change.member());
         if self.has_approved_change(kind, member) {
             return Admission::Duplicate;
         }
@@ -181,9 +193,9 @@ impl EngineQueues {
     pub fn drop_landed(&mut self, delta: &MembershipDelta) {
         self.approved_proposals
             .retain(|_pid, req| match change_of(req) {
-                Some((ActionKind::Add, member)) => !delta.added.iter().any(|m| m == member),
-                Some((ActionKind::Remove, member)) => !delta.removed.iter().any(|m| m == member),
-                Some((ActionKind::Update, _)) | None => false,
+                Some(Change::Add { member, .. }) => !delta.added.iter().any(|m| m == member),
+                Some(Change::Remove { member }) => !delta.removed.iter().any(|m| m == member),
+                Some(Change::Update { .. }) | None => false,
             });
     }
 

@@ -30,16 +30,17 @@
 //! reference implementation.
 //!
 //! Every driving call — `handle_control`, `handle_candidate`, the report
-//! calls (`commit_applied`, `decision_failed`, `key_package_checked`), the
-//! local actions, and `tick` — returns an [`Output`]: decisions to execute
-//! against the group, events to observe, and the next wakeup. Control
-//! messages leave during the call, through the [`Publish`] the call
-//! received. Executing a decision leads to a report call that returns
-//! its own `Output`, so the router loops until one is empty. A candidate on
-//! the wire is the raw MLS commit bytes: the router stages it and hands the
-//! facts the group learned straight to `handle_candidate`, which keeps at
-//! most one per round — the epoch steward's — and discards the rest on
-//! sight.
+//! calls (`commit_applied`, `build_failed`, `merge_failed`), the local
+//! actions, and `tick` — returns an [`Output`]: events to observe and the
+//! next wakeup. What to do against the group is asked afterwards:
+//! `commit_to_build` names the batch the epoch steward builds,
+//! `commit_to_apply` names the commit that merges. Control messages leave
+//! during the call, through the [`Publish`] the call received. Acting on an
+//! answer leads to a report call that returns its own `Output`, so the
+//! router loops until nothing is left. A candidate on the wire is the raw
+//! MLS commit bytes: the router stages it and hands the facts the group
+//! learned straight to `handle_candidate`, which keeps at most one per
+//! round — the epoch steward's.
 //!
 //! ```rust,ignore
 //! struct Router {
@@ -57,16 +58,16 @@
 //!             }
 //!             Frame::Commit(bytes) => {
 //!                 let facts = self.mls.stage(&bytes);      // authenticates the sender
-//!                 self.engine.handle_candidate(now, CommitHash::of(&bytes), facts, &mut self.publisher)
+//!                 self.engine.handle_candidate(now, self.mls.name_of(&bytes), facts, &mut self.publisher)
 //!             }
 //!         };
 //!         self.drive(now, out)
 //!     }
 //!
-//!     // Executes `decisions` in order — a
-//!     // `BuildCommit` builds on the group, broadcasts the commit bytes, and
-//!     // reports it back through `handle_candidate`, whose own Output feeds
-//!     // back in the same way — then hands `events` to the application.
+//!     // Hands `events` to the application, then asks `commit_to_build`
+//!     // (build on the group, broadcast the commit bytes, report it back
+//!     // through `handle_candidate`) and `commit_to_apply` (merge, report
+//!     // `commit_applied`); their outputs feed back in the same way.
 //!     // Loops until nothing is left; arms `wakeup` for `tick`.
 //!     fn drive(&mut self, now: Timestamp, out: Output) { /* .. */ }
 //! }

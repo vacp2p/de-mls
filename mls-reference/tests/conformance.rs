@@ -264,7 +264,6 @@ fn case_adds_stay_pending_and_welcome_joiners<S: Suite>() {
         built.hash,
         <S::Group as GroupOps>::commit_hash(&built.commit)
     );
-    assert_eq!(built.proposal_count, 2);
     let welcome = built.welcome.clone().expect("two adds produce a welcome");
 
     creator.merge(built.hash).expect("merge add commit");
@@ -633,7 +632,6 @@ fn case_update_lands<S: Suite>() {
             member: bob_id.clone()
         }]
     );
-    assert_eq!(built.proposal_count, 1);
 
     // The owner stages the commit that replaces its own leaf, and so does a
     // bystander; both read the same facts.
@@ -641,7 +639,6 @@ fn case_update_lands<S: Suite>() {
         let facts = nodes[i].stage(&built.commit).expect("stage the commit");
         assert_eq!(facts.sender, alice_id);
         assert_eq!(facts.actions, built.actions);
-        assert_eq!(facts.proposal_count, 1);
     }
     for node in nodes.iter_mut() {
         node.merge(built.hash).expect("merge the commit");

@@ -8,19 +8,20 @@ use crate::{
     engine::{
         EngineStore, InMemoryStore,
         config::EngineConfig,
+        consensus::wire::control_bytes,
         handle::{Engine, PendingMerge},
         store::keys,
         test_support::{group, id, joiner, member, view},
         types::{
-            ActionKind, CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId,
-            Phase, StagedFacts, Timestamp,
+            ActionKind, CandidateRejection, CommitHash, Event, MemberId, Phase, StagedFacts,
+            Timestamp,
         },
     },
     protos::de_mls::{
         engine::v1::{MetaState, ProposalsState},
         messages::v1::{
-            ConversationUpdateRequest, MemberInvite, RemoveMember,
-            conversation_update_request::Payload,
+            ControlMessage, ConversationUpdateRequest, MemberInvite, ProposalsDropped,
+            RemoveMember, control_message, conversation_update_request::Payload,
         },
     },
 };
@@ -71,7 +72,7 @@ fn a_candidate_while_syncing_is_refused_and_kept() {
     let mut publisher = InMemoryPublisher::default();
     let mut e = joiner();
     let before = e.scoring.score_for(&member("alice"));
-    let hash = CommitHash::of(b"commit");
+    let hash = CommitHash::from(&b"commit"[..]);
     let result = e.handle_candidate(
         at(0),
         hash,
@@ -79,14 +80,12 @@ fn a_candidate_while_syncing_is_refused_and_kept() {
             sender: id("alice"),
             epoch: e.epoch,
             actions: Vec::new(),
-            proposal_count: 0,
             self_removed: false,
         },
         &mut publisher,
     );
     assert!(matches!(result, Err(ConversationError::Refused(_))));
     assert!(e.round_candidate.is_none());
-    assert!(e.out.decisions.is_empty());
     let after = e.scoring.score_for(&member("alice"));
     assert_eq!(before, after, "a refused candidate scores nothing");
 }
@@ -98,25 +97,22 @@ fn a_stale_epoch_candidate_is_discarded_without_a_score() {
     let mut publisher = InMemoryPublisher::default();
     let mut e = engine(&["alice", "bob"]);
     let before = e.scoring.score_for(&member("bob")).unwrap();
-    let hash = CommitHash::of(b"commit");
+    let hash = CommitHash::from(&b"commit"[..]);
     let out = e
         .handle_candidate(
             at(0),
-            hash,
+            hash.clone(),
             StagedFacts {
                 sender: id("bob"),
                 epoch: e.epoch + 5,
                 actions: Vec::new(),
-                proposal_count: 0,
                 self_removed: false,
             },
             &mut publisher,
         )
         .unwrap();
-    assert_eq!(
-        out.decisions,
-        vec![Decision::Discard { hashes: vec![hash] }]
-    );
+    assert!(out.events.is_empty(), "{hash:?} is dropped without a word");
+    assert!(e.round_candidate.is_none());
     let after = e.scoring.score_for(&member("bob")).unwrap();
     assert_eq!(before, after, "staleness alone scores nothing");
 }
@@ -135,7 +131,7 @@ fn a_non_epoch_steward_candidate_is_rejected_and_scored() {
         .expect("at least one member isn't the epoch steward");
 
     let before = e.scoring.score_for(&member(impostor)).unwrap();
-    let hash = CommitHash::of(b"commit");
+    let hash = CommitHash::from(&b"commit"[..]);
     let out = e
         .handle_candidate(
             at(0),
@@ -144,13 +140,13 @@ fn a_non_epoch_steward_candidate_is_rejected_and_scored() {
                 sender: id(impostor),
                 epoch: 0,
                 actions: Vec::new(),
-                proposal_count: 0,
                 self_removed: false,
             },
             &mut publisher,
         )
         .unwrap();
-    assert!(out.decisions.is_empty(), "the candidate stays staged");
+    assert!(e.round_candidate.is_none(), "not this round's candidate");
+    assert_eq!(e.commit_to_apply(), None);
     let after = e.scoring.score_for(&member(impostor)).unwrap();
     assert!(after < before, "the impostor is penalised");
     assert!(out.events.contains(&Event::CandidateRejected {
@@ -173,10 +169,10 @@ fn the_epoch_stewards_candidate_merges_only_at_window_close() {
     let event = e.start_freezing().expect("enters freezing");
     e.on_freeze_entered(event).unwrap();
 
-    let hash = CommitHash::of(b"commit");
+    let hash = CommitHash::from(&b"commit"[..]);
     e.handle_candidate(
         at(0),
-        hash,
+        hash.clone(),
         StagedFacts {
             sender: id("alice"),
             epoch: 0,
@@ -184,7 +180,6 @@ fn the_epoch_stewards_candidate_merges_only_at_window_close() {
                 member: id("bob"),
                 key_package: b"kp:bob".to_vec(),
             }],
-            proposal_count: 1,
             self_removed: false,
         },
         &mut publisher,
@@ -194,13 +189,64 @@ fn the_epoch_stewards_candidate_merges_only_at_window_close() {
 
     e.start_selection();
     e.close_round().unwrap();
-    let out = e.finish(&mut publisher).unwrap();
-    assert!(
-        out.decisions
-            .iter()
-            .any(|d| matches!(d, Decision::Merge { hash: h } if *h == hash)),
+    e.finish(&mut publisher).unwrap();
+    assert_eq!(
+        e.commit_to_apply(),
+        Some(hash),
         "merges once the round closes"
     );
+}
+
+/// The pull side of the round: the build is readable until the own commit
+/// is reported, the merge is readable until it is applied.
+#[test]
+fn the_round_can_be_read_through_the_queries() {
+    let mut publisher = InMemoryPublisher::default();
+    let mut e = engine(&["alice"]);
+    assert_eq!(e.commit_to_build(), None);
+    assert_eq!(e.commit_to_apply(), None);
+
+    e.queues.insert_approved_proposal(7, invite("bob"));
+    e.begin(at(0));
+    let event = e.start_freezing().expect("enters freezing");
+    e.on_freeze_entered(event).unwrap();
+    e.finish(&mut publisher).unwrap();
+    let actions = vec![Action::Add {
+        member: id("bob"),
+        key_package: b"kp:bob".to_vec(),
+    }];
+    assert_eq!(e.commit_to_build(), Some(actions.as_slice()));
+    assert_eq!(e.commit_to_apply(), None);
+
+    let hash = CommitHash::from(&b"commit"[..]);
+    e.handle_candidate(
+        at(0),
+        hash.clone(),
+        StagedFacts {
+            sender: id("alice"),
+            epoch: 0,
+            actions,
+            self_removed: false,
+        },
+        &mut publisher,
+    )
+    .unwrap();
+    assert_eq!(e.commit_to_build(), None, "reported: nothing left to build");
+    assert_eq!(e.commit_to_apply(), None);
+
+    e.start_selection();
+    e.close_round().unwrap();
+    e.finish(&mut publisher).unwrap();
+    assert_eq!(e.commit_to_apply(), Some(hash.clone()));
+
+    e.commit_applied(
+        at(0),
+        hash,
+        &group("alice", 1, &["alice", "bob"]),
+        &mut publisher,
+    )
+    .unwrap();
+    assert_eq!(e.commit_to_apply(), None);
 }
 
 /// The steward's own commit, reported back through `handle_candidate` the
@@ -213,11 +259,11 @@ fn the_own_commit_reported_through_handle_candidate_merges() {
     e.begin(at(0));
     assert!(e.request_own_candidate().unwrap());
 
-    let hash = CommitHash::of(b"commit");
+    let hash = CommitHash::from(&b"commit"[..]);
     let out = e
         .handle_candidate(
             at(0),
-            hash,
+            hash.clone(),
             StagedFacts {
                 sender: id("alice"),
                 epoch: 0,
@@ -225,7 +271,6 @@ fn the_own_commit_reported_through_handle_candidate_merges() {
                     member: id("bob"),
                     key_package: b"kp:bob".to_vec(),
                 }],
-                proposal_count: 1,
                 self_removed: false,
             },
             &mut publisher,
@@ -243,11 +288,8 @@ fn the_own_commit_reported_through_handle_candidate_merges() {
             .as_ref()
             .is_some_and(|m| { m.facts.sender == id("alice") && m.facts.actions.len() == 1 })
     );
-    let out = e.finish(&mut publisher).unwrap();
-    assert!(matches!(
-        out.decisions.as_slice(),
-        [Decision::Merge { hash: h }] if *h == hash
-    ));
+    e.finish(&mut publisher).unwrap();
+    assert_eq!(e.commit_to_apply(), Some(hash.clone()));
 
     let out = e
         .commit_applied(
@@ -302,7 +344,7 @@ fn an_unexpected_merge_is_adopted_in_full() {
     e.queues.insert_approved_proposal(7, invite("dave"));
     e.queues.insert_approved_proposal(8, removal("carol"));
     e.queues.set_urgent_commit_target(member("carol"));
-    let hash = CommitHash::of(b"surprise");
+    let hash = CommitHash::from(&b"surprise"[..]);
     let out = e
         .commit_applied(
             at(0),
@@ -315,7 +357,7 @@ fn an_unexpected_merge_is_adopted_in_full() {
     assert_eq!(e.members(), vec![id("alice"), id("carol")]);
     assert!(
         out.events.contains(&Event::CommitAdopted {
-            hash: CommitHash::of(b"surprise")
+            hash: CommitHash::from(&b"surprise"[..])
         }),
         "the adoption is reported"
     );
@@ -367,11 +409,11 @@ fn an_adoption_while_syncing_keeps_the_phase_and_asks() {
     let mut e = joiner();
     assert_eq!(e.phase(), Phase::Syncing);
 
-    let hash = CommitHash::of(b"relayed");
+    let hash = CommitHash::from(&b"relayed"[..]);
     let out = e
         .commit_applied(
             at(1),
-            hash,
+            hash.clone(),
             &group("bob", e.epoch() + 1, &["alice", "bob", "carol"]),
             &mut publisher,
         )
@@ -398,23 +440,26 @@ fn a_commit_that_removes_us_asks_the_router_to_leave() {
     let mut publisher = InMemoryPublisher::default();
     let mut e = engine(&["alice", "bob"]);
     e.queues.insert_approved_proposal(7, removal("alice"));
-    let hash = CommitHash::of(b"commit");
+    let hash = CommitHash::from(&b"commit"[..]);
     e.pending_merge = Some(PendingMerge {
-        hash,
+        hash: hash.clone(),
         facts: StagedFacts {
             sender: id("bob"),
             epoch: 0,
             actions: vec![Action::Remove {
                 member: id("alice"),
             }],
-            proposal_count: 1,
             self_removed: true,
         },
     });
     let out = e
         .commit_applied(at(0), hash, &group("alice", 1, &["bob"]), &mut publisher)
         .unwrap();
-    assert_eq!(out.decisions, vec![Decision::Leave]);
+    assert!(out.events.iter().any(
+        |ev| matches!(ev, Event::MembersChanged { removed, .. } if removed == &vec![id("alice")])
+    ));
+    assert!(e.round_candidate.is_none());
+    assert_eq!(e.commit_to_apply(), None);
 }
 
 /// A silent epoch steward — no candidate submitted before the round
@@ -460,10 +505,10 @@ fn a_mismatching_candidate_is_discarded_and_commit_missing_follows() {
     let mut publisher = InMemoryPublisher::default();
     let mut e = engine(&["alice"]);
     e.queues.insert_approved_proposal(7, invite("bob"));
-    let hash = CommitHash::of(b"commit");
+    let hash = CommitHash::from(&b"commit"[..]);
     e.handle_candidate(
         at(0),
-        hash,
+        hash.clone(),
         StagedFacts {
             sender: id("alice"),
             epoch: 0,
@@ -471,7 +516,6 @@ fn a_mismatching_candidate_is_discarded_and_commit_missing_follows() {
                 member: id("carol"),
                 key_package: b"kp:carol".to_vec(),
             }],
-            proposal_count: 1,
             self_removed: false,
         },
         &mut publisher,
@@ -483,11 +527,10 @@ fn a_mismatching_candidate_is_discarded_and_commit_missing_follows() {
     e.close_round().unwrap();
     let out = e.finish(&mut publisher).unwrap();
 
-    assert!(
-        out.decisions
-            .iter()
-            .any(|d| matches!(d, Decision::Discard { hashes } if hashes == &vec![hash])),
-        "the mismatching commit is discarded"
+    assert_eq!(
+        e.commit_to_apply(),
+        None,
+        "the mismatching commit {hash:?} is not applied"
     );
     assert!(out.events.iter().any(|ev| matches!(
         ev,
@@ -520,18 +563,17 @@ fn a_failed_merge_closes_the_round_without_a_commit() {
         member: id("dave"),
         key_package: b"kp:dave".to_vec(),
     };
-    let hash = CommitHash::of(b"commit");
+    let hash = CommitHash::from(&b"commit"[..]);
 
     e.begin(at(0));
     e.start_freezing();
     e.handle_candidate(
         at(0),
-        hash,
+        hash.clone(),
         StagedFacts {
             sender: MemberId::from(es.as_slice()),
             epoch: 0,
             actions: vec![action],
-            proposal_count: 1,
             self_removed: false,
         },
         &mut publisher,
@@ -543,20 +585,12 @@ fn a_failed_merge_closes_the_round_without_a_commit() {
     assert!(e.pending_merge.is_some());
 
     let out = e
-        .decision_failed(
-            at(0),
-            DecisionFailure {
-                decision: Decision::Merge { hash },
-                reason: "no such staged commit".to_owned(),
-            },
-            &mut publisher,
-        )
+        .merge_failed(at(0), "no such staged commit".to_owned(), &mut publisher)
         .unwrap();
-    assert!(
-        !out.decisions
-            .iter()
-            .any(|d| matches!(d, Decision::Merge { .. })),
-        "no second merge is asked for"
+    assert_eq!(
+        e.commit_to_apply(),
+        None,
+        "no second merge of {hash:?} is asked for"
     );
     assert!(e.pending_merge.is_none());
     assert!(out.events.iter().any(|ev| matches!(
@@ -569,6 +603,212 @@ fn a_failed_merge_closes_the_round_without_a_commit() {
         1,
         "the approved batch stays queued for the next round"
     );
+}
+
+// ── a refused build ─────────────────────────────────────────────────
+
+fn add_of(joiner: &str) -> Action {
+    Action::Add {
+        member: id(joiner),
+        key_package: format!("kp:{joiner}").into_bytes(),
+    }
+}
+
+/// The notices a publisher holds, decoded.
+fn dropped_notices(publisher: &InMemoryPublisher) -> Vec<ProposalsDropped> {
+    publisher
+        .messages
+        .iter()
+        .filter_map(
+            |bytes| match ControlMessage::decode(bytes.as_slice()).unwrap().payload {
+                Some(control_message::Payload::ProposalsDropped(notice)) => Some(notice),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+/// A build the group refuses for one member drops that member's approved
+/// add, tells the group once, and asks for a new build over the rest.
+#[test]
+fn a_refused_key_package_is_dropped_and_the_rest_is_built_again() {
+    let mut publisher = InMemoryPublisher::default();
+    let mut e = engine(&["alice"]);
+    e.queues.insert_approved_proposal(7, invite("dave"));
+    e.queues.insert_approved_proposal(8, invite("erin"));
+    e.begin(at(0));
+    let event = e.start_freezing().expect("enters freezing");
+    e.on_freeze_entered(event).unwrap();
+    e.finish(&mut publisher).unwrap();
+    assert_eq!(
+        e.commit_to_build(),
+        Some(&[add_of("dave"), add_of("erin")][..])
+    );
+    publisher.drain();
+
+    let out = e
+        .build_failed(
+            at(0),
+            "key package expired".to_owned(),
+            vec![id("dave")],
+            &mut publisher,
+        )
+        .unwrap();
+
+    assert!(
+        out.events
+            .iter()
+            .any(|ev| matches!(ev, Event::Error { .. }))
+    );
+    assert!(out.events.contains(&Event::ActionsDropped {
+        actions: vec![add_of("dave")],
+    }));
+    assert_eq!(e.commit_to_build(), Some(&[add_of("erin")][..]));
+    assert_eq!(
+        dropped_notices(&publisher),
+        vec![ProposalsDropped {
+            member_ids: vec![member("dave")],
+        }]
+    );
+    assert_eq!(e.queues.approved_proposals_count(), 1);
+    assert_eq!(e.phase(), Phase::Freezing);
+}
+
+/// With nothing left to build the round returns to `Working` and nothing is
+/// reported missing.
+#[test]
+fn a_refused_only_action_returns_the_round_to_working() {
+    let mut publisher = InMemoryPublisher::default();
+    let mut e = engine(&["alice"]);
+    e.queues.insert_approved_proposal(7, invite("dave"));
+    e.begin(at(0));
+    let event = e.start_freezing().expect("enters freezing");
+    e.on_freeze_entered(event).unwrap();
+    e.finish(&mut publisher).unwrap();
+    publisher.drain();
+
+    let out = e
+        .build_failed(
+            at(0),
+            "key package expired".to_owned(),
+            vec![id("dave")],
+            &mut publisher,
+        )
+        .unwrap();
+
+    assert!(out.events.contains(&Event::ActionsDropped {
+        actions: vec![add_of("dave")],
+    }));
+    assert!(out.events.contains(&Event::PhaseChange(Phase::Working)));
+    assert!(
+        !out.events
+            .iter()
+            .any(|ev| matches!(ev, Event::CommitMissing { .. }))
+    );
+    assert_eq!(e.commit_to_build(), None);
+    assert_eq!(e.queues.approved_proposals_count(), 0);
+    assert_eq!(dropped_notices(&publisher).len(), 1);
+    assert_eq!(e.phase(), Phase::Working);
+}
+
+/// A failed build that names nobody is reported and nothing else changes.
+#[test]
+fn a_build_failure_naming_nobody_keeps_the_batch() {
+    let mut publisher = InMemoryPublisher::default();
+    let mut e = engine(&["alice"]);
+    e.queues.insert_approved_proposal(7, invite("dave"));
+    e.begin(at(0));
+    let event = e.start_freezing().expect("enters freezing");
+    e.on_freeze_entered(event).unwrap();
+    e.finish(&mut publisher).unwrap();
+    publisher.drain();
+
+    let out = e
+        .build_failed(
+            at(0),
+            "key package expired".to_owned(),
+            Vec::new(),
+            &mut publisher,
+        )
+        .unwrap();
+
+    assert!(matches!(out.events.as_slice(), [Event::Error { .. }]));
+    assert_eq!(e.commit_to_build(), None);
+    assert_eq!(e.queues.approved_proposals_count(), 1);
+    assert!(publisher.messages.is_empty());
+}
+
+/// A member that is not the epoch steward.
+fn follower_engine() -> Engine<InMemoryStore> {
+    let e = engine(&["alice", "bob"]);
+    if e.is_epoch_steward() {
+        return engine(&["bob", "alice"]);
+    }
+    e
+}
+
+fn dropped_notice_bytes(joiner: &str) -> Vec<u8> {
+    control_bytes(control_message::Payload::ProposalsDropped(
+        ProposalsDropped {
+            member_ids: vec![member(joiner)],
+        },
+    ))
+}
+
+/// The epoch steward's notice drops the same approved add on a member and
+/// publishes nothing.
+#[test]
+fn a_dropped_notice_from_the_epoch_steward_is_followed() {
+    let mut publisher = InMemoryPublisher::default();
+    let mut e = follower_engine();
+    e.queues.insert_approved_proposal(7, invite("dave"));
+    let steward = MemberId::from(e.expected_steward().unwrap().as_slice());
+
+    let out = e
+        .handle_control(
+            at(0),
+            steward,
+            0,
+            &dropped_notice_bytes("dave"),
+            &mut publisher,
+        )
+        .unwrap();
+
+    assert_eq!(
+        out.events,
+        vec![Event::ActionsDropped {
+            actions: vec![add_of("dave")],
+        }]
+    );
+    assert_eq!(e.queues.approved_proposals_count(), 0);
+    assert!(publisher.messages.is_empty());
+}
+
+/// A notice from a member that is not the epoch steward changes nothing.
+#[test]
+fn a_dropped_notice_from_anyone_else_is_ignored() {
+    let mut publisher = InMemoryPublisher::default();
+    let mut e = follower_engine();
+    e.queues.insert_approved_proposal(7, invite("dave"));
+    let steward = e.expected_steward().unwrap();
+    let other = ["alice", "bob"]
+        .into_iter()
+        .find(|m| member(m) != steward)
+        .unwrap();
+
+    let out = e
+        .handle_control(
+            at(0),
+            id(other),
+            0,
+            &dropped_notice_bytes("dave"),
+            &mut publisher,
+        )
+        .unwrap();
+
+    assert!(out.events.is_empty());
+    assert_eq!(e.queues.approved_proposals_count(), 1);
+    assert!(publisher.messages.is_empty());
 }
 
 // ── leaf updates ────────────────────────────────────────────────────
@@ -600,11 +840,10 @@ fn an_update_only_batch_builds_an_update_action() {
     e.begin(at(0));
 
     assert!(e.request_own_candidate().unwrap());
+    e.finish(&mut publisher).unwrap();
     assert_eq!(
-        e.finish(&mut publisher).unwrap().decisions,
-        vec![Decision::BuildCommit {
-            actions: vec![Action::Update { member: id(peer) }],
-        }]
+        e.commit_to_build(),
+        Some(&[Action::Update { member: id(peer) }][..])
     );
 }
 
@@ -623,19 +862,14 @@ fn an_own_update_only_batch_builds_with_no_actions() {
     e.begin(at(0));
 
     assert!(e.request_own_candidate().unwrap());
-    assert_eq!(
-        e.finish(&mut publisher).unwrap().decisions,
-        vec![Decision::BuildCommit {
-            actions: Vec::new(),
-        }]
-    );
+    e.finish(&mut publisher).unwrap();
+    assert_eq!(e.commit_to_build(), Some(&[][..]));
 }
 
 fn facts(sender: &str, actions: Vec<Action>) -> StagedFacts {
     StagedFacts {
         sender: id(sender),
         epoch: 0,
-        proposal_count: actions.len() as u32,
         actions,
         self_removed: false,
     }
@@ -651,9 +885,9 @@ fn a_merge_reports_the_carried_updates_and_drops_them() {
     e.queues.insert_approved_proposal(7, update("bob"));
     e.queues.insert_approved_proposal(8, update("carol"));
     e.queues.insert_approved_proposal(9, update("alice"));
-    let hash = CommitHash::of(b"commit");
+    let hash = CommitHash::from(&b"commit"[..]);
     e.pending_merge = Some(PendingMerge {
-        hash,
+        hash: hash.clone(),
         facts: facts(
             "alice",
             vec![
@@ -696,9 +930,9 @@ fn a_merge_reports_the_carried_updates_and_drops_them() {
     e.queues.insert_approved_proposal(7, update("bob"));
     e.queues.insert_approved_proposal(8, removal("carol"));
     e.queues.set_urgent_commit_target(member("carol"));
-    let hash = CommitHash::of(b"urgent");
+    let hash = CommitHash::from(&b"urgent"[..]);
     e.pending_merge = Some(PendingMerge {
-        hash,
+        hash: hash.clone(),
         facts: facts(
             "alice",
             vec![Action::Remove {

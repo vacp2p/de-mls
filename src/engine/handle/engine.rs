@@ -27,7 +27,7 @@ use crate::{
         phase_timer::PhaseTimer,
         queues::EngineQueues,
         store::Dirty,
-        types::{CommitHash, Decision, Event, MemberId, Output, Phase, StagedFacts, Timestamp},
+        types::{Action, CommitHash, Event, MemberId, Output, Phase, StagedFacts, Timestamp},
     },
     peer_scoring::PeerScoringService,
     traits::{GroupView, Publish},
@@ -113,6 +113,9 @@ pub struct Engine<St: EngineStore> {
     /// `finish` after the store writes.
     pub(crate) pending_control: Vec<Vec<u8>>,
     pub(crate) pending_merge: Option<PendingMerge>,
+    /// The batch this member, as epoch steward, was asked to build and has
+    /// not reported back yet.
+    pub(crate) pending_build: Option<Vec<Action>>,
     /// The one candidate collected for the epoch's commit round — the epoch
     /// steward's, once [`Engine::handle_candidate`] accepts it. Ephemeral: a
     /// restart rejoins the next round rather than resuming this one.
@@ -174,6 +177,7 @@ impl<St: EngineStore> Engine<St> {
             out: Output::default(),
             pending_control: Vec::new(),
             pending_merge: None,
+            pending_build: None,
             round_candidate: None,
             replay_until: None,
         })
@@ -232,6 +236,22 @@ impl<St: EngineStore> Engine<St> {
         self.steward_list
             .epoch_steward(self.epoch, &eligible)
             .is_some_and(|s| s == self.own.as_slice())
+    }
+
+    /// The actions this member, as epoch steward, is asked to carry in the
+    /// commit it builds now; `None` when no build is wanted. Kept until the
+    /// built commit is reported through [`Engine::handle_candidate`], a
+    /// refused build through [`Engine::build_failed`], or the round closes.
+    pub fn commit_to_build(&self) -> Option<&[Action]> {
+        self.pending_build.as_deref()
+    }
+
+    /// The commit to merge at this epoch, once the round decided one; every
+    /// other commit held for the epoch is dropped with it. `None` while no
+    /// decision is made. Kept until [`Engine::commit_applied`] or
+    /// [`Engine::merge_failed`] reports it.
+    pub fn commit_to_apply(&self) -> Option<CommitHash> {
+        self.pending_merge.as_ref().map(|p| p.hash.clone())
     }
 
     /// Whether a steward list covers the current epoch: every phase but
@@ -325,11 +345,6 @@ impl<St: EngineStore> Engine<St> {
     /// Queue a control message for `finish` to publish.
     pub(crate) fn send_control(&mut self, bytes: Vec<u8>) {
         self.pending_control.push(bytes);
-    }
-
-    /// Ask the router to do something against the group.
-    pub(crate) fn decide(&mut self, decision: Decision) {
-        self.out.decisions.push(decision);
     }
 
     /// Report a failure on a path the router never called.

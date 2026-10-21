@@ -8,9 +8,9 @@ mod common;
 
 use std::time::Duration;
 
-use common::fake_router::Bed;
+use common::fake_router::{Bed, Step};
 use common::fast_config;
-use de_mls::engine::{Action, CandidateRejection, Decision, Event, Verdict};
+use de_mls::engine::{Action, CandidateRejection, Event, Verdict};
 
 #[test]
 fn silent_epoch_steward_is_reported_then_skipped_by_a_recovery_vote() {
@@ -98,13 +98,6 @@ fn foreign_commit_is_rejected_and_scored() {
             continue;
         }
         let since = before.iter().find(|&&(n, _)| n == node).unwrap().1;
-        assert!(
-            !bed.router(node)
-                .decisions
-                .iter()
-                .any(|d| matches!(d, Decision::Discard { .. })),
-            "node {node} did not discard the foreign commit"
-        );
         assert_eq!(
             bed.router(node).mls.staged_count(),
             1,
@@ -215,7 +208,7 @@ fn a_substitute_commit_that_beats_the_verdict_is_reported_again_after_the_skip()
     // and r reach it late, so s's commit lands at q before the verdict does.
     let hold_start = bed.now;
     let q_events_before = bed.router(q).events.len();
-    let q_decisions_before = bed.router(q).decisions.len();
+    let q_steps_before = bed.router(q).steps.len();
     bed.hold_control(q, &[s, r], hold_start + Duration::from_secs(2));
 
     let now = bed.now;
@@ -257,16 +250,15 @@ fn a_substitute_commit_that_beats_the_verdict_is_reported_again_after_the_skip()
             .any(|e| matches!(e, Event::StewardSkipped { steward, .. } if *steward == es_id))
     );
 
-    assert!(
-        !bed.router(q).decisions[q_decisions_before..]
-            .iter()
-            .any(|d| matches!(d, Decision::Discard { .. })),
-        "q kept s's early candidate staged"
+    assert_eq!(
+        bed.router(q).rejected_commits(),
+        0,
+        "q reported s's early candidate again"
     );
     assert!(
-        bed.router(q).decisions[q_decisions_before..]
+        bed.router(q).steps[q_steps_before..]
             .iter()
-            .any(|d| matches!(d, Decision::Merge { .. })),
+            .any(|d| matches!(d, Step::Merge { .. })),
         "q merged a commit after the rejection"
     );
 
@@ -358,13 +350,13 @@ fn a_skipped_steward_that_comes_back_follows_the_substitute() {
     );
 
     let es_events_mark = bed.router(es).events.len();
-    let es_decisions_mark = bed.router(es).decisions.len();
+    let es_steps_mark = bed.router(es).steps.len();
 
     bed.come_back(es);
 
     // The replay runs the steward's stale round, whose build the router
     // drops; the live check starts after it.
-    let es_decisions_after_replay = bed.router(es).decisions.len();
+    let es_steps_after_replay = bed.router(es).steps.len();
 
     bed.process_until("the steward converges with dave seated", |b| {
         b.converged() && b.is_live(dave)
@@ -378,15 +370,15 @@ fn a_skipped_steward_that_comes_back_follows_the_substitute() {
         "the steward replays its own skip"
     );
     assert!(
-        bed.router(es).decisions[es_decisions_mark..]
+        bed.router(es).steps[es_steps_mark..]
             .iter()
-            .any(|d| matches!(d, Decision::Merge { .. })),
+            .any(|d| matches!(d, Step::Merge { .. })),
         "the steward merges the substitute's commit through the ordinary path"
     );
     assert!(
-        !bed.router(es).decisions[es_decisions_after_replay..]
+        !bed.router(es).steps[es_steps_after_replay..]
             .iter()
-            .any(|d| matches!(d, Decision::BuildCommit { .. })),
+            .any(|d| matches!(d, Step::Build { .. })),
         "the steward builds nothing once it is back on the live path"
     );
     assert!(

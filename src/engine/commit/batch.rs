@@ -9,10 +9,9 @@ use crate::{
     engine::{
         EngineStore,
         handle::Engine,
-        proposal_kind::ProposalKind,
-        types::{Action, Decision, MemberId, Phase},
+        proposal_kind::{Change, ProposalKind, change_of},
+        types::{Action, Phase},
     },
-    protos::de_mls::messages::v1::conversation_update_request::Payload,
 };
 
 impl<St: EngineStore> Engine<St> {
@@ -68,7 +67,7 @@ impl<St: EngineStore> Engine<St> {
             proposals = actions.len(),
             "commit candidate requested"
         );
-        self.decide(Decision::BuildCommit { actions });
+        self.pending_build = Some(actions);
         Ok(true)
     }
 
@@ -81,33 +80,15 @@ impl<St: EngineStore> Engine<St> {
         let approved = self.queues.approved_proposals();
         let mut actions = Vec::with_capacity(approved.len());
         for (_id, proposal) in approved.iter() {
-            match proposal.payload.as_ref() {
-                Some(Payload::MemberInvite(invite)) => {
-                    if urgent.is_some() {
-                        continue;
-                    }
-                    actions.push(Action::Add {
-                        member: MemberId::from(invite.member_id.as_slice()),
-                        key_package: invite.key_package_bytes.clone(),
-                    });
-                }
-                Some(Payload::RemoveMember(remove)) => {
-                    if urgent.is_some_and(|target| remove.member_id != target) {
-                        continue;
-                    }
-                    actions.push(Action::Remove {
-                        member: MemberId::from(remove.member_id.as_slice()),
-                    });
-                }
-                Some(Payload::LeafUpdate(update)) => {
-                    if urgent.is_some() || update.member_id == self.own {
-                        continue;
-                    }
-                    actions.push(Action::Update {
-                        member: MemberId::from(update.member_id.as_slice()),
-                    });
-                }
-                _ => return Err(ConversationError::InvalidConversationUpdateRequest),
+            let change =
+                change_of(proposal).ok_or(ConversationError::InvalidConversationUpdateRequest)?;
+            let skip = match change {
+                Change::Add { .. } => urgent.is_some(),
+                Change::Remove { member } => urgent.is_some_and(|target| member != target),
+                Change::Update { member } => urgent.is_some() || member == self.own,
+            };
+            if !skip {
+                actions.push(change.to_action());
             }
         }
         Ok(actions)

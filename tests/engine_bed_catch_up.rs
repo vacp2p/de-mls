@@ -8,10 +8,11 @@ mod common;
 
 use std::time::Duration;
 
-use common::fake_router::Bed;
+use common::fake_mls::commit_hash;
+use common::fake_router::{Bed, Step};
 use common::fast_config;
 use common::net::{Frame, Welcome};
-use de_mls::engine::{Action, CommitHash, Decision, Event, Phase, Verdict};
+use de_mls::engine::{Action, Event, Phase, Verdict};
 
 #[test]
 fn a_member_offline_through_a_commit_catches_up_by_replay() {
@@ -74,9 +75,9 @@ fn a_member_offline_through_a_commit_catches_up_by_replay() {
     );
     assert!(
         bed.router(n)
-            .decisions
+            .steps
             .iter()
-            .any(|d| matches!(d, Decision::Merge { .. })),
+            .any(|d| matches!(d, Step::Merge { .. })),
         "n merges the missed commit through the ordinary decision"
     );
     let chats: Vec<&[u8]> = bed
@@ -202,9 +203,9 @@ fn a_member_that_missed_only_the_commit_adopts_it_and_follows_the_next() {
 
     let merges_before = bed
         .router(n)
-        .decisions
+        .steps
         .iter()
-        .filter(|d| matches!(d, Decision::Merge { .. }))
+        .filter(|d| matches!(d, Step::Merge { .. }))
         .count();
 
     let frank = bed.add_pending("frank");
@@ -224,9 +225,9 @@ fn a_member_that_missed_only_the_commit_adopts_it_and_follows_the_next() {
     );
     let merges_after = bed
         .router(n)
-        .decisions
+        .steps
         .iter()
-        .filter(|d| matches!(d, Decision::Merge { .. }))
+        .filter(|d| matches!(d, Step::Merge { .. }))
         .count();
     assert_eq!(
         merges_after,
@@ -373,7 +374,7 @@ fn two_members_survivor_commits_on_its_own_authority() {
 
     // The build bypassed the router, so its welcome is delivered by hand.
     if let Some(draft) = welcome_draft {
-        let hash = CommitHash::of(&bytes);
+        let hash = commit_hash(&bytes);
         bed.net.broadcast(
             now,
             survivor,

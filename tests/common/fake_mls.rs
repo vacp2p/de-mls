@@ -10,6 +10,11 @@ use de_mls::{
 };
 use sha2::{Digest, Sha256};
 
+/// The name the fake bed gives a commit: SHA-256 of its bytes.
+pub fn commit_hash(bytes: &[u8]) -> CommitHash {
+    CommitHash::from(Sha256::digest(bytes).to_vec())
+}
+
 /// What a sealed frame is about, so the router can branch before touching
 /// the engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,10 +63,17 @@ pub struct WelcomeDraft {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Built {
     pub hash: CommitHash,
-    pub proposal_count: u32,
     pub actions: Vec<Action>,
     pub commit: Vec<u8>,
     pub welcome: Option<WelcomeDraft>,
+}
+
+/// Why `build_commit` refused, and which members' key package or update the
+/// group would not take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildRefused {
+    pub reason: String,
+    pub rejected: Vec<MemberId>,
 }
 
 /// Past-epoch window the contract pins (`max_past_epochs`).
@@ -199,6 +211,8 @@ pub struct FakeMls {
     held_updates: HashMap<MemberId, Vec<u8>>,
     /// Merged leaf updates per member.
     leaf_versions: HashMap<MemberId, u64>,
+    /// Key packages the group refuses at the build, as an expired one is.
+    expired_key_packages: BTreeSet<Vec<u8>>,
 }
 
 impl FakeMls {
@@ -212,10 +226,17 @@ impl FakeMls {
         format!("kp:{name}").into_bytes()
     }
 
-    /// Parse only, no validation: the joiner's future member id.
+    /// A later key package of the same member: `kp:<name>#<n>`.
+    pub fn key_package_v(name: &str, n: u32) -> Vec<u8> {
+        format!("kp:{name}#{n}").into_bytes()
+    }
+
+    /// Parse only, no validation: the joiner's future member id. A version
+    /// suffix (`#<n>`) is not part of the identity.
     pub fn key_package_identity(bytes: &[u8]) -> Option<MemberId> {
         let text = std::str::from_utf8(bytes).ok()?;
         let name = text.strip_prefix("kp:")?;
+        let name = name.split('#').next()?;
         Some(Self::member_id(name))
     }
 
@@ -236,6 +257,7 @@ impl FakeMls {
             own_update: None,
             held_updates: HashMap::new(),
             leaf_versions: HashMap::new(),
+            expired_key_packages: BTreeSet::new(),
         }
     }
 
@@ -256,6 +278,7 @@ impl FakeMls {
             own_update: None,
             held_updates: HashMap::new(),
             leaf_versions: HashMap::new(),
+            expired_key_packages: BTreeSet::new(),
         }
     }
 
@@ -357,16 +380,42 @@ impl FakeMls {
         })
     }
 
+    /// Make the group refuse `key_package` at the build, as an expired one
+    /// is.
+    pub fn expire_key_package(&mut self, key_package: &[u8]) {
+        self.expired_key_packages.insert(key_package.to_vec());
+    }
+
     /// Build a commit for the current epoch and keep it pending. Removes of
-    /// non-members are skipped, as the contract requires; an update whose
-    /// proposal is not held fails the build. The commit carries this member's
-    /// own held update itself.
-    pub fn build_commit(&mut self, actions: &[Action]) -> Result<Built, String> {
-        if let Some(missing) = actions.iter().find(|a| match a {
-            Action::Update { member } => !self.update_held(member),
-            _ => false,
-        }) {
-            return Err(format!("update of {:?} is not held", missing.member()));
+    /// non-members are skipped, as the contract requires; an add whose key
+    /// package expired, or an update whose proposal is not held, fails the
+    /// build. The contract requires the build to name the members whose key
+    /// package or update it refused, every one of them, not the first.
+    /// The commit carries this member's own held update itself.
+    pub fn build_commit(&mut self, actions: &[Action]) -> Result<Built, BuildRefused> {
+        let mut reasons = Vec::new();
+        let mut rejected = Vec::new();
+        for action in actions {
+            match action {
+                Action::Add {
+                    member,
+                    key_package,
+                } if self.expired_key_packages.contains(key_package) => {
+                    reasons.push(format!("key package of {member:?} expired"));
+                    rejected.push(member.clone());
+                }
+                Action::Update { member } if !self.update_held(member) => {
+                    reasons.push(format!("update of {member:?} is not held"));
+                    rejected.push(member.clone());
+                }
+                _ => {}
+            }
+        }
+        if !rejected.is_empty() {
+            return Err(BuildRefused {
+                reason: reasons.join("; "),
+                rejected,
+            });
         }
         let actions: Vec<Action> = actions
             .iter()
@@ -386,7 +435,7 @@ impl FakeMls {
             own_update: self.own_update.is_some(),
         };
         let bytes = commit.encode();
-        let hash = CommitHash::of(&bytes);
+        let hash = commit_hash(&bytes);
         let joiners: Vec<MemberId> = commit
             .actions
             .iter()
@@ -397,14 +446,12 @@ impl FakeMls {
             .collect();
         let welcome = (!joiners.is_empty()).then(|| WelcomeDraft {
             joiners,
-            snapshot: self.snapshot_after(&commit, hash),
+            snapshot: self.snapshot_after(&commit, hash.clone()),
         });
-        let proposal_count = commit.actions.len() as u32;
         let actions = commit.actions.clone();
-        self.pending = Some((hash, commit));
+        self.pending = Some((hash.clone(), commit));
         Ok(Built {
             hash,
-            proposal_count,
             actions,
             commit: bytes,
             welcome,
@@ -412,14 +459,14 @@ impl FakeMls {
     }
 
     pub fn pending_hash(&self) -> Option<CommitHash> {
-        self.pending.as_ref().map(|(h, _)| *h)
+        self.pending.as_ref().map(|(h, _)| h.clone())
     }
 
     /// Stage a remote commit without applying it. Several may be held; the
     /// same bytes stage once.
     pub fn stage(&mut self, bytes: &[u8]) -> Result<StagedFacts, String> {
         let commit = Commit::decode(bytes).ok_or("malformed commit")?;
-        let hash = CommitHash::of(bytes);
+        let hash = commit_hash(bytes);
         if self.consumed.contains(&hash) {
             return Err("commit bytes already used".into());
         }
@@ -435,7 +482,7 @@ impl FakeMls {
         if !self.members.contains(&commit.sender) {
             return Err("sender is not a member".into());
         }
-        self.consumed.insert(hash);
+        self.consumed.insert(hash.clone());
         let actions_held = commit.actions.iter().all(|a| match a {
             Action::Update { member } => self.update_held(member),
             _ => true,
@@ -447,7 +494,6 @@ impl FakeMls {
             sender: commit.sender.clone(),
             epoch: commit.epoch,
             actions: commit.actions.clone(),
-            proposal_count: commit.actions.len() as u32,
             self_removed: commit
                 .actions
                 .iter()

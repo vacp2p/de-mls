@@ -4,9 +4,10 @@
 
 mod common;
 
-use common::fake_router::Bed;
+use common::fake_mls::FakeMls;
+use common::fake_router::{Bed, Step};
 use common::fast_config;
-use de_mls::engine::{Decision, Event, Phase, Verdict};
+use de_mls::engine::{Action, Event, Phase, Verdict};
 use de_mls::steward_list::StewardListConfig;
 
 #[test]
@@ -28,10 +29,7 @@ fn removal_is_voted_and_the_removed_member_leaves() {
     assert!(bed.agree_among(&[0, carol]));
     assert_eq!(bed.router(0).mls.members().len(), 2);
     assert_eq!(bed.router(carol).mls.members().len(), 2);
-    assert!(matches!(
-        bed.router(bob).decisions.last(),
-        Some(Decision::Leave)
-    ));
+    assert!(matches!(bed.router(bob).steps.last(), Some(Step::Leave)));
 }
 
 #[test]
@@ -52,10 +50,7 @@ fn self_leave_lands_in_the_next_commit() {
     assert!(bed.agree_among(&[0, carol]));
     assert_eq!(bed.router(0).mls.members().len(), 2);
     assert_eq!(bed.router(carol).mls.members().len(), 2);
-    assert!(matches!(
-        bed.router(bob).decisions.last(),
-        Some(Decision::Leave)
-    ));
+    assert!(matches!(bed.router(bob).steps.last(), Some(Step::Leave)));
 }
 
 // The only steward on a one-member list is on its way out. Nobody eligible
@@ -92,8 +87,8 @@ fn sole_steward_removal_is_committed_by_a_fresh_steward(remove: impl FnOnce(&mut
     });
 
     assert!(matches!(
-        bed.router(steward).decisions.last(),
-        Some(Decision::Leave)
+        bed.router(steward).steps.last(),
+        Some(Step::Leave)
     ));
     for (&n, &mark) in others.iter().zip(&marks) {
         assert!(
@@ -182,6 +177,73 @@ fn rejected_invite_never_lands() {
     assert!(!bed.is_live(dave));
     assert_eq!(bed.router(0).mls.epoch(), epoch_before);
     assert!(bed.agree_among(&[0, bob, carol]));
+}
+
+// A key package expires between the vote and the build: the epoch steward's
+// group refuses it, the steward drops the approved add and tells the group,
+// every node drops the same add, and no epoch moves. The sponsor files the
+// joiner again with a fresh key package and the second vote seats it.
+#[test]
+fn an_expired_key_package_is_withdrawn_and_the_joiner_is_invited_again() {
+    let mut bed = Bed::new("conv", "alice", fast_config());
+    bed.seat(0, "bob");
+    bed.seat(0, "carol");
+    bed.process_until("every node is synced", |b| {
+        b.live_nodes()
+            .iter()
+            .all(|&n| b.router(n).engine.is_synced())
+    });
+    let live = bed.live_nodes();
+
+    let dave = bed.add_pending("dave");
+    let kp_dave = bed.key_package_of(dave);
+    let dave_id = bed.nodes[dave].own.clone();
+    let marks: Vec<usize> = live.iter().map(|&n| bed.router(n).events.len()).collect();
+    let now = bed.now;
+    bed.router_mut(0)
+        .announce(now, dave_id.clone(), kp_dave.clone());
+
+    bed.process_until("every node approved dave's add", |b| {
+        live.iter().zip(&marks).all(|(&n, &mark)| {
+            b.router(n).events[mark..].iter().any(|e| {
+                matches!(
+                    e,
+                    Event::ConsensusReached {
+                        verdict: Verdict::Approved,
+                        ..
+                    }
+                )
+            })
+        })
+    });
+    let steward = bed.epoch_steward();
+    bed.router_mut(steward).mls.expire_key_package(&kp_dave);
+    let epoch_before = bed.router(0).mls.epoch();
+
+    let refused = Action::Add {
+        member: dave_id.clone(),
+        key_package: kp_dave,
+    };
+    bed.process_until("every node dropped dave's add", |b| {
+        live.iter().zip(&marks).all(|(&n, &mark)| {
+            b.router(n).events[mark..].iter().any(|e| {
+                matches!(e, Event::ActionsDropped { actions } if actions == &vec![refused.clone()])
+            })
+        })
+    });
+    assert!(!bed.is_live(dave));
+    assert_eq!(bed.router(0).mls.epoch(), epoch_before);
+    assert!(bed.agree_among(&live));
+
+    let now = bed.now;
+    bed.router_mut(0)
+        .announce(now, dave_id, FakeMls::key_package_v("dave", 2));
+    bed.process_until("dave seated", |b| {
+        b.is_live(dave) && b.epochs_agree() && b.router(dave).engine.is_synced()
+    });
+
+    assert!(bed.converged() && bed.membership_agrees());
+    assert_eq!(bed.router(0).mls.members().len(), 4);
 }
 
 // The steward list runs out at an epoch boundary while members keep

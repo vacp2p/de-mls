@@ -7,7 +7,7 @@
 //! `EngineQueues::partial_freeze_blocks`.
 
 use crate::{
-    engine::types::ActionKind,
+    engine::types::{Action, ActionKind, MemberId},
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, ViolationType, conversation_update_request::Payload,
     },
@@ -55,15 +55,76 @@ impl ProposalKind {
     }
 }
 
-/// The change `req` makes and the member it keys on: an invite adds the
-/// joiner's id as the proposer stamped it, a removal targets its member, a
-/// leaf update belongs to its owner. `None` for governance payloads, which
-/// never reach a commit.
-pub(crate) fn change_of(req: &ConversationUpdateRequest) -> Option<(ActionKind, &[u8])> {
+/// The commit action an approved request stands for, borrowed from it:
+/// an invite adds its joiner with the key package it carries, a removal
+/// removes its member, a leaf update replaces its owner's leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Change<'a> {
+    Add {
+        member: &'a [u8],
+        key_package: &'a [u8],
+    },
+    Remove {
+        member: &'a [u8],
+    },
+    Update {
+        member: &'a [u8],
+    },
+}
+
+impl Change<'_> {
+    /// The kind of change.
+    pub(crate) fn kind(&self) -> ActionKind {
+        match self {
+            Self::Add { .. } => ActionKind::Add,
+            Self::Remove { .. } => ActionKind::Remove,
+            Self::Update { .. } => ActionKind::Update,
+        }
+    }
+
+    /// The member the change is about.
+    pub(crate) fn member(&self) -> &[u8] {
+        match self {
+            Self::Add { member, .. } | Self::Remove { member } | Self::Update { member } => member,
+        }
+    }
+
+    /// The owned action, for the build batch and the events; the one place
+    /// a key package is copied.
+    pub(crate) fn to_action(self) -> Action {
+        match self {
+            Self::Add {
+                member,
+                key_package,
+            } => Action::Add {
+                member: MemberId::from(member),
+                key_package: key_package.to_vec(),
+            },
+            Self::Remove { member } => Action::Remove {
+                member: MemberId::from(member),
+            },
+            Self::Update { member } => Action::Update {
+                member: MemberId::from(member),
+            },
+        }
+    }
+}
+
+/// The change `req` stands for; `None` for governance payloads, which never
+/// reach a commit. An invite keys on the joiner's id as the proposer stamped
+/// it.
+pub(crate) fn change_of(req: &ConversationUpdateRequest) -> Option<Change<'_>> {
     match req.payload.as_ref()? {
-        Payload::MemberInvite(m) => Some((ActionKind::Add, &m.member_id)),
-        Payload::RemoveMember(m) => Some((ActionKind::Remove, &m.member_id)),
-        Payload::LeafUpdate(m) => Some((ActionKind::Update, &m.member_id)),
+        Payload::MemberInvite(m) => Some(Change::Add {
+            member: &m.member_id,
+            key_package: &m.key_package_bytes,
+        }),
+        Payload::RemoveMember(m) => Some(Change::Remove {
+            member: &m.member_id,
+        }),
+        Payload::LeafUpdate(m) => Some(Change::Update {
+            member: &m.member_id,
+        }),
         _ => None,
     }
 }
@@ -86,9 +147,8 @@ pub(crate) fn change_in_effect(members: &[Vec<u8>], kind: ActionKind, member: &[
 /// `None` for other payloads, or an invite with no id.
 pub(crate) fn target_member_id_of(request: &ConversationUpdateRequest) -> Option<Vec<u8>> {
     match change_of(request)? {
-        (ActionKind::Add, []) => None,
-        (ActionKind::Add | ActionKind::Remove, id) => Some(id.to_vec()),
-        (ActionKind::Update, _) => None,
+        Change::Add { member: [], .. } | Change::Update { .. } => None,
+        Change::Add { member, .. } | Change::Remove { member } => Some(member.to_vec()),
     }
 }
 
@@ -166,30 +226,51 @@ mod tests {
     }
 
     #[test]
-    fn change_of_names_the_kind_and_member() {
+    fn change_of_names_the_action_of_a_membership_request() {
         let id = vec![7u8];
-        let invite = MemberInvite {
+        let invite = req(Payload::MemberInvite(MemberInvite {
+            member_id: id.clone(),
+            key_package_bytes: vec![1, 2],
+        }));
+        let change = change_of(&invite).unwrap();
+        assert_eq!(
+            change,
+            Change::Add {
+                member: &id,
+                key_package: &[1, 2],
+            }
+        );
+        assert_eq!(change.kind(), ActionKind::Add);
+        assert_eq!(change.member(), id.as_slice());
+        assert_eq!(
+            change.to_action(),
+            Action::Add {
+                member: MemberId::from(id.as_slice()),
+                key_package: vec![1, 2],
+            }
+        );
+        let remove = req(Payload::RemoveMember(RemoveMember {
+            member_id: id.clone(),
+        }));
+        let change = change_of(&remove).unwrap();
+        assert_eq!(change, Change::Remove { member: &id });
+        assert_eq!(
+            change.to_action(),
+            Action::Remove {
+                member: MemberId::from(id.as_slice()),
+            }
+        );
+        let update = req(Payload::LeafUpdate(LeafUpdate {
             member_id: id.clone(),
             ..Default::default()
-        };
-        let remove = RemoveMember {
-            member_id: id.clone(),
-        };
-        let update = LeafUpdate {
-            member_id: id.clone(),
-            ..Default::default()
-        };
+        }));
+        let change = change_of(&update).unwrap();
+        assert_eq!(change, Change::Update { member: &id });
         assert_eq!(
-            change_of(&req(Payload::MemberInvite(invite))),
-            Some((ActionKind::Add, id.as_slice()))
-        );
-        assert_eq!(
-            change_of(&req(Payload::RemoveMember(remove))),
-            Some((ActionKind::Remove, id.as_slice()))
-        );
-        assert_eq!(
-            change_of(&req(Payload::LeafUpdate(update))),
-            Some((ActionKind::Update, id.as_slice()))
+            change.to_action(),
+            Action::Update {
+                member: MemberId::from(id.as_slice()),
+            }
         );
         let election = req(Payload::StewardElection(StewardElectionProposal::default()));
         assert_eq!(change_of(&election), None);

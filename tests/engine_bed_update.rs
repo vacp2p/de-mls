@@ -7,10 +7,10 @@ mod common;
 use std::time::Duration;
 
 use common::fake_mls::Kind;
-use common::fake_router::Bed;
+use common::fake_router::{Bed, Step};
 use common::fast_config;
 use common::net::Frame;
-use de_mls::engine::{Action, Decision, Event, MemberId, Phase};
+use de_mls::engine::{Action, Event, MemberId, Phase};
 use de_mls::protos::de_mls::messages::v1::{
     ControlMessage, ConversationUpdateRequest, control_message,
 };
@@ -38,7 +38,7 @@ fn marks(bed: &Bed) -> Vec<usize> {
     (0..3).map(|n| bed.router(n).events.len()).collect()
 }
 
-// A peer's update is checked by every other node, carried by the steward's
+// A peer's update is approved by every other node, carried by the steward's
 // commit as an action, and is reported on every node.
 #[test]
 fn a_members_update_lands_and_every_node_reports_it() {
@@ -57,17 +57,9 @@ fn a_members_update_lands_and_every_node_reports_it() {
         assert_eq!(bed.router(n).mls.epoch(), epoch + 1);
         assert_eq!(bed.router(n).mls.leaf_version(&other_id), 1);
     }
-    for n in (0..3).filter(|&n| n != other) {
-        assert!(
-            bed.router(n).decisions.iter().any(
-                |d| matches!(d, Decision::ValidateUpdate { member, .. } if *member == other_id)
-            ),
-            "node {n} validated the update on its group"
-        );
-    }
-    assert!(bed.router(steward).decisions.iter().any(|d| matches!(
+    assert!(bed.router(steward).steps.iter().any(|d| matches!(
         d,
-        Decision::BuildCommit { actions } if *actions == [Action::Update { member: other_id.clone() }]
+        Step::Build { actions } if *actions == [Action::Update { member: other_id.clone() }]
     )));
     assert!(bed.membership_agrees());
     assert_eq!(bed.router(0).mls.members().len(), 3);
@@ -119,16 +111,16 @@ fn the_stewards_own_update_lands_with_an_action_less_commit() {
     }
     assert!(
         bed.router(steward)
-            .decisions
+            .steps
             .iter()
-            .any(|d| matches!(d, Decision::BuildCommit { actions } if actions.is_empty())),
+            .any(|d| matches!(d, Step::Build { actions } if actions.is_empty())),
         "the build named no actions"
     );
     assert!(
         !bed.router(steward)
-            .decisions
+            .steps
             .iter()
-            .any(|d| matches!(d, Decision::BuildCommit { actions } if !actions.is_empty())),
+            .any(|d| matches!(d, Step::Build { actions } if !actions.is_empty())),
     );
 }
 
@@ -174,13 +166,6 @@ fn an_update_naming_another_member_is_dropped_everywhere() {
 
     for (n, &mark) in mark.iter().enumerate() {
         assert_eq!(bed.router(n).mls.epoch(), epoch, "no round opened");
-        assert!(
-            !bed.router(n)
-                .decisions
-                .iter()
-                .any(|d| matches!(d, Decision::ValidateUpdate { .. })),
-            "node {n} was asked to check the forged update"
-        );
         assert!(!reported_update(&bed, n, mark, &victim_id));
         assert_eq!(bed.router(n).mls.leaf_version(&victim_id), 0);
     }

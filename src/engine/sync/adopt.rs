@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     ConversationError, DEFAULT_PEER_SCORE, ScoreSnapshot, ScoringConfig, StewardList,
@@ -13,7 +13,7 @@ use crate::{
         EngineStore,
         handle::Engine,
         queues::Admission,
-        types::{Decision, Event, Phase},
+        types::{Event, Phase},
         util::member_set,
     },
     protos::de_mls::messages::v1::{ConversationSync, TimingConfig},
@@ -84,9 +84,8 @@ impl<St: EngineStore> Engine<St> {
         if self.expected_steward().as_deref() == Some(facts.sender.as_bytes()) {
             return;
         }
-        let hash = *hash;
+        debug!(conversation = %self.conversation_id, ?hash, "candidate dropped: not the steward's under the adopted list");
         self.round_candidate = None;
-        self.decide(Decision::Discard { hashes: vec![hash] });
         let working = self.start_working();
         self.emit_phase(Some(working));
     }
