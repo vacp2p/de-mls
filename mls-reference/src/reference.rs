@@ -582,7 +582,6 @@ where
 
         Ok(Built {
             hash,
-            proposal_count: kept.len() as u32,
             actions: kept,
             commit,
             welcome,
@@ -620,13 +619,11 @@ where
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 let self_removed = staged.self_removed();
                 let actions = self.actions_of(&staged)?;
-                let proposal_count = staged.queued_proposals().count() as u32;
                 self.staged.insert(commit_hash(commit), *staged);
                 Ok(StagedFacts {
                     sender,
                     epoch,
                     actions,
-                    proposal_count,
                     self_removed,
                 })
             }

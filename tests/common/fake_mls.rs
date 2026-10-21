@@ -10,6 +10,11 @@ use de_mls::{
 };
 use sha2::{Digest, Sha256};
 
+/// The name the fake bed gives a commit: SHA-256 of its bytes.
+pub fn commit_hash(bytes: &[u8]) -> CommitHash {
+    CommitHash::from(Sha256::digest(bytes).to_vec())
+}
+
 /// What a sealed frame is about, so the router can branch before touching
 /// the engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +63,6 @@ pub struct WelcomeDraft {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Built {
     pub hash: CommitHash,
-    pub proposal_count: u32,
     pub actions: Vec<Action>,
     pub commit: Vec<u8>,
     pub welcome: Option<WelcomeDraft>,
@@ -431,7 +435,7 @@ impl FakeMls {
             own_update: self.own_update.is_some(),
         };
         let bytes = commit.encode();
-        let hash = CommitHash::of(&bytes);
+        let hash = commit_hash(&bytes);
         let joiners: Vec<MemberId> = commit
             .actions
             .iter()
@@ -442,14 +446,12 @@ impl FakeMls {
             .collect();
         let welcome = (!joiners.is_empty()).then(|| WelcomeDraft {
             joiners,
-            snapshot: self.snapshot_after(&commit, hash),
+            snapshot: self.snapshot_after(&commit, hash.clone()),
         });
-        let proposal_count = commit.actions.len() as u32;
         let actions = commit.actions.clone();
-        self.pending = Some((hash, commit));
+        self.pending = Some((hash.clone(), commit));
         Ok(Built {
             hash,
-            proposal_count,
             actions,
             commit: bytes,
             welcome,
@@ -457,14 +459,14 @@ impl FakeMls {
     }
 
     pub fn pending_hash(&self) -> Option<CommitHash> {
-        self.pending.as_ref().map(|(h, _)| *h)
+        self.pending.as_ref().map(|(h, _)| h.clone())
     }
 
     /// Stage a remote commit without applying it. Several may be held; the
     /// same bytes stage once.
     pub fn stage(&mut self, bytes: &[u8]) -> Result<StagedFacts, String> {
         let commit = Commit::decode(bytes).ok_or("malformed commit")?;
-        let hash = CommitHash::of(bytes);
+        let hash = commit_hash(bytes);
         if self.consumed.contains(&hash) {
             return Err("commit bytes already used".into());
         }
@@ -480,7 +482,7 @@ impl FakeMls {
         if !self.members.contains(&commit.sender) {
             return Err("sender is not a member".into());
         }
-        self.consumed.insert(hash);
+        self.consumed.insert(hash.clone());
         let actions_held = commit.actions.iter().all(|a| match a {
             Action::Update { member } => self.update_held(member),
             _ => true,
@@ -492,7 +494,6 @@ impl FakeMls {
             sender: commit.sender.clone(),
             epoch: commit.epoch,
             actions: commit.actions.clone(),
-            proposal_count: commit.actions.len() as u32,
             self_removed: commit
                 .actions
                 .iter()

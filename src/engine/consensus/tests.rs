@@ -91,7 +91,6 @@ fn proposal_from_a_different_sender_is_dropped() {
         .expect("dropped, not an error");
 
     assert!(engine.out.events.is_empty());
-    assert!(engine.out.decisions.is_empty());
     assert!(!engine.queues.is_voting(7));
 }
 
@@ -136,7 +135,6 @@ fn a_second_sighting_of_a_proposal_changes_nothing() {
         .expect("a duplicate is not an error");
 
     assert!(engine.out.events.is_empty());
-    assert!(engine.out.decisions.is_empty());
     assert_eq!(engine.timing.pending_consensus_timeouts[&11], deadline);
 }
 
@@ -153,7 +151,6 @@ fn a_copy_arriving_after_its_outcome_opens_no_session() {
         .expect("a late copy is not an error");
 
     assert!(!engine.queues.is_voting(11));
-    assert!(engine.out.decisions.is_empty());
     assert!(
         engine
             .consensus
@@ -867,9 +864,8 @@ fn a_second_update_from_the_same_member_is_dropped() {
     engine
         .on_incoming_proposal(&member(2), second, engine.epoch())
         .unwrap();
-    let out = engine.finish(&mut publisher).unwrap();
+    engine.finish(&mut publisher).unwrap();
 
-    assert!(out.decisions.is_empty());
     assert_eq!(engine.queues.approved_proposals_count(), 1);
     assert!(
         engine
@@ -888,7 +884,6 @@ fn a_multi_voter_leaf_update_is_dropped() {
         .on_incoming_proposal(&member(2), proposal, engine.epoch())
         .unwrap();
 
-    assert!(engine.out.decisions.is_empty());
     assert!(
         !engine
             .queues

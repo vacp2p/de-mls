@@ -8,8 +8,8 @@ runs the votes, elects and rotates the stewards, and runs the commit round.
 
 It never touches MLS. No ciphertext, no key packages, no group: the engine
 sees the group through three traits the application implements, takes facts
-in, and returns decisions. The epoch moves only when the application executes
-a `Merge` decision on its own group.
+in, and answers what to build and what to merge. The epoch moves only when
+the application merges the commit `commit_to_apply` names on its own group.
 
 Validation is the application's. The group validates key packages, updates
 and commits when it processes them, and the engine must be told when it
@@ -92,9 +92,10 @@ application never ranks or validates candidates: the group rejects a foreign
 or stale commit at staging, and the engine rejects every commit but the
 epoch steward's.
 
-The engine knows a commit only by its hash. `hash` is `CommitHash::of(bytes)`,
-SHA-256 over the serialized commit, so every node computes the same name
-from the same bytes. The engine answers with that name (`Merge { hash }`,
+The engine knows a commit only by its name, `CommitHash`: opaque bytes the
+application chooses, one function of the commit on every node (a digest of
+the bytes, the epoch authenticator it produces), so every node computes the
+same name for the same commit. The engine answers with that name (`Merge { hash }`,
 `Discard { hashes }`), the application finds the staged commit by it, and
 `commit_applied(hash)` is how the engine tells a merge it decided from one it
 did not. A staged commit is therefore held by hash until a decision names it;
@@ -147,20 +148,23 @@ Every driving call returns `Result<Output, ConversationError>`:
 
 ```rust
 Output {
-    decisions: Vec<Decision>,   // execute against the group, in order
     events: Vec<Event>,         // observe, section 4
     wakeup: Option<Duration>,   // call tick(now) no later than this
 }
 ```
 
-The decisions, each a question answered:
+What to do against the group is asked, not pushed. After every driving
+call and every `tick`, two questions:
 
-| decision | do |
+| question | answer |
 |---|---|
-| `BuildCommit { actions }` | this node is the epoch steward: build a commit carrying exactly `actions`, keep it pending, broadcast the commit bytes, report it through `handle_candidate` with the facts the build returned. The welcome carries nothing but the MLS welcome. A build the group refuses is reported through `decision_failed`, section 5 |
-| `Merge { hash }` | merge the commit named by `hash`, our own pending one or a staged one; a loser clears its own pending commit first. Then `commit_applied`, section 5 |
-| `Discard { hashes }` | drop these staged commits |
-| `Leave` | this member is removed: tear the group down, drop the engine |
+| `commit_to_build()` | `Some(actions)`: this node is the epoch steward and the round is open. Build a commit carrying exactly `actions`, keep it pending, broadcast the commit bytes, report it through `handle_candidate` with the facts the build returned. The welcome carries nothing but the MLS welcome. A build the group refuses is reported through `build_failed`, section 5. `None`: nothing to build |
+| `commit_to_apply()` | `None`: no decision yet, keep every commit held. `Some(hash)`: merge the commit named by `hash`, our own pending one or a staged one, a loser clears its own pending commit first, then `commit_applied`, section 5. Every other commit held for the epoch is dropped with it |
+
+A round that closes without a commit is `CommitMissing`, section 4; nothing
+is dropped for it, since a held commit may still be the one that merges
+after a steward skip. A member removed by the commit it merged sees the
+removal in that commit; the engine says nothing more.
 
 Only the application can build a commit: it is an MLS object, and the engine
 has no group, no signer and no key packages. What the engine knows is the
@@ -170,11 +174,11 @@ noticed. So `BuildCommit` says "you are the steward, the round is open, this
 is what goes in"; the application builds it when it is ready, inside that
 window.
 
-An `Output` is executed completely before the next driving call: decisions
-in the order given, then events. A report call made while executing a
-decision returns its own `Output`, executed the same way, until one is empty.
-Then the wakeup is armed; `tick(now)` is the call that runs it, and it
-returns an `Output` like any other.
+An `Output` is observed completely before the next driving call, then the
+two questions are asked. A report call made while acting on an answer
+returns its own `Output`, observed the same way, and the questions are
+asked again, until nothing is left. Then the wakeup is armed; `tick(now)`
+is the call that runs it, and it returns an `Output` like any other.
 
 **The questions you ask.** The local actions, each returning an `Output`:
 
@@ -196,12 +200,13 @@ are accepted in every phase; approved work lands in a later commit.
 
 Rules:
 
-- Every `Output` is executed completely, decisions in order, then events,
-  looping on the outputs of report calls until one is empty.
+- Every `Output` is observed completely, then `commit_to_build` and
+  `commit_to_apply` are asked, looping on the outputs of report calls until
+  nothing is left.
 - `tick(now)` is called no later than the `wakeup` of the last `Output`.
-- The epoch advances only by executing `Merge`: no self-update, add,
+- The epoch advances only by acting on `Apply`: no self-update, add,
   remove, external commit or merge of a pending commit outside one.
-- After a merge every remaining staged commit is dropped as stale.
+- After a merge every other commit held is dropped as stale.
 
 ## 4. Events
 
@@ -212,7 +217,7 @@ What needs the application's action:
 | `VoteRequested { proposal_id, request }` | vote. For an invite the request carries the joiner's id and key package bytes; the application may validate them (full validation plus identity equals the claimed id) before voting YES |
 | `UpdateProposed { member, update }` | a peer's leaf update, approved on arrival: process it on the group and hold it, since a commit carries a peer's update by reference and every member must hold it before that commit can be built or staged |
 | `CommitMissing { epoch, steward }` | the round closed with no valid commit from the epoch steward. Check whether someone in the group has it first (a member that has it sends the bytes again, and they enter as any commit); call `request_recovery` only if nobody does |
-| `CandidateRejected { sender, reason }` | a stale list and a misbehaving committer look the same from here; `request_sync` settles it. A candidate rejected as not the epoch steward's stays staged until the epoch merges: after `StewardSkipped` or `SyncApplied` the application reports its facts again, since the sender may have become the epoch steward. A candidate rejected for its actions is never kept |
+| `CandidateRejected { sender, reason }` | a stale list and a misbehaving committer look the same from here; `request_sync` settles it. A candidate rejected as not the epoch steward's stays held until the epoch merges: after `StewardSkipped` or `SyncApplied` the application reports its facts again, since the sender may have become the epoch steward. A candidate rejected for its actions is never kept |
 | `ActionsDropped { actions }` | the group refused these approved actions at the build and the epoch steward withdrew them; they land in no commit. Whoever still wants one files it again with fresh material |
 
 What the application observes:
@@ -233,7 +238,7 @@ Rules:
 
 - A peer's update handed over as `UpdateProposed` is processed on the group
   and held until a merge.
-- A candidate rejected as not the epoch steward's is kept staged and reported
+- A candidate rejected as not the epoch steward's is kept and reported
   again after `StewardSkipped` or `SyncApplied`.
 - On `CommitMissing` the application looks for the steward's commit before
   it calls `request_recovery`.
@@ -245,13 +250,15 @@ other engine call, one call per merged commit, in merge order. The engine
 reads the new epoch and member set from `group`, its `GroupView`, inside that
 call and at no other time; its picture of the group changes nowhere else.
 
-**A decision that failed.** `decision_failed(now, DecisionFailure {
-decision, reason, rejected })` before any other engine call. For a `Merge`
-the engine closes the round and moves on. For a `BuildCommit`, `rejected`
-names the members whose key package or update the group refused: the engine
-drops their approved work, tells every member (`ActionsDropped` on each), and
-builds again with the rest in the same output. `rejected` is empty only when
-the failure was not about an action; nothing is dropped then.
+**A build the group refused.** `build_failed(now, reason, rejected)` before
+any other engine call. `rejected` names the members whose key package or
+update the group refused: the engine drops their approved work, tells every
+member (`ActionsDropped` on each), and `commit_to_build` names the rest.
+`rejected` is empty only when the failure was not about an action; nothing
+is dropped then.
+
+**A merge the group refused.** `merge_failed(now, reason)` before any other
+engine call. The engine closes the round without a commit and moves on.
 
 **Construction.** `Engine::create(now, group, config, store)` once, right
 after creating the group, over an empty store. `Engine::open(now, group,
@@ -283,8 +290,9 @@ Rules:
 
 - `commit_applied` after every merge, before any other engine call, one per
   commit, in merge order; the engine reads the group only there.
-- A decision that could not be executed is reported with `decision_failed`
-  before any other engine call; a refused build names the members refused.
+- A refused build or merge is reported with `build_failed` or
+  `merge_failed` before any other engine call; a refused build names the
+  members refused.
 - The group is loaded (or the welcome opened) before the engine is opened
   over its store.
 - The engine asks for a sync once; every other ask is the application's.
@@ -368,7 +376,7 @@ impl Conversation {
                 }
             }
             Frame::Commit(bytes) => {
-                let hash = CommitHash::of(&bytes);
+                let hash = self.mls.name_of(&bytes);
                 let Ok(facts) = self.mls.stage(&bytes) else { return };   // authenticates; the same bytes stage once
                 match self.engine.handle_candidate(now, hash, facts.clone(), &mut self.publisher) {
                     Err(ConversationError::Refused(_)) => {
@@ -436,9 +444,6 @@ impl Conversation {
     fn drive(&mut self, now: Timestamp, mut out: Output) {
         loop {
             let mut next = Output::default();
-            for d in out.decisions.drain(..) {
-                next.merge(self.execute(now, d));                    // report calls return Output
-            }
             for e in out.events.drain(..) {
                 match &e {
                     Event::MemberUpdated { member } if *member == self.mls.own_id() => {
@@ -454,6 +459,7 @@ impl Conversation {
                 }
                 self.ui.notify(e);                                   // the rest is section 4
             }
+            next.merge(self.pull(now));                            // the two questions
             next.merge(self.retry_held(now));                      // refused inputs, once more
             if let Some(d) = out.wakeup { self.timer.arm(d); }
             if next.is_empty() { break }
@@ -461,42 +467,46 @@ impl Conversation {
         }
     }
 
-    fn execute(&mut self, now: Timestamp, d: Decision) -> Output {
-        match d {
-            Decision::BuildCommit { actions } => {
-                let built = match self.mls.build_commit(&actions) {   // stays pending
-                    Ok(built) => built,
-                    Err(BuildError::Refused(refused)) => {            // by member: the engine drops their work
-                        let failure = DecisionFailure {
-                            decision: d,
-                            reason: refused.iter().map(|r| r.reason.to_string()).collect::<Vec<_>>().join("; "),
-                            rejected: refused.into_iter().map(|r| r.member).collect(),
-                        };
-                        return self.engine.decision_failed(now, failure, &mut self.publisher);
-                    }
-                    Err(BuildError::Failed(e)) => {                   // not about an action: nothing is dropped
-                        let failure = DecisionFailure { decision: d, reason: e.to_string(), rejected: Vec::new() };
-                        return self.engine.decision_failed(now, failure, &mut self.publisher);
-                    }
-                };
-                if let Some(w) = built.welcome { self.welcome = Some((built.hash, w)); }
-                self.broadcast_commit(&built.commit);
-                self.engine.handle_candidate(now, built.hash, built.facts, &mut self.publisher)
-            }
-            Decision::Merge { hash } => {
-                self.mls.merge(hash);                                // own pending or staged; clears the rest
-                match self.welcome.take() {
-                    Some((h, w)) if h == hash => self.inbox.deliver(w),
-                    _ => {}
-                }
-                self.engine.commit_applied(now, hash, &self.mls, &mut self.publisher)
-            }
-            Decision::Discard { hashes } => {
-                for h in hashes { self.mls.discard(h); }
-                Output::default()
-            }
-            Decision::Leave => { self.mls.delete(); Output::default() }
+    // Asks what to build and what to apply; the report calls return Output.
+    fn pull(&mut self, now: Timestamp) -> Output {
+        let mut out = Output::default();
+        if let Some(actions) = self.engine.commit_to_build().map(<[Action]>::to_vec) {
+            out.merge(self.build(now, actions));
         }
+        if let Some(hash) = self.engine.commit_to_apply() {
+            out.merge(self.apply(now, hash));
+        }
+        out
+    }
+
+    fn build(&mut self, now: Timestamp, actions: Vec<Action>) -> Output {
+        let built = match self.mls.build_commit(&actions) {          // stays pending
+            Ok(built) => built,
+            Err(BuildError::Refused(refused)) => {                    // by member: the engine drops their work
+                let reason = refused.iter().map(|r| r.reason.to_string()).collect::<Vec<_>>().join("; ");
+                let rejected = refused.into_iter().map(|r| r.member).collect();
+                return self.engine.build_failed(now, reason, rejected, &mut self.publisher);
+            }
+            Err(BuildError::Failed(e)) => {                           // not about an action: nothing is dropped
+                return self.engine.build_failed(now, e.to_string(), Vec::new(), &mut self.publisher);
+            }
+        };
+        if let Some(w) = built.welcome { self.welcome = Some((built.hash.clone(), w)); }
+        self.broadcast_commit(&built.commit);
+        self.engine.handle_candidate(now, built.hash, built.facts, &mut self.publisher)
+    }
+
+    fn apply(&mut self, now: Timestamp, hash: CommitHash) -> Output {
+        if let Err(e) = self.mls.merge(hash.clone()) {               // own pending or staged; clears the rest
+            return self.engine.merge_failed(now, e.to_string(), &mut self.publisher);
+        }
+        match self.welcome.take() {
+            Some((h, w)) if h == hash => self.inbox.deliver(w),
+            _ => {}
+        }
+        let out = self.engine.commit_applied(now, hash, &self.mls, &mut self.publisher);
+        if !self.mls.is_member(&self.mls.own_id()) { self.mls.delete(); }
+        out
     }
 }
 ```

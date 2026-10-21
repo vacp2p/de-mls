@@ -44,10 +44,6 @@ pub struct StagedFacts {
     pub epoch: u64,
     /// The adds, removes and updates it performs, in commit order.
     pub actions: Vec<Action>,
-    /// Every proposal it carries, adds, removes and updates included. Above
-    /// `actions.len()` it carries kinds the engine does not know, and the
-    /// round rejects it.
-    pub proposal_count: u32,
     /// Whether it removes us.
     pub self_removed: bool,
 }
@@ -62,8 +58,6 @@ pub struct Built {
     /// reports to the engine as this commit's facts. Shorter than the
     /// actions asked for when removes of non-members were skipped.
     pub actions: Vec<Action>,
-    /// Proposals the commit carries; equals `actions.len()`.
-    pub proposal_count: u32,
     /// The serialized commit, broadcast as is: a candidate on the wire is
     /// these bytes and nothing else.
     pub commit: Vec<u8>,
@@ -167,8 +161,8 @@ pub trait GroupOps {
     /// MUST force a self-update, so every commit brings fresh entropy. Every
     /// key package
     /// MUST be validated. A remove of somebody who is not a member MUST be
-    /// skipped rather than failing the commit; the skip shows in
-    /// [`Built::proposal_count`]. An update nobody holds MUST fail the build.
+    /// skipped rather than failing the commit.
+    /// An update nobody holds MUST fail the build.
     /// Our own held update rides in the commit itself.
     ///
     /// The commit stays pending: the epoch does not move and

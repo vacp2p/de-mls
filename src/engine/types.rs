@@ -7,8 +7,6 @@
 
 use std::{fmt, time::Duration};
 
-use sha2::{Digest, Sha256};
-
 pub use crate::engine::timestamp::Timestamp;
 use crate::protos::de_mls::messages::v1::ConversationUpdateRequest;
 
@@ -47,26 +45,28 @@ impl fmt::Debug for MemberId {
     }
 }
 
-/// SHA-256 of the MLS commit bytes; the name every side uses for one
-/// candidate.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct CommitHash([u8; 32]);
+/// The name every side knows one commit by. The application chooses it,
+/// one function of the commit on every node (a digest of the bytes, the
+/// epoch authenticator it produces); the engine stores and compares it.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CommitHash(Vec<u8>);
 
 impl CommitHash {
-    /// Hash the serialized commit.
-    pub fn of(commit_bytes: &[u8]) -> Self {
-        Self(Sha256::digest(commit_bytes).into())
-    }
-
-    /// The digest bytes.
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    /// The name's bytes.
+    pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 }
 
-impl From<[u8; 32]> for CommitHash {
-    fn from(bytes: [u8; 32]) -> Self {
+impl From<Vec<u8>> for CommitHash {
+    fn from(bytes: Vec<u8>) -> Self {
         Self(bytes)
+    }
+}
+
+impl From<&[u8]> for CommitHash {
+    fn from(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
     }
 }
 
@@ -160,32 +160,8 @@ pub struct StagedFacts {
     pub epoch: u64,
     /// The adds, removes and updates the commit carries, in commit order.
     pub actions: Vec<Action>,
-    /// Every proposal the commit carries, adds, removes and updates included. When
-    /// this exceeds `actions.len()` the commit carries proposal kinds the
-    /// engine has no vocabulary for, and the round rejects it.
-    pub proposal_count: u32,
     /// Whether the commit removes this member.
     pub self_removed: bool,
-}
-
-/// Something the router must execute against the group, in the order
-/// given.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Decision {
-    /// This member is the epoch steward for the round: build a commit
-    /// carrying exactly `actions`, keep it pending, broadcast the commit
-    /// bytes, then report it through
-    /// [`super::Engine::handle_candidate`] with the facts the build
-    /// returned.
-    BuildCommit { actions: Vec<Action> },
-    /// Merge the staged or own commit named by `hash`, then report
-    /// [`super::Engine::commit_applied`]. A loser clears its own pending
-    /// commit first.
-    Merge { hash: CommitHash },
-    /// Drop these staged commits.
-    Discard { hashes: Vec<CommitHash> },
-    /// This member has left: tear the group down and drop the engine.
-    Leave,
 }
 
 /// The lifecycle phase of a conversation.
@@ -325,14 +301,13 @@ pub enum Event {
     CommitAdopted { hash: CommitHash },
 }
 
-/// What one driving call left for the router: decisions to execute, events
-/// to observe, the next wakeup. The router executes it completely, in
-/// order: `decisions`, then `events`; see the router contract. Messages for
-/// the group go out through [`crate::traits::Publish`] during the call.
+/// What one driving call left for the application: events to observe and
+/// the next wakeup. What to build and what to merge are read through
+/// [`super::Engine::commit_to_build`] and [`super::Engine::commit_to_apply`]
+/// after the call. Messages for the group go out through
+/// [`crate::traits::Publish`] during the call.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Output {
-    /// Execute against the group, in order.
-    pub decisions: Vec<Decision>,
     /// Observe.
     pub events: Vec<Event>,
     /// Call [`super::Engine::tick`] no later than this.
@@ -340,35 +315,20 @@ pub struct Output {
 }
 
 impl Output {
-    /// True when nothing is left to execute. `wakeup` alone does not count:
-    /// a timer is armed, not work.
+    /// True when nothing was observed. `wakeup` alone does not count: a
+    /// timer is armed, not work.
     pub fn is_empty(&self) -> bool {
-        self.decisions.is_empty() && self.events.is_empty()
+        self.events.is_empty()
     }
 
-    /// Append `other`'s work after this one's and keep the earlier wakeup.
+    /// Append `other`'s events after this one's and keep the earlier wakeup.
     pub fn merge(&mut self, other: Output) {
-        self.decisions.extend(other.decisions);
         self.events.extend(other.events);
         self.wakeup = match (self.wakeup, other.wakeup) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
     }
-}
-
-/// Why the router could not execute a [`Decision`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecisionFailure {
-    /// The decision that failed.
-    pub decision: Decision,
-    /// The group's error, for the log.
-    pub reason: String,
-    /// For a failed `BuildCommit`, the members whose key package or update
-    /// the group refused; the engine drops their approved work and builds
-    /// again with the rest. Empty for every other failure, and for a build
-    /// that failed for another reason: nothing is dropped.
-    pub rejected: Vec<MemberId>,
 }
 
 #[cfg(test)]
@@ -378,18 +338,16 @@ mod tests {
     #[test]
     fn output_merge_keeps_order_and_earliest_wakeup() {
         let mut a = Output {
-            decisions: vec![Decision::Leave],
+            events: vec![Event::SyncApplied],
             wakeup: Some(Duration::from_secs(5)),
-            ..Default::default()
         };
         let b = Output {
-            decisions: vec![Decision::Discard { hashes: vec![] }],
+            events: vec![Event::PhaseChange(Phase::Working)],
             wakeup: Some(Duration::from_secs(2)),
-            ..Default::default()
         };
         a.merge(b);
-        assert_eq!(a.decisions.len(), 2);
-        assert!(matches!(a.decisions[0], Decision::Leave));
+        assert_eq!(a.events.len(), 2);
+        assert!(matches!(a.events[0], Event::SyncApplied));
         assert_eq!(a.wakeup, Some(Duration::from_secs(2)));
     }
 
@@ -400,11 +358,5 @@ mod tests {
             ..Default::default()
         };
         assert!(out.is_empty());
-    }
-
-    #[test]
-    fn commit_hash_is_sha256_of_the_bytes() {
-        let h = CommitHash::of(b"commit");
-        assert_eq!(h.as_bytes(), &<[u8; 32]>::from(Sha256::digest(b"commit")));
     }
 }

@@ -109,7 +109,7 @@ mod tests {
             InMemoryStore,
             config::EngineConfig,
             test_support::group,
-            types::{Action, CommitHash, Decision, MemberId, Phase, StagedFacts},
+            types::{Action, CommitHash, MemberId, Phase, StagedFacts},
         },
         protos::de_mls::messages::v1::{
             ConversationUpdateRequest, MemberInvite, ViolationEvidence,
@@ -157,11 +157,11 @@ mod tests {
         e.begin(at(0));
         let event = e.start_freezing().expect("enters freezing");
         e.on_freeze_entered(event).unwrap();
-        let hash = CommitHash::of(b"commit");
+        let hash = CommitHash::from(&b"commit"[..]);
         let own = e.own.clone();
         e.handle_candidate(
             at(0),
-            hash,
+            hash.clone(),
             StagedFacts {
                 sender: MemberId::from(own.as_slice()),
                 epoch: e.epoch,
@@ -169,30 +169,26 @@ mod tests {
                     member: id("bob"),
                     key_package: b"kp:bob".to_vec(),
                 }],
-                proposal_count: 1,
+                // proposal_count: 1,
                 self_removed: false,
             },
             &mut publisher,
         )
         .unwrap();
 
-        let before_window = e.tick(at(0), &mut publisher).unwrap();
-        assert!(
-            !before_window
-                .decisions
-                .iter()
-                .any(|d| matches!(d, Decision::Merge { .. })),
+        e.tick(at(0), &mut publisher).unwrap();
+        assert_eq!(
+            e.commit_to_apply(),
+            None,
             "no merge before the freeze window elapses"
         );
         assert_eq!(e.phase(), Phase::Freezing);
 
         let window = e.config.freeze_duration;
-        let after_window = e.tick(at(0) + window, &mut publisher).unwrap();
-        assert!(
-            after_window
-                .decisions
-                .iter()
-                .any(|d| matches!(d, Decision::Merge { hash: h } if *h == hash)),
+        e.tick(at(0) + window, &mut publisher).unwrap();
+        assert_eq!(
+            e.commit_to_apply(),
+            Some(hash),
             "merges once the freeze window elapses"
         );
     }

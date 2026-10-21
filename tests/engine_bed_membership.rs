@@ -5,9 +5,9 @@
 mod common;
 
 use common::fake_mls::FakeMls;
-use common::fake_router::Bed;
+use common::fake_router::{Bed, Step};
 use common::fast_config;
-use de_mls::engine::{Action, Decision, Event, Phase, Verdict};
+use de_mls::engine::{Action, Event, Phase, Verdict};
 use de_mls::steward_list::StewardListConfig;
 
 #[test]
@@ -29,10 +29,7 @@ fn removal_is_voted_and_the_removed_member_leaves() {
     assert!(bed.agree_among(&[0, carol]));
     assert_eq!(bed.router(0).mls.members().len(), 2);
     assert_eq!(bed.router(carol).mls.members().len(), 2);
-    assert!(matches!(
-        bed.router(bob).decisions.last(),
-        Some(Decision::Leave)
-    ));
+    assert!(matches!(bed.router(bob).steps.last(), Some(Step::Leave)));
 }
 
 #[test]
@@ -53,10 +50,7 @@ fn self_leave_lands_in_the_next_commit() {
     assert!(bed.agree_among(&[0, carol]));
     assert_eq!(bed.router(0).mls.members().len(), 2);
     assert_eq!(bed.router(carol).mls.members().len(), 2);
-    assert!(matches!(
-        bed.router(bob).decisions.last(),
-        Some(Decision::Leave)
-    ));
+    assert!(matches!(bed.router(bob).steps.last(), Some(Step::Leave)));
 }
 
 // The only steward on a one-member list is on its way out. Nobody eligible
@@ -93,8 +87,8 @@ fn sole_steward_removal_is_committed_by_a_fresh_steward(remove: impl FnOnce(&mut
     });
 
     assert!(matches!(
-        bed.router(steward).decisions.last(),
-        Some(Decision::Leave)
+        bed.router(steward).steps.last(),
+        Some(Step::Leave)
     ));
     for (&n, &mark) in others.iter().zip(&marks) {
         assert!(

@@ -6,7 +6,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::fake_router::Bed;
+use common::fake_router::{Bed, Step};
 use de_mls::EngineConfig;
 use de_mls::engine::{Event, Phase, Verdict};
 use de_mls::protos::de_mls::messages::v1::conversation_update_request;
@@ -64,16 +64,16 @@ fn creator_adds_one_then_a_member_adds_another() {
     assert_eq!(bed.router(carol).mls.members().len(), 3);
     assert!(
         bed.router(bob)
-            .decisions
+            .steps
             .iter()
-            .any(|d| matches!(d, de_mls::engine::Decision::Merge { .. })),
+            .any(|d| matches!(d, Step::Merge { .. })),
         "bob merged the steward's commit"
     );
     assert!(
         !bed.router(bob)
-            .decisions
+            .steps
             .iter()
-            .any(|d| matches!(d, de_mls::engine::Decision::BuildCommit { .. })),
+            .any(|d| matches!(d, Step::Build { .. })),
         "a non-steward never builds"
     );
 }

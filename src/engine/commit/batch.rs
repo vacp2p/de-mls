@@ -10,7 +10,7 @@ use crate::{
         EngineStore,
         handle::Engine,
         proposal_kind::{Change, ProposalKind, change_of},
-        types::{Action, Decision, Phase},
+        types::{Action, Phase},
     },
 };
 
@@ -67,7 +67,7 @@ impl<St: EngineStore> Engine<St> {
             proposals = actions.len(),
             "commit candidate requested"
         );
-        self.decide(Decision::BuildCommit { actions });
+        self.pending_build = Some(actions);
         Ok(true)
     }
 

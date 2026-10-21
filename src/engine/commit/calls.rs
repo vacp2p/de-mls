@@ -1,11 +1,12 @@
 //! The driving calls the router makes over the commit round: the facts a
-//! candidate staged — its own, once `Decision::BuildCommit` returns, or a
+//! candidate staged — its own, built on `commit_to_build`, or a
 //! peer's — and the merge report that moves the engine's own view of the
 //! group.
 //!
-//! Nothing here stages, merges or discards anything itself. The router owns
-//! the group; the engine names a hash and the router reports back through
-//! [`Engine::commit_applied`] or [`Engine::decision_failed`].
+//! Nothing here stages, merges or discards anything itself. The application
+//! owns the group; the engine names a hash through `commit_to_apply` and the
+//! application reports back through [`Engine::commit_applied`] or
+//! [`Engine::merge_failed`].
 
 use tracing::{debug, info, warn};
 
@@ -16,8 +17,8 @@ use crate::{
         handle::Engine,
         queues::EngineQueues,
         types::{
-            ActionKind, CandidateRejection, CommitHash, Decision, DecisionFailure, Event, MemberId,
-            MembershipDelta, Output, Phase, StagedFacts, Timestamp,
+            ActionKind, CandidateRejection, CommitHash, Event, MemberId, MembershipDelta, Output,
+            Phase, StagedFacts, Timestamp,
         },
     },
     scoring_member_diff,
@@ -44,7 +45,6 @@ impl<St: EngineStore> Engine<St> {
                 epoch = self.epoch,
                 "candidate discarded: stale epoch"
             );
-            self.decide(Decision::Discard { hashes: vec![hash] });
             return self.finish(publisher);
         }
 
@@ -54,6 +54,9 @@ impl<St: EngineStore> Engine<St> {
             return Err(ConversationError::Refused(Refusal::Syncing));
         }
 
+        if facts.sender.as_bytes() == self.own.as_slice() {
+            self.pending_build = None;
+        }
         let expected = self.expected_steward();
         if expected.as_deref() != Some(facts.sender.as_bytes()) {
             debug!(
@@ -86,7 +89,6 @@ impl<St: EngineStore> Engine<St> {
                 conversation = %self.conversation_id,
                 "candidate discarded: the epoch steward already sent one this round"
             );
-            self.decide(Decision::Discard { hashes: vec![hash] });
             return self.finish(publisher);
         }
 
@@ -157,7 +159,6 @@ impl<St: EngineStore> Engine<St> {
             info!(conversation = %self.conversation_id, "commit removed this member");
             self.cancel_all_auto_votes();
             self.round_candidate = None;
-            self.decide(Decision::Leave);
             return self.finish(publisher);
         }
 
@@ -250,40 +251,47 @@ impl<St: EngineStore> Engine<St> {
         Ok(())
     }
 
-    /// The router could not execute a decision. A failed merge closes the
-    /// round with no commit. A failed build that names rejected members
-    /// drops their approved work, withdraws it from every member, and builds
-    /// again with the rest. Anything else is reported and dropped.
-    pub fn decision_failed(
+    /// The group refused the build [`Engine::commit_to_build`] asked for.
+    /// `rejected` names the members whose key package or update it refused:
+    /// the engine drops their approved work, withdraws it from every member,
+    /// and asks for a build again with the rest. Empty when the failure was
+    /// not about an action: nothing is dropped, and nothing is asked again
+    /// until the next round.
+    pub fn build_failed(
         &mut self,
         now: Timestamp,
-        failure: DecisionFailure,
+        reason: String,
+        rejected: Vec<MemberId>,
         publisher: &mut impl Publish,
     ) -> Result<Output, ConversationError> {
         self.begin(now);
-        let operation = match &failure.decision {
-            Decision::Merge { .. } => {
-                self.round_candidate = None;
-                self.pending_merge = None;
-                "merge"
-            }
-            Decision::BuildCommit { .. } => "build_commit",
-            Decision::Discard { .. } => "discard",
-            Decision::Leave => "leave",
-        };
+        self.pending_build = None;
         self.emit(Event::Error {
-            operation: operation.to_owned(),
-            message: failure.reason,
+            operation: "build_commit".to_owned(),
+            message: reason,
         });
+        if !rejected.is_empty() {
+            self.withdraw_rejected(&rejected);
+        }
+        self.finish(publisher)
+    }
 
-        if let Decision::BuildCommit { .. } = &failure.decision
-            && !failure.rejected.is_empty()
-        {
-            self.withdraw_rejected(&failure.rejected);
-        }
-        if matches!(failure.decision, Decision::Merge { .. }) {
-            self.close_round_without_commit()?;
-        }
+    /// The group could not merge the commit [`Engine::commit_to_apply`]
+    /// named. The engine closes the round without a commit and moves on.
+    pub fn merge_failed(
+        &mut self,
+        now: Timestamp,
+        reason: String,
+        publisher: &mut impl Publish,
+    ) -> Result<Output, ConversationError> {
+        self.begin(now);
+        self.round_candidate = None;
+        self.pending_merge = None;
+        self.emit(Event::Error {
+            operation: "merge".to_owned(),
+            message: reason,
+        });
+        self.close_round_without_commit()?;
         self.finish(publisher)
     }
 }

@@ -7,8 +7,7 @@ use super::adopt::{
     first_zero_timing_field, synced_default_peer_score, validate_conversation_sync,
 };
 use crate::{
-    DEFAULT_PEER_SCORE, Decision, Engine, EngineConfig, Event, InMemoryStore, StewardList,
-    StewardListConfig,
+    DEFAULT_PEER_SCORE, Engine, EngineConfig, Event, InMemoryStore, StewardList, StewardListConfig,
     engine::{
         test_support::{creator, founder, group, id, joiner, member, view},
         types::{ActionKind, CommitHash, Phase, StagedFacts, Timestamp},
@@ -530,27 +529,21 @@ fn adopting_a_newer_list_drops_a_candidate_from_the_old_steward() {
     b.begin(at(5));
     b.broadcast_sync_request();
     b.start_freezing();
-    let hash = CommitHash::of(b"stale candidate");
+    let hash = CommitHash::from(&b"stale candidate"[..]);
     b.round_candidate = Some((
-        hash,
+        hash.clone(),
         StagedFacts {
             sender: id(stale_sender),
             epoch: 1,
             actions: vec![],
-            proposal_count: 0,
             self_removed: false,
         },
     ));
 
     b.on_conversation_sync(sync).expect("adopt");
 
-    assert!(
-        b.out
-            .decisions
-            .iter()
-            .any(|d| matches!(d, Decision::Discard { hashes } if hashes == &vec![hash]))
-    );
-    assert!(b.round_candidate.is_none());
+    assert!(b.round_candidate.is_none(), "{hash:?} is dropped");
+    assert_eq!(b.commit_to_apply(), None);
     assert_eq!(b.phase(), Phase::Working);
     assert!(b.out.events.contains(&Event::PhaseChange(Phase::Working)));
 }

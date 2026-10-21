@@ -8,13 +8,13 @@ use std::{
 };
 
 use de_mls::engine::{
-    Action, CandidateRejection, CommitHash, Decision, DecisionFailure, Engine, Event,
-    InMemoryStore, MemberId, Output, Phase, StagedFacts, Timestamp,
+    Action, CandidateRejection, CommitHash, Engine, Event, InMemoryStore, MemberId, Output, Phase,
+    StagedFacts, Timestamp,
 };
 use de_mls::{EngineConfig, Publish};
 
 use crate::common::{
-    fake_mls::{FakeMls, Kind, WelcomeDraft},
+    fake_mls::{FakeMls, Kind, WelcomeDraft, commit_hash},
     net::{Frame, Net, Welcome},
 };
 
@@ -64,6 +64,18 @@ impl Publish for Sealer<'_> {
     }
 }
 
+/// What the router did against the group, in order, for the scenarios to
+/// read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// `commit_to_build` named a batch and the router built it.
+    Build { actions: Vec<Action> },
+    /// `commit_to_apply` named a commit and the router merged it.
+    Merge { hash: CommitHash },
+    /// The merged commit removed this member.
+    Leave,
+}
+
 /// One node: its group, its engine, and the bookkeeping the router contract
 /// asks for.
 pub struct FakeRouter {
@@ -73,15 +85,15 @@ pub struct FakeRouter {
     outbox: Vec<Frame>,
     /// Every event the engine returned, in order.
     pub events: Vec<Event>,
-    /// Every decision the engine returned, in order.
-    pub decisions: Vec<Decision>,
+    /// Every step the router took against the group, in order.
+    pub steps: Vec<Step>,
     /// Chat the application received: `(sender, text)`.
     pub chats: Vec<(MemberId, Vec<u8>)>,
     next_wakeup: Option<Timestamp>,
     /// When this router last asked for a sync; it asks again on its own
     /// clock while the engine is still unsynced.
     sync_asked: Option<Timestamp>,
-    /// Set once `Decision::Leave` ran.
+    /// Set once a merged commit removed this member.
     pub left: bool,
     /// Inputs the engine refused, in arrival order. The engine keeps no
     /// memory of them; the router feeds each one again after every `Output`
@@ -153,7 +165,7 @@ impl FakeRouter {
             welcomes: HashMap::new(),
             outbox,
             events: Vec::new(),
-            decisions: Vec::new(),
+            steps: Vec::new(),
             chats: Vec::new(),
             next_wakeup: None,
             sync_asked: None,
@@ -235,7 +247,7 @@ impl FakeRouter {
         for held in std::mem::take(&mut self.held) {
             let result = match &held {
                 Held::Candidate { hash, facts } => {
-                    if let Some(o) = self.report_candidate(now, *hash, facts.clone()) {
+                    if let Some(o) = self.report_candidate(now, hash.clone(), facts.clone()) {
                         out.merge(o);
                     }
                     continue;
@@ -296,7 +308,7 @@ impl FakeRouter {
     ) -> Option<Output> {
         match self.engine.handle_candidate(
             now,
-            hash,
+            hash.clone(),
             facts.clone(),
             &mut Sealer::over(&self.mls, &mut self.outbox),
         ) {
@@ -336,12 +348,12 @@ impl FakeRouter {
         now: Timestamp,
         bytes: Vec<u8>,
     ) -> Option<Result<Output, de_mls::ConversationError>> {
-        let hash = CommitHash::of(&bytes);
+        let hash = commit_hash(&bytes);
         if self.staged_hashes.contains(&hash) {
             return None;
         }
         let facts = self.mls.stage(&bytes).ok()?;
-        self.staged_hashes.insert(hash);
+        self.staged_hashes.insert(hash.clone());
         self.report_candidate(now, hash, facts).map(Ok)
     }
 
@@ -531,15 +543,12 @@ impl FakeRouter {
         }
     }
 
-    /// Router contract, `Output`: decisions, then events, looping on the
-    /// report calls' outputs until one is empty.
+    /// Router contract, `Output`: observe the events, then ask the engine
+    /// what to build and what to apply, looping on the report calls' outputs
+    /// until one is empty.
     pub fn drive(&mut self, now: Timestamp, mut out: Output) {
         loop {
             let mut next = Output::default();
-            for decision in out.decisions.drain(..) {
-                self.decisions.push(decision.clone());
-                next.merge(self.execute(now, decision));
-            }
             let round_closed = out
                 .events
                 .iter()
@@ -568,6 +577,7 @@ impl FakeRouter {
                 }
             }
             self.events.append(&mut out.events);
+            next.merge(self.pull(now));
             if round_closed && !self.replaying {
                 next.merge(self.file_update(now));
             }
@@ -588,99 +598,90 @@ impl FakeRouter {
         }
     }
 
-    fn execute(&mut self, now: Timestamp, decision: Decision) -> Output {
-        let result = match decision.clone() {
-            Decision::BuildCommit { actions } => {
-                if self.replaying {
-                    Ok(Output::default())
-                } else {
-                    let built = match self.mls.build_commit(&actions) {
-                        Ok(built) => built,
-                        Err(refused) => {
-                            return self
-                                .engine
-                                .decision_failed(
-                                    now,
-                                    DecisionFailure {
-                                        decision,
-                                        reason: refused.reason,
-                                        rejected: refused.rejected,
-                                    },
-                                    &mut Sealer::over(&self.mls, &mut self.outbox),
-                                )
-                                .unwrap_or_default();
-                        }
-                    };
-                    if let Some(draft) = built.welcome {
-                        self.welcomes.insert(built.hash, draft);
-                    }
-                    self.outbox.push(Frame::Commit(built.commit));
-                    self.engine.handle_candidate(
+    /// The pull side: build what `commit_to_build` names, merge what
+    /// `commit_to_apply` names and drop the rest with it.
+    fn pull(&mut self, now: Timestamp) -> Output {
+        let mut out = Output::default();
+        if let Some(actions) = self.engine.commit_to_build().map(<[Action]>::to_vec)
+            && !self.replaying
+        {
+            self.steps.push(Step::Build {
+                actions: actions.clone(),
+            });
+            out.merge(self.build(now, actions));
+        }
+        if let Some(hash) = self.engine.commit_to_apply() {
+            self.steps.push(Step::Merge { hash: hash.clone() });
+            out.merge(self.apply(now, hash));
+        }
+        out
+    }
+
+    fn build(&mut self, now: Timestamp, actions: Vec<Action>) -> Output {
+        let built = match self.mls.build_commit(&actions) {
+            Ok(built) => built,
+            Err(refused) => {
+                return self
+                    .engine
+                    .build_failed(
                         now,
-                        built.hash,
-                        StagedFacts {
-                            sender: self.mls.own_id().clone(),
-                            epoch: self.mls.epoch(),
-                            actions: built.actions,
-                            proposal_count: built.proposal_count,
-                            self_removed: false,
-                        },
+                        refused.reason,
+                        refused.rejected,
                         &mut Sealer::over(&self.mls, &mut self.outbox),
                     )
-                }
-            }
-            Decision::Merge { hash } => match self.merge(hash) {
-                Ok(()) => {
-                    self.rejected_commits.clear();
-                    self.staged_hashes.clear();
-                    let out = self.engine.commit_applied(
-                        now,
-                        hash,
-                        &self.mls,
-                        &mut Sealer::over(&self.mls, &mut self.outbox),
-                    );
-                    if out.is_ok() {
-                        self.deliver_welcome(hash);
-                    }
-                    out
-                }
-                Err(reason) => Err(reason),
-            },
-            Decision::Discard { hashes } => {
-                for hash in hashes {
-                    self.mls.discard(hash);
-                }
-                Ok(Output::default())
-            }
-            Decision::Leave => {
-                self.mls.delete();
-                self.left = true;
-                Ok(Output::default())
+                    .unwrap_or_default();
             }
         };
-        match result {
-            Ok(out) => out,
-            Err(reason) => self
+        if let Some(draft) = built.welcome {
+            self.welcomes.insert(built.hash.clone(), draft);
+        }
+        self.outbox.push(Frame::Commit(built.commit));
+        let facts = StagedFacts {
+            sender: self.mls.own_id().clone(),
+            epoch: self.mls.epoch(),
+            actions: built.actions,
+            self_removed: false,
+        };
+        self.report_candidate(now, built.hash, facts)
+            .unwrap_or_default()
+    }
+
+    fn apply(&mut self, now: Timestamp, hash: CommitHash) -> Output {
+        if let Err(reason) = self.merge(hash.clone()) {
+            return self
                 .engine
-                .decision_failed(
+                .merge_failed(
                     now,
-                    DecisionFailure {
-                        decision,
-                        reason: reason.to_string(),
-                        rejected: Vec::new(),
-                    },
+                    reason.to_string(),
                     &mut Sealer::over(&self.mls, &mut self.outbox),
                 )
-                .unwrap_or_default(),
+                .unwrap_or_default();
         }
+        self.rejected_commits.clear();
+        self.staged_hashes.clear();
+        let out = self.engine.commit_applied(
+            now,
+            hash.clone(),
+            &self.mls,
+            &mut Sealer::over(&self.mls, &mut self.outbox),
+        );
+        if out.is_ok() {
+            self.deliver_welcome(hash);
+        }
+        if !self.mls.is_active() {
+            self.mls.delete();
+            self.left = true;
+            self.steps.push(Step::Leave);
+        }
+        out.unwrap_or_default()
     }
 
     /// A commit received outside the live path, merged on the router's own
     /// trust and reported after the fact.
     pub fn adopt_commit(&mut self, now: Timestamp, bytes: Vec<u8>) {
         self.mls.stage(&bytes).expect("stage the adopted commit");
-        let hash = CommitHash::of(&bytes);
-        self.merge(hash).expect("merge the adopted commit");
+        let hash = commit_hash(&bytes);
+        self.merge(hash.clone()).expect("merge the adopted commit");
         let out = self.engine.commit_applied(
             now,
             hash,
@@ -691,7 +692,7 @@ impl FakeRouter {
     }
 
     fn merge(&mut self, hash: CommitHash) -> Result<(), de_mls::ConversationError> {
-        if self.mls.pending_hash() != Some(hash) {
+        if self.mls.pending_hash().as_ref() != Some(&hash) {
             self.mls.clear_pending();
         }
         self.mls
@@ -848,14 +849,14 @@ impl Bed {
         let built = creator.mls.build_commit(&actions).expect("seed build");
         let hash = built.hash;
         if let Some(draft) = built.welcome {
-            creator.welcomes.insert(hash, draft);
+            creator.welcomes.insert(hash.clone(), draft);
         }
-        creator.mls.merge(hash).expect("seed merge");
+        creator.mls.merge(hash.clone()).expect("seed merge");
         let out = creator
             .engine
             .commit_applied(
                 now,
-                hash,
+                hash.clone(),
                 &creator.mls,
                 &mut Sealer::over(&creator.mls, &mut creator.outbox),
             )

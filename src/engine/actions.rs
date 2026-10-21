@@ -80,8 +80,7 @@ impl<St: EngineStore> Engine<St> {
     }
 
     /// Leave the conversation. The engine stays live until a commit merges
-    /// the removal; that commit lands as
-    /// [`Decision::Leave`](crate::engine::Decision::Leave).
+    /// the removal; the application sees the removal in that commit.
     pub fn leave(
         &mut self,
         now: Timestamp,
